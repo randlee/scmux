@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tms-daemon",
-    "crates/tms",
+    "crates/scmux-daemon",
+    "crates/scmux",
 ]
 
 [workspace.package]
@@ -11,6 +11,9 @@ edition = "2021"
 authors = ["scmux contributors"]
 license = "MIT"
 repository = "https://github.com/randlee/scmux"
+description = "tmux session manager for multi-agent Claude Code teams"
+keywords = ["tmux", "session", "claude", "agent", "multiplexer"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 # Async
@@ -38,7 +41,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-appender = "0.2"
 
 # Error handling
 anyhow = "1"
+
+# Testing
+tempfile = "3"

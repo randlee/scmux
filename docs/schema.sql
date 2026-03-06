@@ -1,6 +1,6 @@
 -- =============================================================================
--- tms (tmux session manager) schema
--- One SQLite database per host, located at ~/.config/tms/tms.db
+-- scmux (tmux session manager) schema
+-- One SQLite database per host, located at ~/.config/scmux/scmux.db
 -- =============================================================================
 
 PRAGMA journal_mode = WAL;

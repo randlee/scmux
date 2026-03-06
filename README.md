@@ -5,21 +5,16 @@ tmux session manager for multi-agent Claude Code teams.
 ## What it does
 
 - **Declarative session configs** stored in SQLite (tmuxp JSON format)
-- **Per-machine daemon** (`tms-daemon`) polls tmux, auto-starts scheduled sessions, serves HTTP status API
+- **Per-machine daemon** (`scmux-daemon`) polls tmux, auto-starts scheduled sessions, serves HTTP status API
 - **Web dashboard** shows all teams across all hosts — agent status, open PRs, jump-to-session via WezTerm
 
 ## Structure
 
 ```
 scmux/
-├── tms-daemon/          # Rust daemon (per machine)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs      # Entry point, task spawning
-│       ├── db.rs        # SQLite helpers + migration
-│       ├── tmux.rs      # tmux/tmuxp subprocess calls
-│       ├── scheduler.rs # Poll cycle, cron, auto-start
-│       └── api.rs       # axum HTTP handlers
+├── crates/
+│   ├── scmux-daemon/      # Rust daemon (per machine)
+│   └── scmux/             # CLI client
 ├── dashboard/
 │   ├── team-dashboard.jsx  # React dashboard (grid/list/grouped views)
 │   └── README.md
@@ -34,9 +29,9 @@ scmux/
 ### Daemon
 
 ```bash
-cd tms-daemon
+cd crates/scmux-daemon
 cargo build --release
-TMS_PORT=7700 ./target/release/tms-daemon
+SCMUX_PORT=7700 ./target/release/scmux-daemon
 ```
 
 ### Dashboard
@@ -71,5 +66,5 @@ See [docs/architecture.md](docs/architecture.md) for the full design including m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TMS_DB` | `~/.config/tms/tms.db` | SQLite database path |
-| `TMS_PORT` | `7700` | HTTP API port |
+| `SCMUX_DB` | `~/.config/scmux/scmux.db` | SQLite database path |
+| `SCMUX_PORT` | `7700` | HTTP API port |
