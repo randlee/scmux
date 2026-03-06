@@ -9,23 +9,12 @@ pub struct Config {
     pub hosts: Vec<HostConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct DaemonConfig {
     pub port: Option<u16>,
     pub db_path: Option<String>,
     pub default_terminal: Option<String>,
     pub log_level: Option<String>,
-}
-
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            port: None,
-            db_path: None,
-            default_terminal: None,
-            log_level: None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Default)]
