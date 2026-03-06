@@ -1,10 +1,10 @@
 [package]
-name = "tms"
+name = "scmux"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "tms"
+name = "scmux"
 path = "src/main.rs"
 
 [dependencies]

@@ -25,7 +25,7 @@ npm run dev
 # Paste team-dashboard.jsx contents into a Claude artifact
 ```
 
-## Connecting to tms-daemon
+## Connecting to scmux-daemon
 
 Replace the static `TEAMS` array with a `useEffect` fetch from your daemon:
 

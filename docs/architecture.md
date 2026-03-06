@@ -7,7 +7,7 @@ scmux solves a specific problem: when running 20–30 concurrent Claude Code age
 scmux provides:
 - A **daemon** per machine — sole owner of SQLite, session lifecycle, CI polling, and terminal launch
 - A **web dashboard** — browser UI, read/command only, talks to daemon via HTTP
-- A **CLI** (`tms`) — shell client, same HTTP API as the web UI
+- A **CLI** (`scmux`) — shell client, same HTTP API as the web UI
 - **Graceful degradation** — missing tools, unreachable hosts, and VPN gaps are normal operating conditions, not errors
 
 ## 2. Core Design Principles
@@ -25,8 +25,8 @@ scmux provides:
 ```
 ┌─ Mac Studio ────────────────────────────────────────────┐
 │                                                         │
-│  tms-daemon  (HTTP :7700)                               │
-│  ├── SQLite  ~/.config/tms/tms.db  (SSOT)              │
+│  scmux-daemon  (HTTP :7700)                               │
+│  ├── SQLite  ~/.config/scmux/scmux.db  (SSOT)              │
 │  ├── poll_loop        every 15s  → tmux ls              │
 │  ├── ci_loop          adaptive   → gh / az cli          │
 │  ├── health_loop      every 60s  → heartbeat            │
@@ -34,13 +34,13 @@ scmux provides:
 │                                                         │
 │  Clients:                                               │
 │  ├── Browser  →  dashboard (static files from daemon)   │
-│  └── tms CLI  →  same HTTP API                          │
+│  └── scmux CLI  →  same HTTP API                          │
 │                                                         │
 └──────────────────────────┬──────────────────────────────┘
                            │ HTTP :7700
 ┌─ DGX Spark ──────────────┼──────────────────────────────┐
-│  tms-daemon  (HTTP :7700)│                               │
-│  SQLite  ~/.config/tms/tms.db                           │
+│  scmux-daemon  (HTTP :7700)│                               │
+│  SQLite  ~/.config/scmux/scmux.db                           │
 │  ... (same structure)                                   │
 └──────────────────────────┼──────────────────────────────┘
                            │
@@ -53,7 +53,7 @@ scmux provides:
                            │ POST /sessions/:name/jump
                            │
                   ┌────────▼────────┐
-                  │  tms-daemon     │
+                  │  scmux-daemon     │
                   │  spawns iTerm2  │
                   │  returns status │
                   └─────────────────┘
@@ -61,10 +61,10 @@ scmux provides:
 
 ## 4. Components
 
-### 4.1 tms-daemon
+### 4.1 scmux-daemon
 
 **Language:** Rust
-**Binary:** `tms-daemon`
+**Binary:** `scmux-daemon`
 **Owns:** SQLite database, tmux lifecycle, CI polling, terminal launch, HTTP server, static file serving
 
 #### Internal task structure
@@ -106,7 +106,7 @@ main()
 pub struct AppState {
     pub db:      Mutex<rusqlite::Connection>,
     pub host_id: i64,
-    pub config:  Config,   // loaded from tms.toml at startup
+    pub config:  Config,   // loaded from scmux.toml at startup
 }
 ```
 
@@ -158,7 +158,7 @@ This approach gives a clean new iTerm2 window with the session attached, no URI 
 
 #### Future terminal support
 
-WezTerm and Warp support added later via the same `POST /sessions/:name/jump` endpoint — just different spawn logic in the daemon. The `terminal` field in the request selects the handler. Default terminal configured in `tms.toml`.
+WezTerm and Warp support added later via the same `POST /sessions/:name/jump` endpoint — just different spawn logic in the daemon. The `terminal` field in the request selects the handler. Default terminal configured in `scmux.toml`.
 
 ### 4.3 CI Integration
 
@@ -210,7 +210,7 @@ Dashboard renders this as a grayed badge with tooltip.
 
 #### Host discovery
 
-Hosts are defined in `tms.toml` (version-controlled, seeded into SQLite on first run). Once in SQLite, the daemon monitors them actively.
+Hosts are defined in `scmux.toml` (version-controlled, seeded into SQLite on first run). Once in SQLite, the daemon monitors them actively.
 
 ```toml
 [daemon]
@@ -249,49 +249,49 @@ No error dialogs. No red alerts. Monochrome = "we have stale data, host is away.
 
 When the host returns (VPN reconnects, machine wakes), the next poll cycle picks it up automatically and resumes full color.
 
-### 4.5 tms CLI
+### 4.5 scmux CLI
 
-**Binary:** `tms` (separate from `tms-daemon`)
-**Talks to:** `tms-daemon` HTTP API (same endpoints as web UI)
+**Binary:** `scmux` (separate from `scmux-daemon`)
+**Talks to:** `scmux-daemon` HTTP API (same endpoints as web UI)
 
 The CLI is a thin HTTP client. All business logic lives in the daemon.
 
 ```bash
 # Session management
-tms list                          # all sessions + status
-tms list --project radiant-p3     # filtered
-tms show ui-template              # full detail + recent events
-tms start ui-template
-tms stop ui-template
-tms jump ui-template              # daemon launches iTerm2
+scmux list                          # all sessions + status
+scmux list --project radiant-p3     # filtered
+scmux show ui-template              # full detail + recent events
+scmux start ui-template
+scmux stop ui-template
+scmux jump ui-template              # daemon launches iTerm2
 
 # Session registration
-tms add --name ui-template \
+scmux add --name ui-template \
         --project radiant-p3 \
         --config ./ui-template.json \
         --auto-start
 
-tms edit ui-template --cron "0 9 * * 1-5"
-tms disable ui-template
-tms enable ui-template
-tms remove ui-template
+scmux edit ui-template --cron "0 9 * * 1-5"
+scmux disable ui-template
+scmux enable ui-template
+scmux remove ui-template
 
 # Host management
-tms hosts                         # list hosts + reachability
-tms host add --name dgx-spark \
+scmux hosts                         # list hosts + reachability
+scmux host add --name dgx-spark \
              --address 192.168.1.50 \
              --ssh-user randlee
 
 # Daemon control
-tms daemon status
-tms daemon restart
+scmux daemon status
+scmux daemon restart
 ```
 
-CLI connects to daemon at `http://localhost:7700` by default. Override with `TMS_HOST` env var or `--host` flag for managing remote hosts directly.
+CLI connects to daemon at `http://localhost:7700` by default. Override with `SCMUX_HOST` env var or `--host` flag for managing remote hosts directly.
 
 ### 4.6 Dashboard
 
-**Served by:** `tms-daemon` as static files at `/`
+**Served by:** `scmux-daemon` as static files at `/`
 **Framework:** React (single JSX file for dev; Vite build for production embedding)
 
 The dashboard is configuration-aware via `GET /dashboard-config.json`:
@@ -311,11 +311,11 @@ Dashboard polls each host's `/sessions` endpoint independently. Unreachable host
 
 ## 5. SQLite Schema Summary
 
-One database per machine at `~/.config/tms/tms.db`. Schema applied via migration on daemon startup.
+One database per machine at `~/.config/scmux/scmux.db`. Schema applied via migration on daemon startup.
 
 | Table | Purpose | Written by |
 |-------|---------|-----------|
-| `hosts` | Known machines | daemon (seeded from tms.toml) |
+| `hosts` | Known machines | daemon (seeded from scmux.toml) |
 | `sessions` | Session definitions + configs | daemon (via CLI/API) |
 | `session_status` | Live tmux state | poll_loop only |
 | `session_events` | Immutable start/stop log | poll_loop + API handlers |
@@ -326,12 +326,12 @@ One database per machine at `~/.config/tms/tms.db`. Schema applied via migration
 
 ## 6. Configuration
 
-`~/.config/tms/tms.toml` — loaded at daemon startup, seeds SQLite if tables are empty.
+`~/.config/scmux/scmux.toml` — loaded at daemon startup, seeds SQLite if tables are empty.
 
 ```toml
 [daemon]
 port = 7700
-db_path = "~/.config/tms/tms.db"
+db_path = "~/.config/scmux/scmux.db"
 default_terminal = "iterm2"
 log_level = "info"
 
@@ -359,7 +359,7 @@ The daemon is a long-running process. Supervision keeps it alive across reboots 
 
 ### macOS (launchd)
 
-`~/Library/LaunchAgents/com.scmux.tms-daemon.plist`:
+`~/Library/LaunchAgents/com.scmux.scmux-daemon.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -367,32 +367,32 @@ The daemon is a long-running process. Supervision keeps it alive across reboots 
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.scmux.tms-daemon</string>
+  <key>Label</key><string>com.scmux.scmux-daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/tms-daemon</string>
+    <string>/usr/local/bin/scmux-daemon</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/tms-daemon.log</string>
-  <key>StandardErrorPath</key><string>/tmp/tms-daemon.err</string>
+  <key>StandardOutPath</key><string>/tmp/scmux-daemon.log</string>
+  <key>StandardErrorPath</key><string>/tmp/scmux-daemon.err</string>
 </dict>
 </plist>
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.scmux.tms-daemon.plist
+launchctl load ~/Library/LaunchAgents/com.scmux.scmux-daemon.plist
 ```
 
 ### Linux (systemd)
 
 ```ini
 [Unit]
-Description=tms-daemon
+Description=scmux-daemon
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/tms-daemon
+ExecStart=/usr/local/bin/scmux-daemon
 Restart=always
 RestartSec=5
 
@@ -404,16 +404,17 @@ WantedBy=default.target
 
 ```
 scmux/
-├── tms-daemon/          # Cargo workspace member — HTTP daemon + SQLite
-├── tms/                 # Cargo workspace member — CLI client
-├── dashboard/           # React source (built output embedded in tms-daemon)
+├── crates/
+│   ├── scmux-daemon/      # Cargo workspace member — HTTP daemon + SQLite
+│   └── scmux/             # Cargo workspace member — CLI client
+├── dashboard/           # React source (built output embedded in scmux-daemon)
 ├── docs/
 │   ├── architecture.md
 │   ├── requirements.md
 │   ├── schema.sql
 │   └── example-session.json
 ├── Cargo.toml           # workspace root
-└── tms.toml.example     # reference config
+└── scmux.toml.example     # reference config
 ```
 
 ```bash
@@ -421,11 +422,11 @@ scmux/
 cargo build --release --workspace
 
 # Install
-cp target/release/tms-daemon /usr/local/bin/
-cp target/release/tms        /usr/local/bin/
+cp target/release/scmux-daemon /usr/local/bin/
+cp target/release/scmux       /usr/local/bin/
 
 # Run
-tms-daemon
+scmux-daemon
 ```
 
 ## 9. Future Work
@@ -435,8 +436,8 @@ tms-daemon
 | WezTerm jump | AppleScript equivalent or `wezterm` CLI via daemon |
 | Warp jump | Monitor for URI scheme support |
 | Browser terminal | ttyd integration for remote sessions without local terminal |
-| Dashboard build pipeline | Embed built React into tms-daemon binary via `include_str!` |
-| `tms edit` TUI | Interactive session config editor |
+| Dashboard build pipeline | Embed built React into scmux-daemon binary via `include_str!` |
+| `scmux edit` TUI | Interactive session config editor |
 | Azure DevOps deep integration | PR links, pipeline status, work items |
 | Host auto-discovery | mDNS broadcast from daemon |
 | Session templates | Parameterized configs for spinning up new teams quickly |

@@ -36,11 +36,11 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement |
 |----|-------------|
-| DG-01 | The daemon shall be a single self-contained binary (`tms-daemon`) |
+| DG-01 | The daemon shall be a single self-contained binary (`scmux-daemon`) |
 | DG-02 | The daemon shall own all SQLite writes; no other component writes to the database |
 | DG-03 | The daemon shall serve the web dashboard as static files at `GET /` |
-| DG-04 | The daemon shall load configuration from `~/.config/tms/tms.toml` at startup |
-| DG-05 | The daemon shall seed the SQLite `hosts` table from `tms.toml` on first run if the table is empty |
+| DG-04 | The daemon shall load configuration from `~/.config/scmux/scmux.toml` at startup |
+| DG-05 | The daemon shall seed the SQLite `hosts` table from `scmux.toml` on first run if the table is empty |
 | DG-06 | The daemon shall apply SQLite schema migrations on every startup (idempotent) |
 | DG-07 | The daemon shall log structured output via `tracing` at INFO level by default |
 
@@ -81,7 +81,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | TL-04 | For a local session, the command shall be: `tmux attach -t <name>` |
 | TL-05 | For a remote session, the command shall be: `ssh <user>@<host> tmux attach -t <name>` |
 | TL-06 | The jump endpoint shall return `{ ok, message }` indicating success or failure |
-| TL-07 | The default terminal shall be configurable in `tms.toml` |
+| TL-07 | The default terminal shall be configurable in `scmux.toml` |
 | TL-08 | A `terminal` field in the jump request body may override the default |
 
 ### 4.5 Daemon — CI Integration
@@ -137,7 +137,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement |
 |----|-------------|
-| MH-01 | Hosts shall be defined in `tms.toml` and seeded into SQLite on first run |
+| MH-01 | Hosts shall be defined in `scmux.toml` and seeded into SQLite on first run |
 | MH-02 | The dashboard shall poll all known hosts independently |
 | MH-03 | A host that is unreachable (timeout, network error) shall NOT be treated as an error condition |
 | MH-04 | When a host is unreachable, the daemon shall retain the last known session data |
@@ -185,24 +185,24 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DJ-06 | The modal shall show success or failure feedback from the daemon response |
 | DJ-07 | The modal shall be dismissible via Escape or clicking outside |
 
-### 4.12 CLI (`tms`)
+### 4.12 CLI (`scmux`)
 
 | ID | Requirement |
 |----|-------------|
-| CLI-01 | `tms` shall be a separate binary from `tms-daemon` |
-| CLI-02 | `tms` shall communicate exclusively via the daemon HTTP API |
-| CLI-03 | Default daemon URL: `http://localhost:7700`; override with `TMS_HOST` env var or `--host` flag |
-| CLI-04 | `tms list` — list sessions with status |
-| CLI-05 | `tms show <name>` — full session detail |
-| CLI-06 | `tms start <name>` — start session |
-| CLI-07 | `tms stop <name>` — stop session |
-| CLI-08 | `tms jump <name>` — launch terminal via daemon |
-| CLI-09 | `tms add --name --project --config --auto-start` — register session |
-| CLI-10 | `tms edit <name> [--cron] [--auto-start] [--config]` — update session |
-| CLI-11 | `tms disable <name>` / `tms enable <name>` — toggle enabled flag |
-| CLI-12 | `tms remove <name>` — delete session |
-| CLI-13 | `tms hosts` — list hosts with reachability |
-| CLI-14 | `tms daemon status` — show daemon health |
+| CLI-01 | `scmux` shall be a separate binary from `scmux-daemon` |
+| CLI-02 | `scmux` shall communicate exclusively via the daemon HTTP API |
+| CLI-03 | Default daemon URL: `http://localhost:7700`; override with `SCMUX_HOST` env var or `--host` flag |
+| CLI-04 | `scmux list` — list sessions with status |
+| CLI-05 | `scmux show <name>` — full session detail |
+| CLI-06 | `scmux start <name>` — start session |
+| CLI-07 | `scmux stop <name>` — stop session |
+| CLI-08 | `scmux jump <name>` — launch terminal via daemon |
+| CLI-09 | `scmux add --name --project --config --auto-start` — register session |
+| CLI-10 | `scmux edit <name> [--cron] [--auto-start] [--config]` — update session |
+| CLI-11 | `scmux disable <name>` / `scmux enable <name>` — toggle enabled flag |
+| CLI-12 | `scmux remove <name>` — delete session |
+| CLI-13 | `scmux hosts` — list hosts with reachability |
+| CLI-14 | `scmux daemon status` — show daemon health |
 
 ### 4.13 Session Registry
 
@@ -323,8 +323,8 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-E-07 | Dashboard loads → shows real data from daemon |
 | T-E-08 | Disconnect from VPN → remote host goes monochrome, no error dialog |
 | T-E-09 | Reconnect VPN → remote host resumes full color |
-| T-E-10 | `tms list` → matches dashboard data |
-| T-E-11 | `tms jump <name>` → iTerm2 opens via daemon |
+| T-E-10 | `scmux list` → matches dashboard data |
+| T-E-11 | `scmux jump <name>` → iTerm2 opens via daemon |
 
 ---
 
@@ -352,5 +352,5 @@ The system is complete when:
 | OQ-1 | Dashboard served separately or by daemon? | Daemon serves static files at `/`. Single binary. |
 | OQ-2 | How does browser trigger terminal launch? | `POST /sessions/:name/jump` → daemon spawns iTerm2 via AppleScript. No URI schemes. |
 | OQ-3 | PR data: daemon or dashboard? | Daemon fetches via `gh`/`az` CLI. Adaptive interval: 1min active, 5min idle. Missing tools show gracefully. |
-| OQ-4 | Multi-host config location? | `tms.toml` seeds SQLite. Hosts monitored continuously. VPN gaps are normal — monochrome, no errors. |
-| OQ-5 | `tms` CLI scope? | Separate binary, HTTP client to daemon. Same API as web UI. Daemon is sole SQLite writer. |
+| OQ-4 | Multi-host config location? | `scmux.toml` seeds SQLite. Hosts monitored continuously. VPN gaps are normal — monochrome, no errors. |
+| OQ-5 | `scmux` CLI scope? | Separate binary, HTTP client to daemon. Same API as web UI. Daemon is sole SQLite writer. |
