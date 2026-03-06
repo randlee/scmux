@@ -2,18 +2,19 @@ use std::sync::OnceLock;
 
 static INIT: OnceLock<()> = OnceLock::new();
 
-pub(crate) fn parse_level() -> tracing::Level {
-    match std::env::var("SCMUX_LOG")
-        .unwrap_or_else(|_| "info".to_string())
-        .to_ascii_lowercase()
-        .as_str()
-    {
+pub(crate) fn parse_level_from(val: Option<&str>) -> tracing::Level {
+    match val.unwrap_or("info").to_ascii_lowercase().as_str() {
         "trace" => tracing::Level::TRACE,
         "debug" => tracing::Level::DEBUG,
         "warn" => tracing::Level::WARN,
         "error" => tracing::Level::ERROR,
         _ => tracing::Level::INFO,
     }
+}
+
+pub(crate) fn parse_level() -> tracing::Level {
+    let value = std::env::var("SCMUX_LOG").ok();
+    parse_level_from(value.as_deref())
 }
 
 fn _init_stderr() {
@@ -98,9 +99,7 @@ fn setup_daemon_writer(
         return Ok(LoggingGuards::empty());
     }
 
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    ensure_log_dir(&file_path)?;
     let file_name = file_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -128,78 +127,36 @@ fn setup_daemon_writer(
     })
 }
 
+pub(crate) fn ensure_log_dir(file_path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// T-D-14: init_logging() with DaemonWriter mode creates the parent directory for the log file.
-    /// Uses a tempdir so this test is side-effect-free and does not touch ~/.config/scmux/.
+    /// T-D-14: ensure_log_dir() creates the parent directory for the log file.
     #[test]
-    fn td_14_daemon_writer_creates_log_directory() {
+    fn td_14_ensure_log_dir_creates_parent_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let log_path = dir.path().join("subdir").join("scmux-daemon.log");
-
-        // The subdirectory does not exist yet — init_logging must create it.
-        assert!(!log_path.parent().unwrap().exists());
-
-        // init_logging may fail if a global subscriber is already installed (other tests),
-        // but the directory creation happens before subscriber registration, so we only
-        // check the filesystem outcome.
-        let _ = init_logging(
-            "test",
-            UnifiedLogMode::DaemonWriter {
-                file_path: log_path.clone(),
-                rotation: RotationConfig::default(),
-            },
-        );
-
-        assert!(
-            log_path.parent().unwrap().exists(),
-            "parent directory was not created by init_logging DaemonWriter"
-        );
+        let log_path = dir.path().join("nested/scmux-daemon.log");
+        ensure_log_dir(&log_path).expect("ensure log dir");
+        assert!(log_path.parent().expect("parent").exists());
     }
 
-    /// T-D-15: parse_level() returns Level::WARN when SCMUX_LOG=warn.
+    /// T-D-15: parse_level_from() resolves warn correctly.
     #[test]
-    fn td_15_parse_level_returns_warn_for_scmux_log_warn() {
-        // Use a sub-process-safe approach: set env var, call parse_level, restore.
-        // This is safe in a single-threaded test context.
-        let prev = std::env::var("SCMUX_LOG").ok();
-        // SAFETY: test-only env mutation around immediate parse_level() call.
-        unsafe { std::env::set_var("SCMUX_LOG", "warn") };
-        let level = parse_level();
-        match prev {
-            Some(v) => {
-                // SAFETY: restoring env var in test teardown.
-                unsafe { std::env::set_var("SCMUX_LOG", v) }
-            }
-            None => {
-                // SAFETY: restoring env var in test teardown.
-                unsafe { std::env::remove_var("SCMUX_LOG") }
-            }
-        }
-        assert_eq!(level, tracing::Level::WARN);
+    fn td_15_parse_level_returns_warn() {
+        assert_eq!(parse_level_from(Some("warn")), tracing::Level::WARN);
     }
 
-    /// T-D-16: parse_level() returns Level::DEBUG when SCMUX_LOG=debug.
-    /// This also covers the --verbose flag path: main.rs sets SCMUX_LOG=debug when --verbose
-    /// is passed, and parse_level() is called immediately after.
+    /// T-D-16: parse_level_from() resolves debug correctly.
+    /// This covers the --verbose path because main.rs resolves verbose to "debug".
     #[test]
-    fn td_16_parse_level_returns_debug_for_scmux_log_debug() {
-        let prev = std::env::var("SCMUX_LOG").ok();
-        // SAFETY: test-only env mutation around immediate parse_level() call.
-        unsafe { std::env::set_var("SCMUX_LOG", "debug") };
-        let level = parse_level();
-        match prev {
-            Some(v) => {
-                // SAFETY: restoring env var in test teardown.
-                unsafe { std::env::set_var("SCMUX_LOG", v) }
-            }
-            None => {
-                // SAFETY: restoring env var in test teardown.
-                unsafe { std::env::remove_var("SCMUX_LOG") }
-            }
-        }
-        assert_eq!(level, tracing::Level::DEBUG);
+    fn td_16_parse_level_returns_debug() {
+        assert_eq!(parse_level_from(Some("debug")), tracing::Level::DEBUG);
     }
 }

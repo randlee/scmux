@@ -35,11 +35,29 @@ pub struct HostConfig {
 }
 
 /// Loads config from TOML. Missing file is not an error and returns defaults.
-pub fn load_config(path: &Path) -> anyhow::Result<Config> {
+pub fn load_config(path: Option<&Path>) -> anyhow::Result<Config> {
+    let Some(path) = path else {
+        return Ok(Config::default());
+    };
     if !path.exists() {
         return Ok(Config::default());
     }
     let raw = std::fs::read_to_string(path)?;
     let cfg = toml::from_str::<Config>(&raw)?;
     Ok(cfg)
+}
+
+impl Config {
+    pub fn load() -> anyhow::Result<Self> {
+        let config_path = std::env::var("SCMUX_CONFIG")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".config/scmux/scmux.toml"))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("scmux.toml"));
+        load_config(Some(&config_path))
+    }
 }

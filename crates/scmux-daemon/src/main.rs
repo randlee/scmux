@@ -1,21 +1,9 @@
-mod api;
-mod config;
-mod db;
-mod logging;
-mod scheduler;
-mod tmux;
-
 use clap::Parser;
-use config::Config;
+use scmux_daemon::config::Config;
+use scmux_daemon::{api, db, logging, scheduler, AppState};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
-
-pub struct AppState {
-    pub db: std::sync::Mutex<rusqlite::Connection>,
-    pub host_id: i64,
-    pub config: Config,
-}
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
@@ -31,21 +19,18 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if args.verbose {
-        // SAFETY: called at startup before the tokio runtime spawns any threads.
-        unsafe { std::env::set_var("SCMUX_LOG", "debug") };
-    }
-
     let home_dir = home_dir();
-    let config_path = std::env::var("SCMUX_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir.join(".config/scmux/scmux.toml"));
-    let config = config::load_config(&config_path)?;
-
-    if let Some(log_level) = config.daemon.log_level.as_deref() {
-        // SAFETY: called at startup before the tokio runtime spawns any threads.
-        unsafe { std::env::set_var("SCMUX_LOG", log_level) };
-    }
+    let config = Config::load()?;
+    // Determine effective log level: --verbose > config > SCMUX_LOG env var > default
+    let effective_level = if args.verbose {
+        "debug".to_string()
+    } else if let Some(ref level) = config.daemon.log_level {
+        level.clone()
+    } else {
+        std::env::var("SCMUX_LOG").unwrap_or_else(|_| "info".to_string())
+    };
+    // SAFETY: single-threaded startup, no tokio workers yet.
+    unsafe { std::env::set_var("SCMUX_LOG", &effective_level) };
 
     let log_path = home_dir.join(".config/scmux/scmux-daemon.log");
     let _log_guards = logging::init_logging(
@@ -69,7 +54,9 @@ async fn main() -> anyhow::Result<()> {
                 .to_string()
         });
 
-    std::fs::create_dir_all(std::path::Path::new(&db_path).parent().unwrap())?;
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     let conn = db::open(&db_path)?;
     db::seed_hosts_from_config(
