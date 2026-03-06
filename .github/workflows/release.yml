@@ -51,21 +51,30 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package archive
+      - name: Package archive (unix)
+        if: matrix.archive_ext == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="scmux-${TAG}-${{ matrix.target }}.${{ matrix.archive_ext }}"
+          ARCHIVE="scmux-${TAG}-${{ matrix.target }}.tar.gz"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/scmux${{ matrix.binary_ext }}" "dist/scmux${{ matrix.binary_ext }}"
-          cp "target/${{ matrix.target }}/release/scmux-daemon${{ matrix.binary_ext }}" "dist/scmux-daemon${{ matrix.binary_ext }}"
-          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
-            cd dist && zip "../${ARCHIVE}" "scmux${{ matrix.binary_ext }}" "scmux-daemon${{ matrix.binary_ext }}" && cd ..
-          else
-            tar -czf "${ARCHIVE}" -C dist "scmux${{ matrix.binary_ext }}" "scmux-daemon${{ matrix.binary_ext }}"
-          fi
+          cp "target/${{ matrix.target }}/release/scmux" dist/
+          cp "target/${{ matrix.target }}/release/scmux-daemon" dist/
+          tar -czf "${ARCHIVE}" -C dist scmux scmux-daemon
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Package archive (windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $TAG = $env:GITHUB_REF_NAME
+          $ARCHIVE = "scmux-$TAG-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/scmux.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/scmux-daemon.exe" dist/
+          Compress-Archive -Path dist/scmux.exe,dist/scmux-daemon.exe -DestinationPath $ARCHIVE
+          echo "ARCHIVE=$ARCHIVE" >> $env:GITHUB_ENV
 
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
@@ -104,25 +113,5 @@ jobs:
             release/*.zip
             release/checksums.txt
 
-  publish-crates:
-    needs: [release]
-    runs-on: ubuntu-latest
-    environment: crates-io
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish scmux-daemon
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p scmux-daemon --locked
-
-      - name: Wait for crates.io indexing
-        run: sleep 60
-
-      - name: Publish scmux
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p scmux --locked
+  # crates.io publish deferred — daemon embeds dashboard assets that are
+  # outside the crate directory; not suitable for cargo install distribution.

@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "scmux"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "scmux-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
