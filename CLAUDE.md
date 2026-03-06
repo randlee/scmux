@@ -27,9 +27,9 @@
 ## Project Overview
 
 **scmux** is a tmux session manager for multi-agent Claude Code teams:
-- Per-machine Rust daemon (`tms-daemon`) — sole owner of SQLite, session lifecycle, CI polling, terminal launch, HTTP API
+- Per-machine Rust daemon (`scmux-daemon`) — sole owner of SQLite, session lifecycle, CI polling, terminal launch, HTTP API
 - React web dashboard — read/command only, polls daemon via HTTP
-- Rust CLI (`tms`) — thin HTTP client, same API as web UI
+- Rust CLI (`scmux`) — thin HTTP client, same API as web UI
 - Graceful degradation — missing tools, unreachable hosts, VPN gaps are normal operating conditions
 
 **Goal**: A single place to see all running agent sessions across all machines, jump to any session in ≤2 clicks, and auto-start/schedule sessions without manual intervention.
@@ -47,7 +47,7 @@
 | S0 | Fix cargo check, workspace scaffold, config loader, DB migrations |
 | S1 | Session lifecycle, missing API endpoints, event logging |
 | S2 | iTerm2 jump, multi-host reachability, live dashboard |
-| S3 | CI integration (gh/az), tms CLI binary |
+| S3 | CI integration (gh/az), scmux CLI binary |
 | S4 | Hardening, launchd/systemd, E2E acceptance tests |
 
 ---
@@ -130,7 +130,7 @@ tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --te
 
 ## Design Rules (Enforce Always)
 
-1. **Only `tms-daemon` writes to SQLite** — CLI and web UI are pure HTTP clients
+1. **Only `scmux-daemon` writes to SQLite** — CLI and web UI are pure HTTP clients
 2. **Browser never spawns terminals** — jump always goes through `POST /sessions/:name/jump` → daemon → AppleScript
 3. **Unreachable hosts = monochrome + last-known data** — never an error dialog
 4. **Missing `gh`/`az` = `tool_unavailable` in `session_ci` table** — rest of system unaffected

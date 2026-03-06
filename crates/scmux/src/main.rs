@@ -1,3 +1,3 @@
 fn main() {
-    println!("tms CLI — not yet implemented");
+    println!("scmux CLI — not yet implemented");
 }

@@ -76,7 +76,7 @@ async fn list_panes(session: &str) -> anyhow::Result<Vec<PaneInfo>> {
 
 pub async fn start_session(name: &str, config_json: &str) -> anyhow::Result<()> {
     // Write config to a temp file and load with tmuxp
-    let tmp = std::env::temp_dir().join(format!("tms-{name}.json"));
+    let tmp = std::env::temp_dir().join(format!("scmux-{name}.json"));
     tokio::fs::write(&tmp, config_json).await?;
 
     let out = Command::new("tmuxp")
