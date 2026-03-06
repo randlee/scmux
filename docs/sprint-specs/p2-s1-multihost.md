@@ -28,10 +28,13 @@ pub struct AppState {
     pub db: std::sync::Mutex<rusqlite::Connection>,
     pub config: Config,
     pub reachability: std::sync::Mutex<std::collections::HashMap<i64, hosts::HostReachability>>,
+    pub last_api_access: std::sync::atomic::AtomicU64,  // monotonic millis since process start
 }
 ```
 
 `HostReachability` tracks consecutive failure count for debounce (see below).
+
+**Note on `last_api_access`**: Use `AtomicU64` storing milliseconds elapsed since process start (via `Instant`). This is lock-free for the hot request path. Avoid `Mutex<Instant>` to prevent contention, and avoid wall-clock epoch ms to avoid clock-jump skew on the 60s freshness gate.
 
 ## Probe Mechanism
 
@@ -80,7 +83,7 @@ pub struct HostReachability {
 
 - **Active** (any API request in last 60s AND host has live sessions): probe every `health_interval_secs` (default 30s).
 - **Idle** (no recent API requests OR no live sessions on host): probe every `health_interval_secs * 10` (default 5 min).
-- Track `last_api_access: Instant` in `AppState`; update on every inbound API request via middleware or handler.
+- Track `last_api_access: AtomicU64` (monotonic millis) in `AppState`; update lock-free on every inbound API request.
 
 This keeps the daemon quiet when nobody is watching and responsive when the dashboard is open.
 
@@ -95,8 +98,15 @@ GET http://{address}:{api_port}/sessions
 Store fetched sessions in the local DB tagged with `host_id`. This provides last-known data when the
 host later becomes unreachable (MH-04).
 
-Use `reqwest` (already in workspace deps) with a 5-second timeout. Fetch failures are logged at WARN
-and do not affect the reachability state (ping and fetch are independent).
+Use `reqwest` with a 5-second timeout. Fetch failures are logged at WARN and do not affect the
+reachability state (ping and fetch are independent).
+
+**Dependency note**: `reqwest` is currently in `[dev-dependencies]` only. S2.1 must move it to
+`[dependencies]` in `crates/scmux-daemon/Cargo.toml` before runtime fetch will compile.
+
+**DB lock discipline**: Do NOT hold the `db` Mutex across probe or fetch operations. Acquire the
+lock only for the upsert write, then release immediately. Worst-case probe latency is
+`num_hosts × 10s`; holding the lock across probes would block all API handlers.
 
 ## Deliverables
 
@@ -111,13 +121,17 @@ and do not affect the reachability state (ping and fetch are independent).
   - Update `state.reachability`.
   - Log at DEBUG per host; WARN on fetch failure.
 
-### 2. `crates/scmux-daemon/src/main.rs`
+### 2. `crates/scmux-daemon/Cargo.toml`
 
-- Add `last_api_access: std::sync::Mutex<std::time::Instant>` to `AppState`.
-- Update `last_api_access` on every inbound request (middleware or per-handler).
+- Move `reqwest` from `[dev-dependencies]` to `[dependencies]` (required for runtime remote fetch).
+
+### 3. `crates/scmux-daemon/src/main.rs`
+
+- Add `last_api_access: std::sync::atomic::AtomicU64` to `AppState` (monotonic millis, `Relaxed` ordering).
+- Update `last_api_access` atomically on every inbound request (middleware or per-handler).
 - Spawn `host_poll_loop` — single task, sequential hosts, adaptive interval.
 
-### 3. `crates/scmux-daemon/src/api.rs`
+### 4. `crates/scmux-daemon/src/api.rs`
 
 `GET /hosts` per host:
 ```json
@@ -143,14 +157,18 @@ and do not affect the reachability state (ping and fetch are independent).
 - `poll_interval_ms`: from `config.polling.tmux_interval_secs * 1000` (dashboard session refresh rate).
 - `default_terminal`: from `config.daemon.default_terminal`.
 - `is_local` per host: required for dashboard to route jump POSTs correctly.
+- `GET /sessions`: Add `host_id` field to `SessionSummary` response. Currently missing; required for
+  dashboard to cross-reference sessions with `/hosts` reachability data (S2.2 dependency).
 
-### 4. `crates/scmux-daemon/src/db.rs`
+### 5. `crates/scmux-daemon/src/db.rs`
 
 - Add `last_seen TEXT` column to `hosts` table in migration.
 - `update_host_last_seen(conn, host_id, last_seen)` helper.
 - `upsert_remote_session(conn, host_id, session)` — insert or update session from remote host.
+  Conflict key: `(name, host_id)` using the **local** `hosts.id` value. Do not use any host_id
+  value from the remote daemon's response — only the local DB host record's id is authoritative.
 
-### 5. Tests
+### 6. Tests
 
 - **T-I-10**: `poll_hosts` with unreachable address (`192.0.2.1`, RFC 5737 TEST-NET). Returns `Ok(())`.
 - **T-I-11**: After 3 simulated failures on a host entry, verify `reachable == false` in reachability map.
@@ -160,6 +178,8 @@ Tests must not require network access. Simulate probe results by injecting a moc
 
 ## Acceptance Criteria
 
+- `reqwest` in `[dependencies]` (not dev-only).
+- `GET /sessions` response includes `host_id` field per session.
 - `GET /hosts` includes `reachable`, `last_seen`, `is_local` per host.
 - Local hosts always `reachable: true`.
 - Unreachable hosts do not crash daemon or produce error logs (WARN only).
