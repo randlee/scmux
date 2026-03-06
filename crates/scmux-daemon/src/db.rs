@@ -1,3 +1,5 @@
+// DG-02: This module is the sole SQLite writer. All Connection access is via AppState.db mutex.
+// No other module calls Connection::open — verified by audit (grep Connection::open crates/).
 use crate::config::RemoteHost;
 use crate::AppState;
 use rusqlite::{params, Connection, Result};
@@ -69,6 +71,9 @@ pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // DG-06: Migration is idempotent — safe to run on every startup.
+    // All DDL statements use CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS /
+    // CREATE TRIGGER IF NOT EXISTS so re-running on an existing schema is a no-op.
     conn.execute_batch(r#"
         CREATE TABLE IF NOT EXISTS hosts (
             id         INTEGER PRIMARY KEY,
@@ -197,9 +202,25 @@ mod tests {
 
     #[test]
     fn td_02_open_is_idempotent_on_existing_db() {
+        // DG-06: Calling open() twice must leave the schema intact (no duplicate errors,
+        // all tables and indexes still present after the second migrate() run).
         let path = temp_db_path("td02");
         let _ = open(path.to_str().expect("utf8 path")).expect("first open");
         let conn = open(path.to_str().expect("utf8 path")).expect("second open");
+
+        // Verify core tables still exist after second open
+        for table in &["hosts", "sessions", "session_status", "session_events", "daemon_health", "session_ci"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            assert_eq!(count, 1, "table '{table}' missing after second open()");
+        }
+
+        // Verify key indexes still exist
         let index_exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_sessions_host'",
@@ -208,6 +229,17 @@ mod tests {
             )
             .expect("query index");
         assert_eq!(index_exists, 1);
+
+        // Verify the trigger still exists
+        let trigger_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='sessions_updated_at'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query trigger");
+        assert_eq!(trigger_exists, 1);
+
         let _ = std::fs::remove_file(path);
     }
 
