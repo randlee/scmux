@@ -117,7 +117,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| API-01 | The daemon shall expose HTTP on a configurable port (default 7700) | 1.2 |
+| API-01 | The daemon shall expose HTTP on a configurable port (default 7878) | 1.2 |
 | API-02 | All responses shall be JSON | 1.2 |
 | API-03 | CORS shall be permissive | 1.2 |
 | API-04 | `GET /health` — daemon status, host_id, running count, timestamp | 1.2 |
@@ -192,7 +192,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 |----|-------------|--------|
 | CLI-01 | `scmux` shall be a separate binary from `scmux-daemon` | 3.2 |
 | CLI-02 | `scmux` shall communicate exclusively via the daemon HTTP API | 3.2 |
-| CLI-03 | Default daemon URL: `http://localhost:7700`; override with `SCMUX_HOST` env var or `--host` flag | 3.2 |
+| CLI-03 | Default daemon URL: `http://localhost:7878`; override with `SCMUX_HOST` env var or `--host` flag | 3.2 |
 | CLI-04 | `scmux list` — list sessions with status | 3.2 |
 | CLI-05 | `scmux show <name>` — full session detail | 3.2 |
 | CLI-06 | `scmux start <name>` — start session | 3.2 |

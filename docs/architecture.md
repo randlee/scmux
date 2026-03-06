@@ -25,38 +25,26 @@ scmux provides:
 ```
 ┌─ Mac Studio ────────────────────────────────────────────┐
 │                                                         │
-│  scmux-daemon  (HTTP :7700)                               │
-│  ├── SQLite  ~/.config/scmux/scmux.db  (SSOT)              │
+│  Browser Dashboard + scmux CLI                          │
+│          │                                              │
+│          └───────────── HTTP :7878 ───────────────┐     │
+│                                                    ▼     │
+│  local scmux-daemon (aggregation + SSOT)                │
+│  ├── SQLite  ~/.config/scmux/scmux.db                   │
 │  ├── poll_loop        every 15s  → tmux ls              │
 │  ├── ci_loop          adaptive   → gh / az cli          │
 │  ├── health_loop      every 60s  → heartbeat            │
-│  └── axum HTTP server            → web + CLI clients    │
-│                                                         │
-│  Clients:                                               │
-│  ├── Browser  →  dashboard (static files from daemon)   │
-│  └── scmux CLI  →  same HTTP API                          │
+│  ├── host_loop        polls remote daemons              │
+│  └── axum HTTP server                                    │
 │                                                         │
 └──────────────────────────┬──────────────────────────────┘
-                           │ HTTP :7700
-┌─ DGX Spark ──────────────┼──────────────────────────────┐
-│  scmux-daemon  (HTTP :7700)│                               │
-│  SQLite  ~/.config/scmux/scmux.db                           │
+                           │ daemon-to-daemon polling
+                           │
+┌─ DGX Spark ──────────────▼──────────────────────────────┐
+│  remote scmux-daemon (HTTP :7878)                       │
+│  SQLite  ~/.config/scmux/scmux.db                       │
 │  ... (same structure)                                   │
-└──────────────────────────┼──────────────────────────────┘
-                           │
-                  ┌────────┴────────┐
-                  │  Browser        │
-                  │  Dashboard      │
-                  │  (polls all     │
-                  │   known hosts)  │
-                  └────────┬────────┘
-                           │ POST /sessions/:name/jump
-                           │
-                  ┌────────▼────────┐
-                  │  scmux-daemon     │
-                  │  spawns iTerm2  │
-                  │  returns status │
-                  └─────────────────┘
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## 4. Components
@@ -214,7 +202,7 @@ Hosts are defined in `scmux.toml` (version-controlled, seeded into SQLite on fir
 
 ```toml
 [daemon]
-port = 7700
+port = 7878
 default_terminal = "iterm2"
 
 [[hosts]]
@@ -226,7 +214,7 @@ is_local = true
 name = "dgx-spark"
 address = "192.168.1.50"
 ssh_user = "randlee"
-api_port = 7700
+api_port = 7878
 ```
 
 #### VPN-gated hosts
@@ -287,7 +275,7 @@ scmux daemon status
 scmux daemon restart
 ```
 
-CLI connects to daemon at `http://localhost:7700` by default. Override with `SCMUX_HOST` env var or `--host` flag for managing remote hosts directly.
+CLI connects to daemon at `http://localhost:7878` by default. Override with `SCMUX_HOST` env var or `--host` flag for managing remote hosts directly.
 
 ### 4.6 Dashboard
 
@@ -299,15 +287,15 @@ The dashboard is configuration-aware via `GET /dashboard-config.json`:
 ```json
 {
   "hosts": [
-    { "name": "mac-studio", "url": "http://localhost:7700",     "is_local": true },
-    { "name": "dgx-spark",  "url": "http://192.168.1.50:7700", "is_local": false }
+    { "name": "mac-studio", "url": "http://localhost:7878",     "is_local": true },
+    { "name": "dgx-spark",  "url": "http://192.168.1.50:7878", "is_local": false }
   ],
   "default_terminal": "iterm2",
   "poll_interval_ms": 15000
 }
 ```
 
-Dashboard polls each host's `/sessions` endpoint independently. Unreachable hosts render in monochrome with last-known data and a "last seen N ago" indicator.
+Dashboard polls the local daemon only. The local daemon polls remote hosts, merges their latest cached session snapshots, and serves unified `/sessions` and `/hosts` responses. Unreachable hosts render in monochrome with last-known data and a "last seen N ago" indicator.
 
 ## 5. SQLite Schema Summary
 
@@ -330,7 +318,7 @@ One database per machine at `~/.config/scmux/scmux.db`. Schema applied via migra
 
 ```toml
 [daemon]
-port = 7700
+port = 7878
 db_path = "~/.config/scmux/scmux.db"
 default_terminal = "iterm2"
 log_level = "info"
@@ -350,7 +338,7 @@ is_local = true
 name     = "dgx-spark"
 address  = "192.168.1.50"
 ssh_user = "randlee"
-api_port = 7700
+api_port = 7878
 ```
 
 ## 7. Process Supervision

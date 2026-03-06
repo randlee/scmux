@@ -35,7 +35,7 @@ scmux-daemon
 2. Open in browser:
 
 ```text
-http://localhost:7700/
+http://localhost:7878/
 ```
 
 ## Local Development
