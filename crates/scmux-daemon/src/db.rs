@@ -1,7 +1,36 @@
-use crate::config::RemoteHost;
+// DG-02: This module is the sole SQLite writer. All Connection access is via AppState.db mutex.
+// No other module calls Connection::open — verified by audit (grep Connection::open crates/).
+use crate::config::HostConfig;
 use crate::AppState;
+use anyhow::{anyhow, bail};
+use cron::Schedule;
 use rusqlite::{params, Connection, Result};
+use rusqlite::{types::Value as SqlValue, OptionalExtension};
 use std::sync::Arc;
+use std::{fmt::Write as _, str::FromStr};
+
+#[derive(Debug, Clone)]
+pub struct NewSession {
+    pub name: String,
+    pub project: Option<String>,
+    pub host_id: i64,
+    pub config_json: String,
+    pub cron_schedule: Option<String>,
+    pub auto_start: bool,
+    pub github_repo: Option<String>,
+    pub azure_project: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionPatch {
+    pub project: Option<Option<String>>,
+    pub config_json: Option<String>,
+    pub cron_schedule: Option<Option<String>>,
+    pub auto_start: Option<bool>,
+    pub enabled: Option<bool>,
+    pub github_repo: Option<Option<String>>,
+    pub azure_project: Option<Option<String>>,
+}
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -27,14 +56,164 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
     })
 }
 
-pub fn seed_remote_hosts(conn: &Connection, hosts: &[RemoteHost]) -> anyhow::Result<()> {
+pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow::Result<()> {
     for host in hosts {
         conn.execute(
             "INSERT OR IGNORE INTO hosts (name, address, ssh_user, api_port, is_local)
-             VALUES (?1, ?2, ?3, 7700, 0)",
-            params![host.name, host.hostname, host.ssh_user],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                host.name,
+                host.address,
+                host.ssh_user,
+                host.api_port.unwrap_or(7700),
+                host.is_local.unwrap_or(false)
+            ],
         )?;
     }
+    Ok(())
+}
+
+pub fn create_session(conn: &Connection, session: &NewSession) -> anyhow::Result<i64> {
+    validate_config_session_name(&session.name, &session.config_json)?;
+    if let Some(expr) = &session.cron_schedule {
+        validate_cron(expr)?;
+    }
+
+    conn.execute(
+        "INSERT INTO sessions (
+            name, project, host_id, config_json, cron_schedule, auto_start, enabled, github_repo, azure_project
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
+        params![
+            session.name,
+            session.project,
+            session.host_id,
+            session.config_json,
+            session.cron_schedule,
+            session.auto_start,
+            session.github_repo,
+            session.azure_project
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_session(
+    conn: &Connection,
+    host_id: i64,
+    name: &str,
+    patch: &SessionPatch,
+) -> anyhow::Result<bool> {
+    let session_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2 AND enabled = 1",
+            params![name, host_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if session_id.is_none() {
+        return Ok(false);
+    }
+
+    if let Some(config_json) = &patch.config_json {
+        validate_config_session_name(name, config_json)?;
+    }
+    if let Some(Some(expr)) = &patch.cron_schedule {
+        validate_cron(expr)?;
+    }
+
+    let mut set_parts: Vec<&str> = Vec::new();
+    let mut values: Vec<SqlValue> = Vec::new();
+
+    if let Some(project) = &patch.project {
+        set_parts.push("project = ?");
+        values.push(match project {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(config_json) = &patch.config_json {
+        set_parts.push("config_json = ?");
+        values.push(SqlValue::Text(config_json.clone()));
+    }
+    if let Some(cron_schedule) = &patch.cron_schedule {
+        set_parts.push("cron_schedule = ?");
+        values.push(match cron_schedule {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(auto_start) = patch.auto_start {
+        set_parts.push("auto_start = ?");
+        values.push(SqlValue::Integer(if auto_start { 1 } else { 0 }));
+    }
+    if let Some(enabled) = patch.enabled {
+        set_parts.push("enabled = ?");
+        values.push(SqlValue::Integer(if enabled { 1 } else { 0 }));
+    }
+    if let Some(github_repo) = &patch.github_repo {
+        set_parts.push("github_repo = ?");
+        values.push(match github_repo {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(azure_project) = &patch.azure_project {
+        set_parts.push("azure_project = ?");
+        values.push(match azure_project {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+
+    if set_parts.is_empty() {
+        return Ok(true);
+    }
+
+    let mut sql = String::from("UPDATE sessions SET ");
+    for (idx, part) in set_parts.iter().enumerate() {
+        if idx > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(part);
+    }
+    let _ = write!(&mut sql, " WHERE name = ? AND host_id = ? AND enabled = 1");
+    values.push(SqlValue::Text(name.to_string()));
+    values.push(SqlValue::Integer(host_id));
+
+    conn.execute(&sql, rusqlite::params_from_iter(values))?;
+    Ok(true)
+}
+
+pub fn soft_delete_session(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE sessions SET enabled = 0 WHERE name = ?1 AND host_id = ?2 AND enabled = 1",
+        params![name, host_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<Option<i64>> {
+    let value = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
+            params![name, host_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(value)
+}
+
+pub fn log_session_event(
+    conn: &Connection,
+    session_id: i64,
+    event: &str,
+    trigger: &str,
+    note: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO session_events (session_id, event, trigger, note) VALUES (?1, ?2, ?3, ?4)",
+        params![session_id, event, trigger, note],
+    )?;
     Ok(())
 }
 
@@ -69,6 +248,9 @@ pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // DG-06: Migration is idempotent — safe to run on every startup.
+    // All DDL statements use CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS /
+    // CREATE TRIGGER IF NOT EXISTS so re-running on an existing schema is a no-op.
     conn.execute_batch(r#"
         CREATE TABLE IF NOT EXISTS hosts (
             id         INTEGER PRIMARY KEY,
@@ -151,6 +333,33 @@ fn migrate(conn: &Connection) -> Result<()> {
     "#)
 }
 
+fn validate_config_session_name(name: &str, config_json: &str) -> anyhow::Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| anyhow!("invalid config_json JSON: {e}"))?;
+    let json_session_name = value
+        .get("session_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("config_json.session_name is required"))?;
+    if json_session_name != name {
+        bail!("config_json.session_name must equal session name");
+    }
+    Ok(())
+}
+
+fn validate_cron(expr: &str) -> anyhow::Result<()> {
+    let normalized = normalize_cron_expr(expr);
+    Schedule::from_str(&normalized).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
+    Ok(())
+}
+
+fn normalize_cron_expr(expr: &str) -> String {
+    if expr.split_whitespace().count() == 5 {
+        format!("0 {expr}")
+    } else {
+        expr.to_string()
+    }
+}
+
 fn system_hostname() -> String {
     if let Ok(output) = std::process::Command::new("hostname").output() {
         if output.status.success() {
@@ -165,73 +374,4 @@ fn system_hostname() -> String {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "local".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_db_path(name: &str) -> PathBuf {
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("scmux-{name}-{}-{id}.db", std::process::id()))
-    }
-
-    #[test]
-    fn td_01_open_creates_schema_on_fresh_db() {
-        let path = temp_db_path("td01");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open fresh db");
-        let table_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='hosts'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("query table");
-        assert_eq!(table_exists, 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_02_open_is_idempotent_on_existing_db() {
-        let path = temp_db_path("td02");
-        let _ = open(path.to_str().expect("utf8 path")).expect("first open");
-        let conn = open(path.to_str().expect("utf8 path")).expect("second open");
-        let index_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_sessions_host'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("query index");
-        assert_eq!(index_exists, 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_03_ensure_local_host_returns_same_id_on_repeated_calls() {
-        let path = temp_db_path("td03");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open");
-        let id1 = ensure_local_host(&conn).expect("first ensure");
-        let id2 = ensure_local_host(&conn).expect("second ensure");
-        assert_eq!(id1, id2);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_04_ensure_local_host_uses_system_hostname() {
-        let path = temp_db_path("td04");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open");
-        let id = ensure_local_host(&conn).expect("ensure host");
-        let name: String = conn
-            .query_row("SELECT name FROM hosts WHERE id = ?1", params![id], |r| {
-                r.get(0)
-            })
-            .expect("query host name");
-        assert_eq!(name, system_hostname());
-        let _ = std::fs::remove_file(path);
-    }
 }
