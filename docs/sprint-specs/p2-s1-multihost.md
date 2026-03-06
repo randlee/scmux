@@ -8,12 +8,20 @@
 ## Context
 
 Host definitions are seeded by `seed_hosts_from_config()` into the `hosts` table on startup. No active
-reachability loop or stale-data handling is implemented. `/hosts` currently returns static DB rows without
-`reachable` or `last_seen` fields.
+reachability loop or remote session fetching is implemented. `/hosts` returns static DB rows without
+`reachable` or `last_seen` fields. Dashboard only sees local sessions.
+
+## Architecture
+
+**Dashboard → local daemon only.** The dashboard never contacts remote hosts directly. The local daemon
+is responsible for:
+1. Probing remote host reachability via `ping`
+2. Fetching session data from remote daemons via `GET remote:api_port/sessions`
+3. Caching remote session data locally so it's available when a host goes offline
+
+This enables the core use case: work on a remote machine, disconnect, resume later from any device.
 
 ## AppState Extension
-
-`AppState` must carry an in-memory reachability map. Add to `crates/scmux-daemon/src/main.rs`:
 
 ```rust
 pub struct AppState {
@@ -23,27 +31,18 @@ pub struct AppState {
 }
 ```
 
+`HostReachability` tracks consecutive failure count for debounce (see below).
+
 ## Probe Mechanism
 
-Reachability is determined by running the system `ping` command against each host's `address`.
-
-**Design rationale**: Remote hosts are only reachable when on VPN or on-site. A failed ping cleanly
-represents "host unreachable right now" — no VPN, no ping. This is the expected operating condition
-(MH-03: unreachable is not an error). Future enhancement (not this sprint): hosts that are reachable
-via network but don't respond to ping could fall back to TCP connect. Not needed now.
-
-
-- macOS: `ping -c 1 -t 2 <address>`
-- Linux: `ping -c 1 -W 2 <address>`
-- Exit code 0 = reachable; non-zero = unreachable.
-- `is_local = true` hosts are always considered reachable — skip probe.
+Single background task pings hosts **sequentially** (no concurrent ping threads):
 
 ```rust
 async fn probe_host(address: &str) -> bool {
     let args = if cfg!(target_os = "macos") {
-        vec!["-c", "1", "-t", "2", address]
+        vec!["-c", "1", "-t", "10", address]
     } else {
-        vec!["-c", "1", "-W", "2", address]
+        vec!["-c", "1", "-W", "10", address]
     };
     tokio::process::Command::new("ping")
         .args(&args)
@@ -56,110 +55,131 @@ async fn probe_host(address: &str) -> bool {
 }
 ```
 
-Add `tokio` process feature to workspace deps if not already present: `tokio = { version = "1", features = ["full"] }` (already included).
+- Timeout: 10 seconds per host.
+- `is_local = true` hosts: always reachable, skip probe.
+- **Design rationale**: Remote hosts are only reachable via VPN or on-site. Ping failure = VPN down = expected condition, not an error (MH-03).
 
-## Deliverables
+## Reachability State Machine (debounce)
 
-### 1. `crates/scmux-daemon/src/hosts.rs` (new)
+To prevent status bouncing on transient VPN blips:
 
 ```rust
 pub struct HostReachability {
     pub host_id: i64,
     pub reachable: bool,
-    pub last_seen: Option<String>,  // ISO 8601 UTC, set on successful probe
+    pub last_seen: Option<String>,       // ISO 8601 UTC, updated on successful probe
+    pub consecutive_failures: u32,        // reset to 0 on any success
 }
-
-pub async fn poll_hosts(state: Arc<AppState>) -> anyhow::Result<()>
 ```
 
-- Load all hosts from DB inside `spawn_blocking`.
-- Skip `is_local = true` hosts (always reachable; initialize map entry with `reachable: true`).
-- Probe each remote host via `probe_host()`.
-- On success: `reachable = true`, set `last_seen` = UTC now (chrono `Utc::now().to_rfc3339()`).
-- On failure: `reachable = false`, preserve existing `last_seen` from prior map entry.
-- Persist `last_seen` to `hosts.last_seen` column via `spawn_blocking` on successful probes only.
-- Write updated entries into `state.reachability` under the mutex.
-- Log each probe result at DEBUG; log failures at WARN. Never return Err for individual probe failures.
+- **Declare unreachable**: after **3 consecutive ping failures**. Do not flip on 1 or 2 failures.
+- **Resume reachable**: on **1 successful ping**. Recovery is immediate.
+- Between transitions: maintain current `reachable` status unchanged.
+
+## Adaptive Poll Frequency
+
+- **Active** (any API request in last 60s AND host has live sessions): probe every `health_interval_secs` (default 30s).
+- **Idle** (no recent API requests OR no live sessions on host): probe every `health_interval_secs * 10` (default 5 min).
+- Track `last_api_access: Instant` in `AppState`; update on every inbound API request via middleware or handler.
+
+This keeps the daemon quiet when nobody is watching and responsive when the dashboard is open.
+
+## Remote Session Fetching
+
+When a host is **reachable**, the poll loop also fetches its sessions via HTTP:
+
+```
+GET http://{address}:{api_port}/sessions
+```
+
+Store fetched sessions in the local DB tagged with `host_id`. This provides last-known data when the
+host later becomes unreachable (MH-04).
+
+Use `reqwest` (already in workspace deps) with a 5-second timeout. Fetch failures are logged at WARN
+and do not affect the reachability state (ping and fetch are independent).
+
+## Deliverables
+
+### 1. `crates/scmux-daemon/src/hosts.rs` (new)
+
+- `HostReachability` struct (with `consecutive_failures` field).
+- `probe_host(address: &str) -> bool` — sequential ping.
+- `fetch_remote_sessions(address: &str, port: u16) -> anyhow::Result<Vec<Session>>` — HTTP GET /sessions from remote daemon.
+- `poll_hosts(state: Arc<AppState>) -> anyhow::Result<()>` — main poll loop body:
+  - Load all hosts from DB.
+  - For each remote host, sequentially: probe → update reachability map with debounce → if reachable, fetch sessions → upsert into local DB.
+  - Update `state.reachability`.
+  - Log at DEBUG per host; WARN on fetch failure.
 
 ### 2. `crates/scmux-daemon/src/main.rs`
 
-- Initialize `AppState.reachability = Mutex::new(HashMap::new())`.
-- Spawn `host_poll_loop`:
-  ```rust
-  tokio::spawn(async move {
-      loop {
-          if let Err(e) = hosts::poll_hosts(Arc::clone(&state)).await {
-              tracing::warn!(error = %e, "host poll cycle failed");
-          }
-          tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-      }
-  });
-  ```
-- Interval: `config.polling.health_interval_secs` (default: 30).
+- Add `last_api_access: std::sync::Mutex<std::time::Instant>` to `AppState`.
+- Update `last_api_access` on every inbound request (middleware or per-handler).
+- Spawn `host_poll_loop` — single task, sequential hosts, adaptive interval.
 
 ### 3. `crates/scmux-daemon/src/api.rs`
 
-`GET /hosts` response per host:
+`GET /hosts` per host:
 ```json
 {
-  "id": 1,
-  "name": "local",
-  "address": "localhost",
-  "api_port": 7878,
-  "is_local": true,
-  "reachable": true,
-  "last_seen": "2026-03-06T04:00:00Z"
+  "id": 1, "name": "spark", "address": "spark.local",
+  "api_port": 7878, "is_local": false,
+  "reachable": false,
+  "last_seen": "2026-03-06T03:00:00Z"
 }
 ```
-- `reachable`: from `state.reachability`; default `true` if host not yet probed.
-- `last_seen`: from reachability map; `null` if never successfully probed.
 
-`GET /dashboard-config.json` response:
+`GET /dashboard-config.json`:
 ```json
 {
   "hosts": [
-    { "name": "local", "url": "http://localhost:7878" },
-    { "name": "spark", "url": "http://spark.local:7878" }
+    { "name": "local", "url": "http://localhost:7878", "is_local": true },
+    { "name": "spark", "url": "http://spark.local:7878", "is_local": false }
   ],
-  "poll_interval_ms": 30000
+  "default_terminal": "iterm2",
+  "poll_interval_ms": 15000
 }
 ```
-- `poll_interval_ms`: `config.polling.health_interval_secs * 1000`.
-- Host URLs: `http://{address}:{api_port}`.
+- `poll_interval_ms`: from `config.polling.tmux_interval_secs * 1000` (dashboard session refresh rate).
+- `default_terminal`: from `config.daemon.default_terminal`.
+- `is_local` per host: required for dashboard to route jump POSTs correctly.
 
 ### 4. `crates/scmux-daemon/src/db.rs`
 
-- Add `last_seen TEXT` column to `hosts` table in `init_db` migration (if not present):
-  ```sql
-  ALTER TABLE hosts ADD COLUMN last_seen TEXT;
-  ```
-- Add helper: `pub fn update_host_last_seen(conn: &Connection, host_id: i64, last_seen: &str) -> anyhow::Result<()>`
+- Add `last_seen TEXT` column to `hosts` table in migration.
+- `update_host_last_seen(conn, host_id, last_seen)` helper.
+- `upsert_remote_session(conn, host_id, session)` — insert or update session from remote host.
 
-### 5. Tests (inline `#[cfg(test)]` acceptable per QA-019 waiver)
+### 5. Tests
 
-- **T-I-10**: Call `poll_hosts` with a host whose address is `"192.0.2.1"` (TEST-NET, always unreachable). Verify returns `Ok(())` — no panic.
-- **T-I-11**: After T-I-10, verify `state.reachability` entry has `reachable == false`.
-- **T-I-12**: Call `poll_hosts` with `is_local = true`. Verify entry has `reachable == true` and `last_seen` is `Some`.
+- **T-I-10**: `poll_hosts` with unreachable address (`192.0.2.1`, RFC 5737 TEST-NET). Returns `Ok(())`.
+- **T-I-11**: After 3 simulated failures on a host entry, verify `reachable == false` in reachability map.
+- **T-I-12**: After unreachable state, one simulated success → verify `reachable == true`, `consecutive_failures == 0`.
 
-Note: Tests must not require network access. Use `is_local = true` for the positive case (T-I-12) and an RFC 5737 TEST-NET address for the negative case (T-I-10/11).
+Tests must not require network access. Simulate probe results by injecting a mock or by directly manipulating reachability map state.
 
 ## Acceptance Criteria
 
-- `GET /hosts` includes `reachable` and `last_seen` per host.
+- `GET /hosts` includes `reachable`, `last_seen`, `is_local` per host.
 - Local hosts always `reachable: true`.
-- Remote host probe via `ping`; unreachable hosts do not crash daemon.
-- `last_seen` set on successful probe, preserved on failure.
+- Unreachable hosts do not crash daemon or produce error logs (WARN only).
+- Status does not flip on fewer than 3 consecutive failures.
+- Recovery is immediate (1 success).
+- Remote sessions fetched and stored locally when host reachable.
+- Last-known session data served from local DB when host unreachable (MH-04).
+- `dashboard-config.json` includes `is_local`, `default_terminal`, `poll_interval_ms`.
+- No error dialogs propagated — all host failures handled gracefully (MH-09).
 - T-I-10..T-I-12 pass without network access.
 - `cargo clippy --all-targets --all-features -- -D warnings` clean.
 - `cargo test --workspace` passes.
 
 ## Requirement IDs Covered
 
-- `MH-01..MH-09`
+- `MH-01..MH-05`, `MH-09` (MH-06..08 are dashboard rendering, covered in S2.2)
 - `API-14`, `API-15`
 - `T-I-10`, `T-I-11`, `T-I-12`
 
 ## Dependencies
 
-- Requires Sprint `1.2` merged into `integrate/phase-1`, then `integrate/phase-1` merged into `integrate/phase-2`.
+- Requires `integrate/phase-1` merged into `integrate/phase-2` ✅ (done).
 - Must merge before Sprint `2.2`.
