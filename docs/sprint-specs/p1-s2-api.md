@@ -90,7 +90,7 @@ Ensure `tmux.rs` implements `PS-01..PS-06`:
 - `API-01..API-16`
 - `SL-01..SL-11`
 - `PS-01..PS-06`
-- `SR-02`, `SR-04`
+- `SR-02`, `SR-03`, `SR-04`, `SR-05`, `SR-06`
 - `T-A-01..T-A-14`
 - `T-D-08`, `T-D-09`
 - `T-I-01..T-I-09`

@@ -32,7 +32,7 @@ Final sprint validates complete system behavior and prepares release artifacts.
 ## Requirement IDs Covered
 
 - `T-E-01..T-E-11`
-- `AC-1..AC-10` (requirements section 7)
+- Section 7 acceptance criteria (AC-01..AC-10)
 
 ## Dependencies
 

@@ -33,11 +33,12 @@ Functional scope is complete; operational hardening and service management are r
 - launchd and systemd assets are functional and documented.
 - NF-03/NF-04 thresholds are measured and satisfied.
 - daemon remains stable under isolated host/session failures.
+- NF-06: If the SQLite DB is deleted while the daemon is stopped, the next poll cycle reconstructs session state from live tmux output without error.
 
 ## Requirement IDs Covered
 
 - `DH-04`, `DH-05`
-- `NF-01`, `NF-02`, `NF-03`, `NF-04`, `NF-05`, `NF-08`
+- `NF-01`, `NF-02`, `NF-03`, `NF-04`, `NF-05`, `NF-06`, `NF-08`
 
 ## Dependencies
 

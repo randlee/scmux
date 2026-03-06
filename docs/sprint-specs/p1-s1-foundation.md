@@ -87,11 +87,17 @@ Wire into `main.rs`:
 - `SCMUX_LOG=warn` suppresses INFO messages on stderr.
 - `scmux-daemon --verbose` starts at DEBUG level without setting `SCMUX_LOG` manually.
 - `~/.config/scmux/scmux-daemon.log` is created on daemon startup.
+- T-D-14: `init_logging()` creates `~/.config/scmux/scmux-daemon.log` on startup.
+- T-D-15: `SCMUX_LOG=warn` suppresses INFO-level messages on stderr.
+- T-D-16: `--verbose` flag sets effective log level to DEBUG.
 
 ## Requirement IDs Covered
 
-- `DG-04`, `DG-05`, `DG-07`, `DG-08`
+- `DG-01`, `DG-02`, `DG-04`, `DG-05`, `DG-06`, `DG-07`, `DG-08`
+- `DH-01`, `DH-02`, `DH-03`
+- `SR-01`
 - `T-D-01`, `T-D-02`, `T-D-03`, `T-D-04`, `T-D-05`, `T-D-06`, `T-D-07`
+- `T-D-14`, `T-D-15`, `T-D-16`
 
 ## Dependencies
 

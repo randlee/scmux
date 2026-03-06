@@ -44,12 +44,15 @@
 - Missing provider tools produce persisted `tool_unavailable` rows in `session_ci`.
 - Active/idle polling cadence follows requirements.
 - CI payload is available via API responses.
+- T-D-17: Network failure during CI fetch is caught; session_ci row updated with error status; daemon continues running.
+- T-D-18: Auth or rate-limit error during CI fetch is caught; session_ci row updated with error status; daemon continues running.
 
 ## Requirement IDs Covered
 
 - `CI-01..CI-13`
 - `DC-01..DC-05`
-- `T-D-10`, `T-D-11`, `T-D-12`, `T-D-13`
+- `NF-07`
+- `T-D-10`, `T-D-11`, `T-D-12`, `T-D-13`, `T-D-17`, `T-D-18`
 
 ## Dependencies
 

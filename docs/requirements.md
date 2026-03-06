@@ -43,7 +43,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DG-05 | The daemon shall seed the SQLite `hosts` table from `scmux.toml` on first run if the table is empty | 1.1 |
 | DG-06 | The daemon shall apply SQLite schema migrations on every startup (idempotent) | 1.1 |
 | DG-07 | The daemon shall log structured output via `tracing` at INFO level by default | 1.1 |
-| DG-08 | The daemon shall initialize logging via a `logging.rs` module that: reads `SCMUX_LOG` env var (trace/debug/info/warn/error, default info); writes human-readable output to stderr with `with_target(false)`; writes JSONL-formatted events to `~/.config/scmux/scmux-daemon.log` with 50 MiB size limit and 5-file rotation; exposes `init_logging()` returning `LoggingGuards` (RAII); supports `--verbose`/`-v` flag (sets `SCMUX_LOG=debug`). | S1.1 |
+| DG-08 | The daemon shall initialize logging via a `logging.rs` module that: reads `SCMUX_LOG` env var (trace/debug/info/warn/error, default info); writes human-readable output to stderr with `with_target(false)`; writes JSONL-formatted events to `~/.config/scmux/scmux-daemon.log` with 50 MiB size limit and 5-file rotation; exposes `init_logging()` returning `LoggingGuards` (RAII); supports `--verbose`/`-v` flag (sets `SCMUX_LOG=debug`). | 1.1 |
 
 ### 4.2 Daemon — Session Lifecycle
 
@@ -204,6 +204,8 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | CLI-12 | `scmux remove <name>` — delete session | 3.2 |
 | CLI-13 | `scmux hosts` — list hosts with reachability | 3.2 |
 | CLI-14 | `scmux daemon status` — show daemon health | 3.2 |
+| CLI-15 | `scmux host add` — deferred to v2. Not implemented in Phase 3. | — |
+| CLI-16 | `scmux daemon restart` — deferred to v2. Not implemented in Phase 3. | — |
 
 ### 4.13 Session Registry
 
@@ -227,7 +229,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | NF-03 | Poll cycle shall complete in < 500ms for up to 50 sessions | 4.1 |
 | NF-04 | HTTP read endpoints shall respond in < 100ms | 4.1 |
 | NF-05 | The system shall work on macOS (primary) and Linux (DGX Spark) | 4.1 |
-| NF-06 | The SQLite database shall be reconstructible from live tmux state on next poll if lost | 1.2 |
+| NF-06 | The SQLite database shall be reconstructible from live tmux state on next poll if lost | 4.1 |
 | NF-07 | All CI errors (network failure, auth error, rate limit) shall be handled gracefully and logged | 3.1 |
 | NF-08 | The daemon shall not crash on any single-host or single-session failure | 4.1 |
 
@@ -252,6 +254,11 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-D-11 | CI interval is 5 minutes when all panes are idle | 3.1 |
 | T-D-12 | `tool_unavailable` recorded when `gh` not in PATH | 3.1 |
 | T-D-13 | `tool_unavailable` recorded when `az` not in PATH | 3.1 |
+| T-D-14 | `init_logging()` creates `~/.config/scmux/scmux-daemon.log` on startup | 1.1 |
+| T-D-15 | `SCMUX_LOG=warn` suppresses INFO-level messages on stderr | 1.1 |
+| T-D-16 | `--verbose` flag sets effective log level to DEBUG | 1.1 |
+| T-D-17 | CI fetch with network failure (simulated) does not crash daemon; records error in `session_ci` | 3.1 |
+| T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
 
 ### 6.2 Daemon Integration Tests
 
@@ -330,6 +337,10 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 ---
 
 ## 7. Acceptance Criteria
+
+> Note: The acceptance criteria below are referenced in sprint specs as AC-01..AC-10.
+> They are not formal requirement IDs — they are phase completion gates. Do not
+> include them in requirement coverage tables.
 
 The system is complete when:
 
