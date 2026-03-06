@@ -18,9 +18,15 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive_ext: tar.gz
+            binary_ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             archive_ext: tar.gz
+            binary_ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_ext: zip
+            binary_ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -50,11 +56,15 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="scmux-${TAG}-${{ matrix.target }}.tar.gz"
+          ARCHIVE="scmux-${TAG}-${{ matrix.target }}.${{ matrix.archive_ext }}"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/scmux" dist/
-          cp "target/${{ matrix.target }}/release/scmux-daemon" dist/
-          tar -czf "${ARCHIVE}" -C dist scmux scmux-daemon
+          cp "target/${{ matrix.target }}/release/scmux${{ matrix.binary_ext }}" "dist/scmux${{ matrix.binary_ext }}"
+          cp "target/${{ matrix.target }}/release/scmux-daemon${{ matrix.binary_ext }}" "dist/scmux-daemon${{ matrix.binary_ext }}"
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            cd dist && zip "../${ARCHIVE}" "scmux${{ matrix.binary_ext }}" "scmux-daemon${{ matrix.binary_ext }}" && cd ..
+          else
+            tar -czf "${ARCHIVE}" -C dist "scmux${{ matrix.binary_ext }}" "scmux-daemon${{ matrix.binary_ext }}"
+          fi
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Upload archive artifact
@@ -79,9 +89,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -name "*.tar.gz" -exec mv {} release/ \;
+          find artifacts \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
           cd release
-          sha256sum *.tar.gz > checksums.txt
+          sha256sum * > checksums.txt
           echo "Release assets:"
           ls -lh
 
@@ -91,6 +101,7 @@ jobs:
           generate_release_notes: true
           files: |
             release/*.tar.gz
+            release/*.zip
             release/checksums.txt
 
   publish-crates:
