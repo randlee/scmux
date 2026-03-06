@@ -1,0 +1,442 @@
+# scmux — Architecture
+
+## 1. Purpose
+
+scmux solves a specific problem: when running 20–30 concurrent Claude Code agent teams across multiple machines and terminal emulators, there is no single place to see what is running, find a session by name, or jump to it instantly.
+
+scmux provides:
+- A **daemon** per machine — sole owner of SQLite, session lifecycle, CI polling, and terminal launch
+- A **web dashboard** — browser UI, read/command only, talks to daemon via HTTP
+- A **CLI** (`tms`) — shell client, same HTTP API as the web UI
+- **Graceful degradation** — missing tools, unreachable hosts, and VPN gaps are normal operating conditions, not errors
+
+## 2. Core Design Principles
+
+**Daemon is the single source of truth.** All state lives in SQLite. Only the daemon writes to SQLite. The CLI and web UI are pure clients — they send commands to the daemon and read responses. This keeps the system in sync regardless of how many clients are connected simultaneously.
+
+**Browser → daemon → terminal.** The web UI never launches processes directly. A "jump" button click sends `POST /sessions/:name/jump` to the daemon, which spawns the terminal. This eliminates race conditions and stale state from multiple browser tabs.
+
+**Unavailability is normal.** A host behind a VPN that goes offline is not an error — it is an expected state. The dashboard shows last known data in monochrome. When the host returns, it resumes full color automatically.
+
+**Missing tools degrade gracefully.** If `gh` or `az` CLI are not installed, CI status shows "unavailable" with a tooltip explaining what to install. The rest of the system works normally.
+
+## 3. System Diagram
+
+```
+┌─ Mac Studio ────────────────────────────────────────────┐
+│                                                         │
+│  tms-daemon  (HTTP :7700)                               │
+│  ├── SQLite  ~/.config/tms/tms.db  (SSOT)              │
+│  ├── poll_loop        every 15s  → tmux ls              │
+│  ├── ci_loop          adaptive   → gh / az cli          │
+│  ├── health_loop      every 60s  → heartbeat            │
+│  └── axum HTTP server            → web + CLI clients    │
+│                                                         │
+│  Clients:                                               │
+│  ├── Browser  →  dashboard (static files from daemon)   │
+│  └── tms CLI  →  same HTTP API                          │
+│                                                         │
+└──────────────────────────┬──────────────────────────────┘
+                           │ HTTP :7700
+┌─ DGX Spark ──────────────┼──────────────────────────────┐
+│  tms-daemon  (HTTP :7700)│                               │
+│  SQLite  ~/.config/tms/tms.db                           │
+│  ... (same structure)                                   │
+└──────────────────────────┼──────────────────────────────┘
+                           │
+                  ┌────────┴────────┐
+                  │  Browser        │
+                  │  Dashboard      │
+                  │  (polls all     │
+                  │   known hosts)  │
+                  └────────┬────────┘
+                           │ POST /sessions/:name/jump
+                           │
+                  ┌────────▼────────┐
+                  │  tms-daemon     │
+                  │  spawns iTerm2  │
+                  │  returns status │
+                  └─────────────────┘
+```
+
+## 4. Components
+
+### 4.1 tms-daemon
+
+**Language:** Rust
+**Binary:** `tms-daemon`
+**Owns:** SQLite database, tmux lifecycle, CI polling, terminal launch, HTTP server, static file serving
+
+#### Internal task structure
+
+```
+main()
+  ├── spawn: poll_loop        every 15s
+  │     └── scheduler::poll_cycle()
+  │           ├── tmux::live_sessions()
+  │           ├── update session_status
+  │           ├── detect stops → session_events
+  │           ├── check auto_start → tmuxp load
+  │           └── check cron_schedule → tmuxp load
+  │
+  ├── spawn: ci_loop          adaptive interval
+  │     └── ci::poll_all_sessions()
+  │           ├── for each session with github_repo → gh pr list / gh run list
+  │           ├── for each session with azure_project → az pipelines list
+  │           ├── write results to session_ci table
+  │           └── adjust next interval based on agent activity
+  │
+  ├── spawn: health_loop      every 60s
+  │     └── db::write_health()
+  │
+  └── axum::serve
+        ├── GET  /                         → serve dashboard HTML
+        ├── GET  /dashboard-config.json    → host list + settings
+        ├── GET  /health
+        ├── GET  /sessions
+        ├── GET  /sessions/:name
+        ├── POST /sessions/:name/start
+        ├── POST /sessions/:name/stop
+        └── POST /sessions/:name/jump      → spawn terminal
+```
+
+#### Shared state
+
+```rust
+pub struct AppState {
+    pub db:      Mutex<rusqlite::Connection>,
+    pub host_id: i64,
+    pub config:  Config,   // loaded from tms.toml at startup
+}
+```
+
+Only the daemon writes to SQLite. HTTP handlers read from `session_status` (written by poll_loop). Start/stop/jump handlers call subprocess, then write events.
+
+### 4.2 Jump Flow
+
+The browser never launches terminals. The daemon does.
+
+```
+1. User clicks "Jump" in dashboard
+2. Browser sends:  POST /sessions/ui-template/jump
+                   Body: { "terminal": "iterm2" }
+3. Daemon:
+   a. Looks up session → host (local or remote)
+   b. Constructs command:
+      Local:  tmux attach -t ui-template
+      Remote: ssh user@host tmux attach -t ui-template
+   c. Spawns iTerm2 with that command (via AppleScript or open)
+   d. Returns: { "ok": true, "message": "launched iTerm2" }
+4. Dashboard shows success/failure toast
+```
+
+#### iTerm2 launch (macOS)
+
+```bash
+# Local session
+osascript -e '
+  tell application "iTerm2"
+    create window with default profile
+    tell current session of current window
+      write text "tmux attach -t ui-template"
+    end tell
+  end tell
+'
+
+# Remote session
+osascript -e '
+  tell application "iTerm2"
+    create window with default profile
+    tell current session of current window
+      write text "ssh user@dgx-spark tmux attach -t rust-imgproc"
+    end tell
+  end tell
+'
+```
+
+This approach gives a clean new iTerm2 window with the session attached, no URI scheme required, no race conditions.
+
+#### Future terminal support
+
+WezTerm and Warp support added later via the same `POST /sessions/:name/jump` endpoint — just different spawn logic in the daemon. The `terminal` field in the request selects the handler. Default terminal configured in `tms.toml`.
+
+### 4.3 CI Integration
+
+#### Providers
+
+| Provider | CLI | Column | Status when missing |
+|----------|-----|--------|-------------------|
+| GitHub | `gh` | `github_repo` | "unavailable" + tooltip |
+| Azure DevOps | `az` | `azure_project` | "unavailable" + tooltip |
+
+Both are optional. Sessions can have one, both, or neither.
+
+#### Adaptive polling interval
+
+CI polling frequency adapts based on agent activity:
+
+```
+if any pane in session has status = "active":
+    poll_interval = 1 minute   (agents working → PRs/pipelines changing)
+else:
+    poll_interval = 5 minutes  (idle → less frequent)
+```
+
+Each session tracks its own next poll time in `session_ci.next_poll_at`.
+
+#### Data collected
+
+Per session, per provider:
+- Open PRs: number, title, URL, author, draft flag
+- Pipeline/action runs: status (passing/failing/running), branch, timestamp
+
+Stored in `session_ci` table as JSON blobs with `provider`, `polled_at`, `next_poll_at`.
+
+#### Missing tool handling
+
+On daemon startup, check for `gh` and `az` in PATH. Store availability in `AppState`. When a session has `github_repo` set but `gh` is unavailable, `session_ci` gets:
+
+```json
+{
+  "provider": "github",
+  "status": "tool_unavailable",
+  "message": "Install gh CLI: brew install gh"
+}
+```
+
+Dashboard renders this as a grayed badge with tooltip.
+
+### 4.4 Multi-Host Management
+
+#### Host discovery
+
+Hosts are defined in `tms.toml` (version-controlled, seeded into SQLite on first run). Once in SQLite, the daemon monitors them actively.
+
+```toml
+[daemon]
+port = 7700
+default_terminal = "iterm2"
+
+[[hosts]]
+name = "mac-studio"
+address = "localhost"
+is_local = true
+
+[[hosts]]
+name = "dgx-spark"
+address = "192.168.1.50"
+ssh_user = "randlee"
+api_port = 7700
+```
+
+#### VPN-gated hosts
+
+Hosts that go offline (VPN disconnect, machine sleep, network change) are **normal operating conditions**, not errors. The daemon handles this as follows:
+
+```
+poll remote host /health:
+  success → update last_seen, show full color, merge fresh data
+  timeout/error → do NOT update last_seen, keep last known data
+                   mark host as "unreachable" in memory (not SQLite)
+
+dashboard receives:
+  host.reachable = false → render all sessions in monochrome
+  host.reachable = true  → render in full color
+  host.last_seen         → show "last seen 4m ago" in host header
+```
+
+No error dialogs. No red alerts. Monochrome = "we have stale data, host is away."
+
+When the host returns (VPN reconnects, machine wakes), the next poll cycle picks it up automatically and resumes full color.
+
+### 4.5 tms CLI
+
+**Binary:** `tms` (separate from `tms-daemon`)
+**Talks to:** `tms-daemon` HTTP API (same endpoints as web UI)
+
+The CLI is a thin HTTP client. All business logic lives in the daemon.
+
+```bash
+# Session management
+tms list                          # all sessions + status
+tms list --project radiant-p3     # filtered
+tms show ui-template              # full detail + recent events
+tms start ui-template
+tms stop ui-template
+tms jump ui-template              # daemon launches iTerm2
+
+# Session registration
+tms add --name ui-template \
+        --project radiant-p3 \
+        --config ./ui-template.json \
+        --auto-start
+
+tms edit ui-template --cron "0 9 * * 1-5"
+tms disable ui-template
+tms enable ui-template
+tms remove ui-template
+
+# Host management
+tms hosts                         # list hosts + reachability
+tms host add --name dgx-spark \
+             --address 192.168.1.50 \
+             --ssh-user randlee
+
+# Daemon control
+tms daemon status
+tms daemon restart
+```
+
+CLI connects to daemon at `http://localhost:7700` by default. Override with `TMS_HOST` env var or `--host` flag for managing remote hosts directly.
+
+### 4.6 Dashboard
+
+**Served by:** `tms-daemon` as static files at `/`
+**Framework:** React (single JSX file for dev; Vite build for production embedding)
+
+The dashboard is configuration-aware via `GET /dashboard-config.json`:
+
+```json
+{
+  "hosts": [
+    { "name": "mac-studio", "url": "http://localhost:7700",     "is_local": true },
+    { "name": "dgx-spark",  "url": "http://192.168.1.50:7700", "is_local": false }
+  ],
+  "default_terminal": "iterm2",
+  "poll_interval_ms": 15000
+}
+```
+
+Dashboard polls each host's `/sessions` endpoint independently. Unreachable hosts render in monochrome with last-known data and a "last seen N ago" indicator.
+
+## 5. SQLite Schema Summary
+
+One database per machine at `~/.config/tms/tms.db`. Schema applied via migration on daemon startup.
+
+| Table | Purpose | Written by |
+|-------|---------|-----------|
+| `hosts` | Known machines | daemon (seeded from tms.toml) |
+| `sessions` | Session definitions + configs | daemon (via CLI/API) |
+| `session_status` | Live tmux state | poll_loop only |
+| `session_events` | Immutable start/stop log | poll_loop + API handlers |
+| `session_ci` | CI/PR status per session | ci_loop only |
+| `daemon_health` | Heartbeat, 7-day retention | health_loop only |
+
+**Only the daemon writes to SQLite.** CLI and web UI read via HTTP.
+
+## 6. Configuration
+
+`~/.config/tms/tms.toml` — loaded at daemon startup, seeds SQLite if tables are empty.
+
+```toml
+[daemon]
+port = 7700
+db_path = "~/.config/tms/tms.db"
+default_terminal = "iterm2"
+log_level = "info"
+
+[polling]
+tmux_interval_secs = 15
+health_interval_secs = 60
+ci_active_interval_secs = 60
+ci_idle_interval_secs = 300
+
+[[hosts]]
+name    = "mac-studio"
+address = "localhost"
+is_local = true
+
+[[hosts]]
+name     = "dgx-spark"
+address  = "192.168.1.50"
+ssh_user = "randlee"
+api_port = 7700
+```
+
+## 7. Process Supervision
+
+The daemon is a long-running process. Supervision keeps it alive across reboots and crashes.
+
+### macOS (launchd)
+
+`~/Library/LaunchAgents/com.scmux.tms-daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.scmux.tms-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/tms-daemon</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/tms-daemon.log</string>
+  <key>StandardErrorPath</key><string>/tmp/tms-daemon.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.scmux.tms-daemon.plist
+```
+
+### Linux (systemd)
+
+```ini
+[Unit]
+Description=tms-daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/tms-daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+## 8. Build Layout
+
+```
+scmux/
+├── tms-daemon/          # Cargo workspace member — HTTP daemon + SQLite
+├── tms/                 # Cargo workspace member — CLI client
+├── dashboard/           # React source (built output embedded in tms-daemon)
+├── docs/
+│   ├── architecture.md
+│   ├── requirements.md
+│   ├── schema.sql
+│   └── example-session.json
+├── Cargo.toml           # workspace root
+└── tms.toml.example     # reference config
+```
+
+```bash
+# Build everything
+cargo build --release --workspace
+
+# Install
+cp target/release/tms-daemon /usr/local/bin/
+cp target/release/tms        /usr/local/bin/
+
+# Run
+tms-daemon
+```
+
+## 9. Future Work
+
+| Item | Notes |
+|------|-------|
+| WezTerm jump | AppleScript equivalent or `wezterm` CLI via daemon |
+| Warp jump | Monitor for URI scheme support |
+| Browser terminal | ttyd integration for remote sessions without local terminal |
+| Dashboard build pipeline | Embed built React into tms-daemon binary via `include_str!` |
+| `tms edit` TUI | Interactive session config editor |
+| Azure DevOps deep integration | PR links, pipeline status, work items |
+| Host auto-discovery | mDNS broadcast from daemon |
+| Session templates | Parameterized configs for spinning up new teams quickly |

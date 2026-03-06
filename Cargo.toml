@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tms-daemon",
+    "crates/tms",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["scmux contributors"]
+license = "MIT"
+repository = "https://github.com/randlee/scmux"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Scheduling
+cron = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+anyhow = "1"

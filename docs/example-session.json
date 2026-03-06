@@ -1,0 +1,30 @@
+{
+  "session_name": "ui-template",
+  "start_directory": "~/projects/ui-template",
+  "environment": {
+    "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+    "PROJECT": "ui-template"
+  },
+  "windows": [
+    {
+      "window_name": "ui-template",
+      "layout": "even-horizontal",
+      "panes": [
+        {
+          "shell_command": [
+            "printf '\\033]2;team-lead\\033\\\\'",
+            "cd ~/projects/ui-template",
+            "claude --profile team-lead"
+          ]
+        },
+        {
+          "shell_command": [
+            "printf '\\033]2;arch-p3\\033\\\\'",
+            "cd ~/projects/ui-template",
+            "claude --profile arch-p3"
+          ]
+        }
+      ]
+    }
+  ]
+}
