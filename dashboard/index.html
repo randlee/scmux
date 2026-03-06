@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>scmux dashboard</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+        background: #060810;
+        color: #e2e8f0;
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+      }
+      main {
+        width: min(740px, 92vw);
+        border: 1px solid #1e293b;
+        border-radius: 10px;
+        padding: 24px;
+        background: radial-gradient(circle at top left, #0f172a, #020617);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0 0 12px;
+        color: #94a3b8;
+      }
+      code {
+        color: #38bdf8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>scmux Dashboard</h1>
+      <p>The daemon is online and serving static dashboard content.</p>
+      <p>
+        Use <code>/sessions</code>, <code>/hosts</code>, and
+        <code>/dashboard-config.json</code> for API-backed data.
+      </p>
+    </main>
+  </body>
+</html>
