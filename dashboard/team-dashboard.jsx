@@ -155,6 +155,34 @@ function extractOpenPrCount(session, ciEntries) {
   return Number.isFinite(numeric) ? Number(numeric) : 0;
 }
 
+function extractRuns(ciEntries) {
+  const rows = [];
+
+  ciEntries.forEach((entry) => {
+    if (!entry.payload || !Array.isArray(entry.payload.runs)) {
+      return;
+    }
+    entry.payload.runs.forEach((run, index) => {
+      rows.push({
+        provider: entry.provider,
+        title:
+          run.displayTitle ||
+          run.name ||
+          run.pipeline?.name ||
+          run.definition?.name ||
+          `run-${index + 1}`,
+        status: run.status || run.state || run.result || run.conclusion || "unknown",
+        conclusion: run.conclusion || run.result || null,
+        branch: run.headBranch || run.sourceBranch || run.branch || null,
+        createdAt: run.createdAt || run.creationDate || run.queueTime || run.finishTime || null,
+        url: run.url || run.webUrl || run._links?.web?.href || null,
+      });
+    });
+  });
+
+  return rows;
+}
+
 function relativeTime(iso) {
   if (!iso) {
     return "unknown";
@@ -214,67 +242,143 @@ function hostBadge(host) {
 }
 
 function CiBadges({ session }) {
+  const [showGithubPrs, setShowGithubPrs] = useState(false);
+
   if (!session.ciEntries.length) {
     return null;
   }
 
   return (
-    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-      {session.ciEntries.map((entry, index) => {
-        if (entry.status === "tool_unavailable") {
-          return (
-            <span
-              key={`${entry.provider}-${index}`}
-              title={entry.toolMessage || "Install required CLI tool"}
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+        {session.ciEntries.map((entry, index) => {
+          if (entry.status === "tool_unavailable") {
+            const installHint =
+              entry.provider === "github"
+                ? "Install gh CLI: brew install gh"
+                : entry.provider === "azure"
+                  ? "Install az CLI: brew install azure-cli"
+                  : "Install required CLI tool";
+            return (
+              <span
+                key={`${entry.provider}-${index}`}
+                title={entry.toolMessage || installHint}
+                style={{
+                  fontSize: 9,
+                  color: "#94a3b8",
+                  background: "#1e293b",
+                  borderRadius: 3,
+                  padding: "1px 6px",
+                }}
+              >
+                {entry.provider}: unavailable
+              </span>
+            );
+          }
+
+          if (entry.provider === "github") {
+            return (
+              <button
+                key={`${entry.provider}-${index}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setShowGithubPrs((prev) => !prev);
+                }}
+                title={`GitHub Actions: ${session.ciRuns.filter((run) => run.provider === "github").length} runs`}
+                style={{
+                  fontSize: 9,
+                  color: "#60a5fa",
+                  background: "#172554",
+                  borderRadius: 3,
+                  padding: "1px 6px",
+                  border: "none",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                GH PRs: {session.openPrCount}
+              </button>
+            );
+          }
+
+          if (entry.provider === "azure") {
+            return (
+              <span
+                key={`${entry.provider}-${index}`}
+                title={`Azure Pipelines: ${session.ciRuns.filter((run) => run.provider === "azure").length} runs`}
+                style={{
+                  fontSize: 9,
+                  color: "#38bdf8",
+                  background: "#082f49",
+                  borderRadius: 3,
+                  padding: "1px 6px",
+                }}
+              >
+                Azure: {entry.status}
+              </span>
+            );
+          }
+
+          return null;
+        })}
+      </div>
+
+      {showGithubPrs && (
+        <div
+          onClick={(event) => event.stopPropagation()}
+          style={{
+            background: "#0a0e14",
+            border: "1px solid #131820",
+            borderRadius: 4,
+            padding: "6px 8px",
+            minWidth: 180,
+          }}
+        >
+          {session.prs.length === 0 && (
+            <div style={{ fontSize: 10, color: "#64748b" }}>No open PRs.</div>
+          )}
+          {session.prs.map((pr, index) => (
+            <a
+              key={`${pr.url || "pr"}-${index}`}
+              href={pr.url || "#"}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(event) => event.stopPropagation()}
               style={{
-                fontSize: 9,
-                color: "#94a3b8",
-                background: "#1e293b",
-                borderRadius: 3,
-                padding: "1px 6px",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                textDecoration: "none",
+                padding: "3px 0",
               }}
             >
-              {entry.provider}: unavailable
-            </span>
-          );
-        }
-
-        if (entry.provider === "github") {
-          return (
-            <span
-              key={`${entry.provider}-${index}`}
-              style={{
-                fontSize: 9,
-                color: "#60a5fa",
-                background: "#172554",
-                borderRadius: 3,
-                padding: "1px 6px",
-              }}
-            >
-              GH PRs: {session.openPrCount}
-            </span>
-          );
-        }
-
-        if (entry.provider === "azure") {
-          return (
-            <span
-              key={`${entry.provider}-${index}`}
-              style={{
-                fontSize: 9,
-                color: "#38bdf8",
-                background: "#082f49",
-                borderRadius: 3,
-                padding: "1px 6px",
-              }}
-            >
-              Azure: {entry.status}
-            </span>
-          );
-        }
-
-        return null;
-      })}
+              <span
+                style={{
+                  fontSize: 9,
+                  color: "#60a5fa",
+                  background: "#172554",
+                  borderRadius: 3,
+                  padding: "1px 5px",
+                  flexShrink: 0,
+                }}
+              >
+                #{pr.num || "?"}
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  color: "#94a3b8",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {pr.title || "Untitled PR"}
+              </span>
+            </a>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -309,6 +413,8 @@ function JumpModal({ baseUrl, defaultTerminal, session, onClose }) {
 
   const pc = PROJECT_COLORS[session.project] || "#3b82f6";
   const cmd = buildJumpCommand(session, session.host);
+  const ciEntries = Array.isArray(session.ciEntries) ? session.ciEntries : [];
+  const ciRuns = Array.isArray(session.ciRuns) ? session.ciRuns : [];
 
   const handleJump = async () => {
     setSubmitting(true);
@@ -455,6 +561,71 @@ function JumpModal({ baseUrl, defaultTerminal, session, onClose }) {
                 </span>
                 <span style={{ fontSize: 11, color: "#334155" }}>↗</span>
               </a>
+            ))}
+          </div>
+        )}
+
+        {ciEntries.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.1em", marginBottom: 8 }}>
+              CI RUN STATUS
+            </div>
+            {ciRuns.length === 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {ciEntries.map((entry, index) => (
+                  <div
+                    key={`${entry.provider}-${index}`}
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 9,
+                        color: entry.provider === "github" ? "#60a5fa" : "#38bdf8",
+                        background: entry.provider === "github" ? "#172554" : "#082f49",
+                        borderRadius: 3,
+                        padding: "1px 5px",
+                        flexShrink: 0,
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      {entry.provider}
+                    </span>
+                    <span style={{ fontSize: 10, color: "#64748b" }}>{entry.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {ciRuns.slice(0, 8).map((run, index) => (
+              <div
+                key={`${run.provider}-${run.title}-${index}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "5px 0",
+                  borderBottom: index < Math.min(ciRuns.length, 8) - 1 ? "1px solid #0f172a" : "none",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 9,
+                    color: run.provider === "github" ? "#60a5fa" : "#38bdf8",
+                    background: run.provider === "github" ? "#172554" : "#082f49",
+                    borderRadius: 3,
+                    padding: "1px 5px",
+                    flexShrink: 0,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {run.provider}
+                </span>
+                <span style={{ fontSize: 11, color: "#94a3b8", flex: 1 }}>
+                  {run.title}
+                </span>
+                <span style={{ fontSize: 10, color: "#64748b" }}>
+                  {run.conclusion || run.status}
+                </span>
+              </div>
             ))}
           </div>
         )}
@@ -836,12 +1007,14 @@ export default function Dashboard() {
         const normalizedSessions = (Array.isArray(sessionsBody) ? sessionsBody : []).map((row) => {
           const ciEntries = normalizeCi(row);
           const prs = extractPrs(row, ciEntries);
+          const ciRuns = extractRuns(ciEntries);
           return {
             ...row,
             status: row.status || "stopped",
             project: row.project || "unassigned",
             panes: normalizePanes(row),
             ciEntries,
+            ciRuns,
             prs,
             openPrCount: extractOpenPrCount(row, ciEntries),
             host: hostMap.get(row.host_id) || null,
