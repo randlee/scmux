@@ -22,23 +22,29 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
 }
 
 pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
-    let db = state.db.lock().await;
-    let running: i64 = db.query_row(
-        "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
-        [],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let db = state.db.lock().unwrap();
+        let running: i64 = db.query_row(
+            "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
 
-    db.execute(
-        "INSERT INTO daemon_health (host_id, status, sessions_running) VALUES (?1, 'ok', ?2)",
-        params![state.host_id, running],
-    )?;
+        db.execute(
+            "INSERT INTO daemon_health (host_id, status, sessions_running) VALUES (?1, 'ok', ?2)",
+            params![state.host_id, running],
+        )?;
 
-    // Prune records older than 7 days
-    db.execute(
-        "DELETE FROM daemon_health WHERE recorded_at < datetime('now', '-7 days')",
-        [],
-    )?;
+        // Prune records older than 7 days
+        db.execute(
+            "DELETE FROM daemon_health WHERE recorded_at < datetime('now', '-7 days')",
+            [],
+        )?;
+
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
 
     Ok(())
 }

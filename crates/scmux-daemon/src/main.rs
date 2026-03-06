@@ -4,11 +4,10 @@ mod scheduler;
 mod api;
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::info;
 
 pub struct AppState {
-    pub db: Mutex<rusqlite::Connection>,
+    pub db: std::sync::Mutex<rusqlite::Connection>,
     pub host_id: i64,
 }
 
@@ -16,8 +15,8 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let db_path = std::env::var("TMS_DB")
-        .unwrap_or_else(|_| format!("{}/.config/tms/tms.db",
+    let db_path = std::env::var("SCMUX_DB")
+        .unwrap_or_else(|_| format!("{}/.config/scmux/scmux.db",
             std::env::var("HOME").unwrap_or_else(|_| ".".into())));
 
     std::fs::create_dir_all(std::path::Path::new(&db_path).parent().unwrap())?;
@@ -25,10 +24,10 @@ async fn main() -> anyhow::Result<()> {
     let conn = db::open(&db_path)?;
     let host_id = db::ensure_local_host(&conn)?;
 
-    info!("tms-daemon starting — db={db_path} host_id={host_id}");
+    info!("scmux-daemon starting — db={db_path} host_id={host_id}");
 
     let state = Arc::new(AppState {
-        db: Mutex::new(conn),
+        db: std::sync::Mutex::new(conn),
         host_id,
     });
 
@@ -61,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // HTTP server
-    let port: u16 = std::env::var("TMS_PORT")
+    let port: u16 = std::env::var("SCMUX_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(7700);
