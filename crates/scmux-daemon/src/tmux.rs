@@ -6,7 +6,7 @@ use tokio::process::Command;
 pub struct PaneInfo {
     pub index: u32,
     pub name: String,
-    pub status: String,       // active | idle | stopped
+    pub status: String, // active | idle | stopped
     pub last_activity: String,
     pub current_command: String,
 }
@@ -42,7 +42,10 @@ pub async fn live_sessions() -> anyhow::Result<HashMap<String, Vec<PaneInfo>>> {
 async fn list_panes(session: &str) -> anyhow::Result<Vec<PaneInfo>> {
     let out = Command::new("tmux")
         .args([
-            "list-panes", "-t", session, "-a",
+            "list-panes",
+            "-t",
+            session,
+            "-a",
             "-F",
             "#{pane_index}|#{pane_title}|#{pane_current_command}|#{pane_active}",
         ])
@@ -55,7 +58,10 @@ async fn list_panes(session: &str) -> anyhow::Result<Vec<PaneInfo>> {
         .enumerate()
         .map(|(i, line)| {
             let parts: Vec<&str> = line.splitn(4, '|').collect();
-            let index = parts.first().and_then(|s| s.parse().ok()).unwrap_or(i as u32);
+            let index = parts
+                .first()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(i as u32);
             let name = parts.get(1).unwrap_or(&"").to_string();
             let command = parts.get(2).unwrap_or(&"").to_string();
             let active = parts.get(3).map(|s| *s == "1").unwrap_or(false);
@@ -63,7 +69,11 @@ async fn list_panes(session: &str) -> anyhow::Result<Vec<PaneInfo>> {
 
             PaneInfo {
                 index,
-                name: if name.is_empty() { format!("pane-{index}") } else { name },
+                name: if name.is_empty() {
+                    format!("pane-{index}")
+                } else {
+                    name
+                },
                 status,
                 last_activity: "unknown".to_string(),
                 current_command: command,
