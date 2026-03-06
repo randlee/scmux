@@ -81,7 +81,7 @@ Ensure `tmux.rs` implements `PS-01..PS-06`:
 - `T-D-09`: `tmux::live_sessions()` returns an empty vec (not an error) when tmux is not running.
 - Poll cycle correctly detects a killed session and marks it stopped within one cycle.
 - Poll cycle restarts an `auto_start` session killed externally within 30s.
-- Pane data is written to `sessions_panes` on each poll.
+- Pane data is stored as JSON in `session_status.panes_json` on each poll.
 
 ## Requirement IDs Covered
 

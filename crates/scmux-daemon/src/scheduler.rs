@@ -162,7 +162,12 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
 
 /// Returns true if the cron expression should fire within the current 15s window.
 pub fn should_run_now(expr: &str, now: &chrono::DateTime<Utc>) -> bool {
-    let Ok(schedule) = Schedule::from_str(expr) else {
+    let normalized = if expr.split_whitespace().count() == 5 {
+        format!("0 {expr}")
+    } else {
+        expr.to_string()
+    };
+    let Ok(schedule) = Schedule::from_str(&normalized) else {
         return false;
     };
     let window_start = *now - chrono::Duration::seconds(15);

@@ -221,8 +221,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn td_08_live_sessions_returns_active_sessions() {
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "lock held across await intentionally; restructure deferred to Phase 3"
+    )]
+    async fn td_09_live_sessions_parses_session_names_correctly() {
         let _guard = with_env_lock();
         let script = write_script(
             r#"#!/bin/sh
@@ -259,8 +262,11 @@ exit 1
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn td_09_live_sessions_returns_empty_when_tmux_not_running() {
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "lock held across await intentionally; restructure deferred to Phase 3"
+    )]
+    async fn td_08_live_sessions_returns_empty_when_tmux_not_running() {
         let _guard = with_env_lock();
         let script = write_script("#!/bin/sh\nexit 1\n");
         // SAFETY: test-only env mutation under global lock.

@@ -347,8 +347,17 @@ fn validate_config_session_name(name: &str, config_json: &str) -> anyhow::Result
 }
 
 fn validate_cron(expr: &str) -> anyhow::Result<()> {
-    Schedule::from_str(expr).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
+    let normalized = normalize_cron_expr(expr);
+    Schedule::from_str(&normalized).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
     Ok(())
+}
+
+fn normalize_cron_expr(expr: &str) -> String {
+    if expr.split_whitespace().count() == 5 {
+        format!("0 {expr}")
+    } else {
+        expr.to_string()
+    }
 }
 
 fn system_hostname() -> String {

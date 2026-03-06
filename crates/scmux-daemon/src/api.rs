@@ -103,6 +103,7 @@ struct PatchSessionRequest {
 #[derive(Debug, Deserialize, Default)]
 struct JumpRequest {
     terminal: Option<String>,
+    host_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -420,6 +421,26 @@ async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
+    let state2 = Arc::clone(&state);
+    let name2 = name.clone();
+    let exists = tokio::task::spawn_blocking(move || {
+        let db_conn = state2.db.lock().unwrap();
+        db_conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sessions WHERE name = ?1 AND host_id = ?2 AND enabled = 1",
+                params![name2, state2.host_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(anyhow::Error::from)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    ;
+    if !exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     let action = tmux::stop_session(&name).await;
     log_action_result(&state, &name, "stopped", "manual", action.as_ref().err())
         .await
@@ -442,25 +463,27 @@ async fn jump_session(
     Path(name): Path<String>,
     Json(req): Json<JumpRequest>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
+    let host_id = req.host_id.unwrap_or(state.host_id);
     let state2 = Arc::clone(&state);
     let name2 = name.clone();
     let session_data = tokio::task::spawn_blocking(move || {
         let db_conn = state2.db.lock().unwrap();
         db_conn
             .query_row(
-                "SELECT s.id, h.is_local, h.address, h.ssh_user
+                "SELECT s.id, s.name, h.address, h.is_local, h.ssh_user, h.api_port
                  FROM sessions s
                  INNER JOIN hosts h ON h.id = s.host_id
-                 WHERE s.name = ?1 AND s.enabled = 1
-                 ORDER BY h.is_local DESC
+                 WHERE s.name = ?1 AND s.host_id = ?2 AND s.enabled = 1
                  LIMIT 1",
-                params![name2],
+                params![name2, host_id],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
-                        r.get::<_, bool>(1)?,
+                        r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, bool>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, u16>(5)?,
                     ))
                 },
             )
@@ -469,7 +492,7 @@ async fn jump_session(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
-    let (session_id, is_local, host, ssh_user) = session_data;
+    let (session_id, _session_name, host, is_local, ssh_user, _api_port) = session_data;
     let terminal = req
         .terminal
         .or_else(|| state.config.daemon.default_terminal.clone())

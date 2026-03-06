@@ -47,7 +47,6 @@ impl Default for RotationConfig {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum UnifiedLogMode {
     DaemonWriter {
