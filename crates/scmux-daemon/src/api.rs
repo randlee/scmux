@@ -153,22 +153,20 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
-    let sessions = tokio::task::spawn_blocking(move || {
+    let sessions = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SessionSummary>> {
         let db = state.db.lock().unwrap();
-        let mut stmt = db
-            .prepare(
-                "SELECT s.id, s.name, s.project, s.cron_schedule, s.auto_start,
+        let mut stmt = db.prepare(
+            "SELECT s.id, s.name, s.project, s.cron_schedule, s.auto_start,
                     COALESCE(ss.status, 'stopped') as status,
                     COALESCE(ss.panes_json, '[]') as panes_json,
                     ss.polled_at
-             FROM sessions s
-             LEFT JOIN session_status ss ON ss.session_id = s.id
-             WHERE s.host_id = ?1 AND s.enabled = 1
-             ORDER BY s.project, s.name",
-            )
-            .unwrap();
+                 FROM sessions s
+                 LEFT JOIN session_status ss ON ss.session_id = s.id
+                 WHERE s.host_id = ?1 AND s.enabled = 1
+                 ORDER BY s.project, s.name",
+        )?;
 
-        stmt.query_map(params![state.host_id], |r| {
+        let rows = stmt.query_map(params![state.host_id], |r| {
             let panes_str: String = r.get(6)?;
             Ok(SessionSummary {
                 id: r.get(0)?,
@@ -180,12 +178,13 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at: r.get(7)?,
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect::<Vec<_>>()
+        })?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
     })
     .await
+    .ok()
+    .and_then(Result::ok)
     .unwrap_or_default();
 
     Json(sessions)
@@ -246,7 +245,7 @@ async fn get_session(
              WHERE session_id = ?1
              ORDER BY occurred_at DESC LIMIT 20",
             )
-            .unwrap();
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let events: Vec<EventRow> = estmt
             .query_map(params![id], |r| {
@@ -257,7 +256,7 @@ async fn get_session(
                     occurred_at: r.get(3)?,
                 })
             })
-            .unwrap()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .filter_map(|r| r.ok())
             .collect();
 

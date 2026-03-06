@@ -63,7 +63,7 @@ Ensure `poll_cycle()` in `scheduler.rs` enforces `SL-01..SL-11`:
 
 Ensure `tmux.rs` implements `PS-01..PS-06`:
 - `PS-01..PS-03`: list panes for a session and their status
-- `PS-04..PS-06`: store pane data in `sessions_panes` table
+- `PS-04..PS-06`: store pane data in `session_status.panes_json`
 
 ## Acceptance Criteria
 

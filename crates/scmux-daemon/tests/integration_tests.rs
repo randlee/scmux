@@ -1,8 +1,17 @@
 use chrono::{Datelike, Duration, Timelike, Utc};
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
 use scmux_daemon::{db, scheduler, AppState};
+use std::io::Write;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
+
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn env_lock() -> &'static Mutex<()> {
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn test_config() -> Config {
     Config {
@@ -41,6 +50,39 @@ fn unique_name(prefix: &str) -> String {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+fn write_script(contents: &str) -> tempfile::TempPath {
+    let mut file = tempfile::NamedTempFile::new().expect("temp script");
+    file.write_all(contents.as_bytes()).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.as_file().metadata().expect("metadata").permissions();
+        perms.set_mode(0o755);
+        file.as_file().set_permissions(perms).expect("chmod");
+    }
+    file.into_temp_path()
+}
+
+fn set_env_var(key: &str, value: &str) -> Option<String> {
+    let prev = std::env::var(key).ok();
+    // SAFETY: test-only env mutation guarded by async mutex.
+    unsafe { std::env::set_var(key, value) };
+    prev
+}
+
+fn restore_env_var(key: &str, prev: Option<String>) {
+    match prev {
+        Some(value) => {
+            // SAFETY: test-only env restoration guarded by async mutex.
+            unsafe { std::env::set_var(key, value) };
+        }
+        None => {
+            // SAFETY: test-only env restoration guarded by async mutex.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
 }
 
 fn insert_session(
@@ -97,9 +139,46 @@ async fn t_i_01_poll_cycle_writes_session_status_rows() {
 }
 
 #[tokio::test]
-async fn t_i_02_poll_cycle_marks_stopped_for_missing_session() {
+async fn t_i_02_poll_cycle_marks_session_running_when_found_in_tmux() {
     let (state, _tmp) = build_state();
     let name = unique_name("ti02");
+    let session_id = insert_session(&state, &name, false, None);
+
+    let _guard = env_lock().lock().await;
+    let script = write_script(&format!(
+        r#"#!/bin/sh
+if [ "$1" = "list-sessions" ]; then
+  echo "{name}"
+  exit 0
+fi
+if [ "$1" = "list-panes" ]; then
+  echo "0|lead|zsh|1"
+  exit 0
+fi
+exit 1
+"#
+    ));
+    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let poll_result = scheduler::poll_cycle(&state).await;
+    restore_env_var("SCMUX_TMUX_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    let db_conn = state.db.lock().expect("db lock");
+    let status: String = db_conn
+        .query_row(
+            "SELECT status FROM session_status WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .expect("status");
+    assert_eq!(status, "running");
+}
+
+#[tokio::test]
+async fn t_i_03_poll_cycle_marks_stopped_for_missing_session() {
+    let (state, _tmp) = build_state();
+    let name = unique_name("ti03");
     let session_id = insert_session(&state, &name, false, None);
 
     scheduler::poll_cycle(&state).await.expect("poll cycle");
@@ -116,9 +195,9 @@ async fn t_i_02_poll_cycle_marks_stopped_for_missing_session() {
 }
 
 #[tokio::test]
-async fn t_i_03_running_to_missing_transition_logs_stopped_event() {
+async fn t_i_04_running_to_missing_transition_logs_stopped_event() {
     let (state, _tmp) = build_state();
-    let name = unique_name("ti03");
+    let name = unique_name("ti04");
     let session_id = insert_session(&state, &name, false, None);
     {
         let db_conn = state.db.lock().expect("db lock");
