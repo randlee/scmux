@@ -1,3 +1,5 @@
+//! Terminal output formatting helpers for `scmux` commands.
+
 use crate::client::{ActionResponse, HealthResponse, HostSummary, SessionSummary};
 use std::collections::HashMap;
 
@@ -22,6 +24,7 @@ pub fn print_session_list(sessions: &[SessionSummary], hosts: &[HostSummary]) {
             .as_deref()
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| {
+                // If both cron_schedule and auto_start exist, cron takes precedence in display.
                 if session.auto_start {
                     "auto".to_string()
                 } else {
@@ -76,6 +79,8 @@ fn window_name(session: &SessionSummary) -> String {
         return "—".to_string();
     }
 
+    // Daemon API does not currently expose a dedicated tmux window name, so this
+    // uses the active (or first available) pane name as the best proxy.
     let mut first_name: Option<&str> = None;
     for pane in &session.panes {
         if !pane.name.is_empty() && first_name.is_none() {

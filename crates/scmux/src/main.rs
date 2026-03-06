@@ -107,8 +107,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             if let Some(cron_expr) = cron {
                 patch.cron_schedule = Some(Some(cron_expr));
             }
-            if auto_start {
-                patch.auto_start = Some(true);
+            if let Some(auto_start) = auto_start {
+                patch.auto_start = Some(auto_start);
             }
             if let Some(github_repo) = github_repo {
                 patch.github_repo = Some(Some(github_repo));
@@ -199,5 +199,5 @@ fn map_session_error(err: ClientError, name: &str) -> anyhow::Error {
 }
 
 fn map_client_error(err: ClientError) -> anyhow::Error {
-    anyhow!(err.to_string())
+    anyhow::Error::new(err)
 }

@@ -1,8 +1,11 @@
+//! Typed HTTP client for `scmux-daemon`.
+
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_DAEMON_URL: &str = "http://localhost:7700";
+/// Default daemon endpoint for CLI requests (canonical daemon port 7878).
+pub const DEFAULT_DAEMON_URL: &str = "http://localhost:7878";
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -308,15 +311,15 @@ impl ApiClient {
 }
 
 pub fn resolve_base_url(host_flag: Option<&str>) -> String {
-    if let Ok(env_host) = std::env::var("SCMUX_HOST") {
-        if !env_host.trim().is_empty() {
-            return normalize_host(&env_host);
-        }
-    }
-
     if let Some(flag_host) = host_flag {
         if !flag_host.trim().is_empty() {
             return normalize_host(flag_host);
+        }
+    }
+
+    if let Ok(env_host) = std::env::var("SCMUX_HOST") {
+        if !env_host.trim().is_empty() {
+            return normalize_host(&env_host);
         }
     }
 

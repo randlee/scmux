@@ -1,3 +1,8 @@
+//! scmux CLI crate.
+//!
+//! This crate contains the command-line surface, daemon HTTP client, and
+//! terminal output helpers for the `scmux` binary.
+
 pub mod client;
 pub mod output;
 
@@ -7,7 +12,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "scmux")]
 #[command(about = "CLI client for scmux-daemon")]
 pub struct Cli {
-    /// Daemon base URL (e.g. http://localhost:7700)
+    /// Daemon base URL (e.g. http://localhost:7878)
     #[arg(long, global = true)]
     pub host: Option<String>,
 
@@ -65,8 +70,9 @@ pub enum Command {
         config: Option<String>,
         #[arg(long)]
         cron: Option<String>,
-        #[arg(long)]
-        auto_start: bool,
+        /// Set auto-start behavior. Supports `--auto-start` and `--auto-start=false`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        auto_start: Option<bool>,
         #[arg(long)]
         github_repo: Option<String>,
         #[arg(long)]

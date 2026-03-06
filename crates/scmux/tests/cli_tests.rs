@@ -90,7 +90,7 @@ fn td_c_04_host_resolution_uses_default_when_no_env_or_flag() {
     let resolved = resolve_base_url(None);
 
     restore_env_var("SCMUX_HOST", prev);
-    assert_eq!(resolved, "http://localhost:7700");
+    assert_eq!(resolved, "http://localhost:7878");
 }
 
 #[test]
@@ -107,12 +107,34 @@ fn td_c_05_host_resolution_uses_flag_when_env_missing() {
 }
 
 #[test]
-fn td_c_06_host_resolution_env_overrides_flag() {
+fn td_c_06_host_resolution_flag_overrides_env() {
     let _guard = env_lock().lock().expect("env lock");
     let prev = set_env_var("SCMUX_HOST", "https://example.internal:9999");
 
     let resolved = resolve_base_url(Some("127.0.0.1:8800"));
 
     restore_env_var("SCMUX_HOST", prev);
-    assert_eq!(resolved, "https://example.internal:9999");
+    assert_eq!(resolved, "http://127.0.0.1:8800");
+}
+
+#[test]
+fn td_c_07_parse_edit_auto_start_false() {
+    let cli = Cli::try_parse_from(["scmux", "edit", "alpha", "--auto-start=false"])
+        .expect("parse edit auto-start false");
+
+    match cli.command {
+        Command::Edit { auto_start, .. } => assert_eq!(auto_start, Some(false)),
+        other => panic!("expected edit command, got {other:?}"),
+    }
+}
+
+#[test]
+fn td_c_08_parse_edit_auto_start_true_without_value() {
+    let cli = Cli::try_parse_from(["scmux", "edit", "alpha", "--auto-start"])
+        .expect("parse edit auto-start true");
+
+    match cli.command {
+        Command::Edit { auto_start, .. } => assert_eq!(auto_start, Some(true)),
+        other => panic!("expected edit command, got {other:?}"),
+    }
 }
