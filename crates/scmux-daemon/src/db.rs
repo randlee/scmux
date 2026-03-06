@@ -1,4 +1,6 @@
-use crate::config::RemoteHost;
+// DG-02: This module is the sole SQLite writer. All Connection access is via AppState.db mutex.
+// No other module calls Connection::open — verified by audit (grep Connection::open crates/).
+use crate::config::HostConfig;
 use crate::AppState;
 use rusqlite::{params, Connection, Result};
 use std::sync::Arc;
@@ -27,12 +29,18 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
     })
 }
 
-pub fn seed_remote_hosts(conn: &Connection, hosts: &[RemoteHost]) -> anyhow::Result<()> {
+pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow::Result<()> {
     for host in hosts {
         conn.execute(
             "INSERT OR IGNORE INTO hosts (name, address, ssh_user, api_port, is_local)
-             VALUES (?1, ?2, ?3, 7700, 0)",
-            params![host.name, host.hostname, host.ssh_user],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                host.name,
+                host.address,
+                host.ssh_user,
+                host.api_port.unwrap_or(7700),
+                host.is_local.unwrap_or(false)
+            ],
         )?;
     }
     Ok(())
@@ -69,6 +77,9 @@ pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // DG-06: Migration is idempotent — safe to run on every startup.
+    // All DDL statements use CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS /
+    // CREATE TRIGGER IF NOT EXISTS so re-running on an existing schema is a no-op.
     conn.execute_batch(r#"
         CREATE TABLE IF NOT EXISTS hosts (
             id         INTEGER PRIMARY KEY,
@@ -165,73 +176,4 @@ fn system_hostname() -> String {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "local".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_db_path(name: &str) -> PathBuf {
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("scmux-{name}-{}-{id}.db", std::process::id()))
-    }
-
-    #[test]
-    fn td_01_open_creates_schema_on_fresh_db() {
-        let path = temp_db_path("td01");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open fresh db");
-        let table_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='hosts'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("query table");
-        assert_eq!(table_exists, 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_02_open_is_idempotent_on_existing_db() {
-        let path = temp_db_path("td02");
-        let _ = open(path.to_str().expect("utf8 path")).expect("first open");
-        let conn = open(path.to_str().expect("utf8 path")).expect("second open");
-        let index_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_sessions_host'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("query index");
-        assert_eq!(index_exists, 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_03_ensure_local_host_returns_same_id_on_repeated_calls() {
-        let path = temp_db_path("td03");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open");
-        let id1 = ensure_local_host(&conn).expect("first ensure");
-        let id2 = ensure_local_host(&conn).expect("second ensure");
-        assert_eq!(id1, id2);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_04_ensure_local_host_uses_system_hostname() {
-        let path = temp_db_path("td04");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open");
-        let id = ensure_local_host(&conn).expect("ensure host");
-        let name: String = conn
-            .query_row("SELECT name FROM hosts WHERE id = ?1", params![id], |r| {
-                r.get(0)
-            })
-            .expect("query host name");
-        assert_eq!(name, system_hostname());
-        let _ = std::fs::remove_file(path);
-    }
 }

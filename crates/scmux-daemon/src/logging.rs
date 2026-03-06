@@ -2,18 +2,19 @@ use std::sync::OnceLock;
 
 static INIT: OnceLock<()> = OnceLock::new();
 
-fn parse_level() -> tracing::Level {
-    match std::env::var("SCMUX_LOG")
-        .unwrap_or_else(|_| "info".to_string())
-        .to_ascii_lowercase()
-        .as_str()
-    {
+pub(crate) fn parse_level_from(val: Option<&str>) -> tracing::Level {
+    match val.unwrap_or("info").to_ascii_lowercase().as_str() {
         "trace" => tracing::Level::TRACE,
         "debug" => tracing::Level::DEBUG,
         "warn" => tracing::Level::WARN,
         "error" => tracing::Level::ERROR,
         _ => tracing::Level::INFO,
     }
+}
+
+pub(crate) fn parse_level() -> tracing::Level {
+    let value = std::env::var("SCMUX_LOG").ok();
+    parse_level_from(value.as_deref())
 }
 
 fn _init_stderr() {
@@ -31,6 +32,8 @@ fn _init_stderr() {
 
 #[derive(Debug, Clone)]
 pub struct RotationConfig {
+    // TODO: size-based rotation (50 MiB / 5 files) requires a custom appender or
+    // tracing-appender extension. Current implementation writes JSONL to one file.
     pub max_bytes: u64,
     pub max_files: u32,
 }
@@ -66,7 +69,7 @@ impl LoggingGuards {
     }
 }
 
-pub fn init_unified(
+pub fn init_logging(
     source_binary: &'static str,
     mode: UnifiedLogMode,
 ) -> anyhow::Result<LoggingGuards> {
@@ -88,7 +91,7 @@ pub fn init_stderr_only() -> LoggingGuards {
 }
 
 fn setup_daemon_writer(
-    source_binary: &'static str,
+    _source_binary: &'static str,
     file_path: std::path::PathBuf,
     rotation: RotationConfig,
 ) -> anyhow::Result<LoggingGuards> {
@@ -96,40 +99,64 @@ fn setup_daemon_writer(
         return Ok(LoggingGuards::empty());
     }
 
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)?;
+    ensure_log_dir(&file_path)?;
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("scmux-daemon.log");
+    let dir = file_path.parent().unwrap_or(std::path::Path::new("."));
 
-    let level = parse_level();
-    let writer_path = file_path.clone();
+    let file_appender = tracing_appender::rolling::never(dir, file_name);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
-        .with_writer(move || -> Box<dyn std::io::Write + Send> {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&writer_path)
-            {
-                Ok(file) => Box::new(file),
-                Err(_) => Box::new(std::io::stderr()),
-            }
-        })
-        .with_ansi(false)
-        .with_max_level(level)
-        .with_target(false)
+        .json()
+        .with_writer(non_blocking)
+        .with_max_level(parse_level())
         .try_init()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .ok();
 
     tracing::debug!(
-        source_binary,
         path = %file_path.display(),
         max_bytes = rotation.max_bytes,
         max_files = rotation.max_files,
-        "DaemonWriter logging initialized"
+        "daemon writer logging initialized"
     );
     let _ = INIT.set(());
-    Ok(LoggingGuards::empty())
+    Ok(LoggingGuards {
+        _guards: vec![Box::new(guard)],
+    })
+}
+
+pub(crate) fn ensure_log_dir(file_path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-D-14: ensure_log_dir() creates the parent directory for the log file.
+    #[test]
+    fn td_14_ensure_log_dir_creates_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("nested/scmux-daemon.log");
+        ensure_log_dir(&log_path).expect("ensure log dir");
+        assert!(log_path.parent().expect("parent").exists());
+    }
+
+    /// T-D-15: parse_level_from() resolves warn correctly.
+    #[test]
+    fn td_15_parse_level_returns_warn() {
+        assert_eq!(parse_level_from(Some("warn")), tracing::Level::WARN);
+    }
+
+    /// T-D-16: parse_level_from() resolves debug correctly.
+    /// This covers the --verbose path because main.rs resolves verbose to "debug".
+    #[test]
+    fn td_16_parse_level_returns_debug() {
+        assert_eq!(parse_level_from(Some("debug")), tracing::Level::DEBUG);
+    }
 }
