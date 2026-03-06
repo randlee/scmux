@@ -2,6 +2,12 @@
 name = "scmux"
 version.workspace = true
 edition.workspace = true
+description = "tmux session manager CLI for multi-agent Claude Code teams"
+keywords = ["tmux", "session", "claude", "agent", "multiplexer"]
+categories = ["command-line-utilities", "development-tools"]
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "scmux"
