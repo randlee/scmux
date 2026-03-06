@@ -42,9 +42,28 @@ Core daemon routes exist for health/list/detail/start/stop only. Missing endpoin
 
 4. `tests/api_tests.rs`
 - Implement coverage for `T-A-01..T-A-11` at minimum, plus route-not-found checks.
+- Add coverage for:
+  - `T-A-12`: `PATCH /sessions/:name` updates `cron_schedule`
+  - `T-A-13`: `DELETE /sessions/:name` sets `enabled=0`
+  - `T-A-14`: `GET /hosts` returns all hosts with reachability flag
 
 5. `tests/integration_tests.rs`
 - Implement `T-I-01..T-I-07` lifecycle cases.
+- Add:
+  - `T-I-08`: `write_health()` inserts a `daemon_health` row
+  - `T-I-09`: `write_health()` prunes rows older than 7 days
+
+### Deliverable: Session lifecycle enforcement (scheduler.rs)
+
+Ensure `poll_cycle()` in `scheduler.rs` enforces `SL-01..SL-11`:
+- `SL-01..SL-03`: detect and transition running/stopped states
+- `SL-04..SL-06`: `auto_start` restart behavior
+- `SL-07..SL-09`: cron scheduling logic
+- `SL-10..SL-11`: event logging on state transitions
+
+Ensure `tmux.rs` implements `PS-01..PS-06`:
+- `PS-01..PS-03`: list panes for a session and their status
+- `PS-04..PS-06`: store pane data in `sessions_panes` table
 
 ## Acceptance Criteria
 
@@ -53,15 +72,28 @@ Core daemon routes exist for health/list/detail/start/stop only. Missing endpoin
 - Session add/edit/remove operations work and persist as expected.
 - Start/stop/jump all produce event rows in `session_events`.
 - T-A-01..T-A-11 and T-I-01..T-I-07 pass.
+- `T-A-12`: `PATCH /sessions/:name` updates `cron_schedule` and persists correctly.
+- `T-A-13`: `DELETE /sessions/:name` sets `enabled=0` (soft delete).
+- `T-A-14`: `GET /hosts` returns all hosts with `reachable` flag.
+- `T-I-08`: `write_health()` inserts a `daemon_health` row on each call.
+- `T-I-09`: `write_health()` prunes `daemon_health` rows older than 7 days.
+- `T-D-08`: `tmux::live_sessions()` returns all active tmux sessions on the local host.
+- `T-D-09`: `tmux::live_sessions()` returns an empty vec (not an error) when tmux is not running.
+- Poll cycle correctly detects a killed session and marks it stopped within one cycle.
+- Poll cycle restarts an `auto_start` session killed externally within 30s.
+- Pane data is written to `sessions_panes` on each poll.
 
 ## Requirement IDs Covered
 
-- `DG-03`
+- `DG-02`, `DG-03`, `DG-06`
 - `TL-01..TL-08`
-- `API-08..API-16`
+- `API-01..API-16`
+- `SL-01..SL-11`
+- `PS-01..PS-06`
 - `SR-02`, `SR-04`
-- `T-A-01..T-A-11`
-- `T-I-01..T-I-07`
+- `T-A-01..T-A-14`
+- `T-D-08`, `T-D-09`
+- `T-I-01..T-I-09`
 
 ## Dependencies
 

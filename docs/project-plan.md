@@ -33,6 +33,32 @@ scmux is delivered in four phases with explicit integration branches and version
 - Completion: `arch-cmux` reports commit/PR back via ATM.
 - Follow-up: QA findings are sent by `quality-mgr` to `team-lead`, then forwarded as fix tasks.
 
+## Sprint Status
+
+| Sprint | Status |
+|--------|--------|
+| S0 | Complete (foundation: cargo build, workspace scaffold, env var rename) |
+| S1.1 | Pending |
+| S1.2 | Pending |
+| S2.1 | Pending |
+| S2.2 | Pending |
+| S3.1 | Pending |
+| S3.2 | Pending |
+| S4.1 | Pending |
+| S4.2 | Pending |
+
+## Sprint S0 — Foundation (Complete)
+
+**Status:** Complete as of initial repo setup (before formal sprint tracking began).
+
+**Delivered:**
+- `cargo build --workspace` clean with no errors
+- Workspace scaffold: `crates/scmux-daemon`, `crates/scmux`
+- `tms` → `scmux` rename throughout codebase
+- `SCMUX_DB` and `SCMUX_PORT` env vars established
+
+**Note:** Logging module (DG-08) was identified post-S0 and is assigned to Sprint S1.1.
+
 ## Phase 1 — Foundation + API
 
 **Goal:** daemon config/database foundations are compliant and the HTTP surface is complete.

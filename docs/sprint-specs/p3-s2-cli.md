@@ -32,12 +32,47 @@ CLI crate exists as a placeholder and does not yet communicate with daemon APIs.
 5. `tests/cli_tests.rs` (new)
 - Basic command parsing and URL resolution tests.
 
+## Output Format
+
+### scmux list
+
+Columns (tab-aligned): `NAME`, `STATUS`, `HOST`, `CRON/AUTO`, `WINDOW`
+
+Example:
+```
+NAME            STATUS    HOST       CRON/AUTO   WINDOW
+agent-team-a    running   local      auto        main
+agent-team-b    stopped   dgx-spark  0 9 * * *   work
+agent-team-c    running   local      —           main
+```
+
+- `CRON/AUTO`: shows cron expression if set; `auto` if `auto_start=1` and no cron; `—` otherwise.
+- `WINDOW`: active tmux window name, or `—` if session is stopped.
+- `--json` flag (future scope, not MVP): outputs raw JSON from `GET /sessions`.
+
+### Error behavior
+
+- **Connection refused** (daemon not running):
+  ```
+  scmux: daemon not running (start with scmux-daemon)
+  ```
+  Exit code: 1
+
+- **404 Not Found** (unknown session name):
+  ```
+  scmux: session <name> not found
+  ```
+  Exit code: 1
+
 ## Acceptance Criteria
 
 - CLI command set matches requirements section 4.12.
 - All commands call daemon API endpoints correctly.
 - `scmux list` and `scmux show` match daemon data contracts.
 - `SCMUX_HOST` and `--host` overrides function correctly.
+- `scmux list` output uses the column layout specified above.
+- Connection refused produces the documented error message (exit 1).
+- 404 response produces the documented session-not-found message (exit 1).
 
 ## Requirement IDs Covered
 

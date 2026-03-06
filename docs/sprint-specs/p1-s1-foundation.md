@@ -56,6 +56,26 @@ Current daemon starts with env-only defaults and local-host-only seeding. Schema
   - `T-D-06` cron does not fire in window.
   - `T-D-07` invalid cron returns false.
 
+### Deliverable: logging.rs module
+
+New file: `crates/scmux-daemon/src/logging.rs`
+
+Adapted from agent-team-mail `atm-core/src/logging.rs` — keep `DaemonWriter` + `StderrOnly` modes, drop `ProducerFanIn` entirely.
+
+Required functions and types:
+- `fn parse_level() -> tracing::Level` — reads `SCMUX_LOG`, defaults `INFO`
+- `fn init_stderr_only() -> LoggingGuards`
+- `struct RotationConfig { max_bytes: u64, max_files: u32 }` — defaults 50 MiB / 5 files
+- `enum UnifiedLogMode { DaemonWriter { file_path, rotation }, StderrOnly }`
+- `struct LoggingGuards { _guards: Vec<Box<dyn Any + Send>> }`
+- `fn init_logging(source: &'static str, mode: UnifiedLogMode) -> anyhow::Result<LoggingGuards>`
+
+Wire into `main.rs`:
+- Add `#[arg(short, long)] verbose: bool` to clap `Args`
+- Before subscriber init: `if args.verbose { set SCMUX_LOG=debug }`
+- Call `init_logging("scmux-daemon", UnifiedLogMode::DaemonWriter { file_path: ~/.config/scmux/scmux-daemon.log, rotation: default })`
+- Hold `_log_guards` for the lifetime of `main()`
+
 ## Acceptance Criteria
 
 - Daemon loads config from `~/.config/scmux/scmux.toml` with sane defaults when missing.
@@ -63,10 +83,14 @@ Current daemon starts with env-only defaults and local-host-only seeding. Schema
 - Configured hosts are seeded into DB on first run without duplicates.
 - DB migration definitions align with `docs/schema.sql` trigger/index names.
 - Unit tests T-D-01..T-D-07 pass.
+- `SCMUX_LOG=debug` causes DEBUG messages to appear on stderr.
+- `SCMUX_LOG=warn` suppresses INFO messages on stderr.
+- `scmux-daemon --verbose` starts at DEBUG level without setting `SCMUX_LOG` manually.
+- `~/.config/scmux/scmux-daemon.log` is created on daemon startup.
 
 ## Requirement IDs Covered
 
-- `DG-04`, `DG-05`, `DG-07`
+- `DG-04`, `DG-05`, `DG-07`, `DG-08`
 - `T-D-01`, `T-D-02`, `T-D-03`, `T-D-04`, `T-D-05`, `T-D-06`, `T-D-07`
 
 ## Dependencies

@@ -43,6 +43,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DG-05 | The daemon shall seed the SQLite `hosts` table from `scmux.toml` on first run if the table is empty | 1.1 |
 | DG-06 | The daemon shall apply SQLite schema migrations on every startup (idempotent) | 1.1 |
 | DG-07 | The daemon shall log structured output via `tracing` at INFO level by default | 1.1 |
+| DG-08 | The daemon shall initialize logging via a `logging.rs` module that: reads `SCMUX_LOG` env var (trace/debug/info/warn/error, default info); writes human-readable output to stderr with `with_target(false)`; writes JSONL-formatted events to `~/.config/scmux/scmux-daemon.log` with 50 MiB size limit and 5-file rotation; exposes `init_logging()` returning `LoggingGuards` (RAII); supports `--verbose`/`-v` flag (sets `SCMUX_LOG=debug`). | S1.1 |
 
 ### 4.2 Daemon — Session Lifecycle
 
