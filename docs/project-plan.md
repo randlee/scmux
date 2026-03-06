@@ -2,172 +2,225 @@
 
 ## Overview
 
-scmux is built in 4 phases. Each phase ends with a PR from `develop` → `main` and a version tag.
+scmux is delivered in four phases with explicit integration branches and version targets.
 
-| Phase | Theme | Target Version |
-|-------|-------|----------------|
-| 1 | Daemon Core | 0.1.0 |
-| 2 | Terminal + Dashboard | 0.2.0 |
-| 3 | CI Integration + CLI | 0.3.0 |
-| 4 | Hardening + Release | 1.0.0 |
+| Phase | Theme | Target Version | Integration Branch |
+|-------|-------|----------------|--------------------|
+| 1 | Foundation + API | 0.1.0 | `integrate/phase-1` |
+| 2 | Multi-host + Dashboard | 0.2.0 | `integrate/phase-2` |
+| 3 | CI + CLI | 0.3.0 | `integrate/phase-3` |
+| 4 | Supervision + Release | 1.0.0 | `integrate/phase-4` |
 
-**Branch strategy:**
-- Sprint branches → `integrate/phase-N` → `develop` → `main` (at phase completion)
-- All PRs target `integrate/phase-N` except final phase merge
-- Worktrees at `../scmux-worktrees/<branch-name>` via `sc-git-worktree`
+## Execution Model
 
----
+### Roles and ownership
 
-## Phase 1 — Daemon Core
+- `team-lead` owns sequencing, review, and merge decisions.
+- `arch-cmux` is the sole implementation agent for sprint delivery work.
+- `quality-mgr` runs dual QA tracks (`rust-qa-agent` + `scmux-qa-agent`) in parallel.
 
-**Goal:** Daemon compiles, runs, persists sessions, and exposes the full API surface.
+### Branching and worktrees
 
-### Sprint S0 — Foundation
+- Main repo remains on `develop`.
+- Each sprint runs in a dedicated worktree at `/Users/randlee/Documents/github/scmux-worktrees/<branch>`.
+- Sprint PRs target the phase integration branch.
+- Phase integration branches merge to `develop` after phase completion.
 
-**Acceptance:** `cargo build --workspace` clean; unit tests T-D-01..T-D-07 pass.
+### ATM communication protocol
 
-| ID | Task | Req IDs |
-|----|------|---------|
-| S0-1 | Config struct + load `~/.config/scmux/scmux.toml` | DG-04 |
-| S0-2 | Add `config: Config` to `AppState` | arch §4.1 |
-| S0-3 | Seed remote hosts from config into `hosts` table on first run | DG-05 |
-| S0-4 | Set default log level to INFO | DG-07 |
-| S0-5 | Fix DB schema parity: add `sessions_updated_at` trigger; fix index names | F-22, F-23 |
-| S0-6 | Unit tests: `db::open()` (T-D-01..T-D-02), `ensure_local_host` (T-D-03..T-D-04), `should_run_now` (T-D-05..T-D-07) | T-D-01..07 |
+- Assignment: `team-lead` sends direct ATM message to `arch-cmux`.
+- Ack: `arch-cmux` acknowledges receipt before coding.
+- Completion: `arch-cmux` reports commit/PR back via ATM.
+- Follow-up: QA findings are sent by `quality-mgr` to `team-lead`, then forwarded as fix tasks.
 
-### Sprint S1 — Full API Surface
+## Phase 1 — Foundation + API
 
-**Acceptance:** All API endpoints respond; integration tests T-I-01..T-I-09 pass; API tests T-A-01..T-A-14 pass.
+**Goal:** daemon config/database foundations are compliant and the HTTP surface is complete.
+**Version:** `0.1.0`
+**Integration branch:** `integrate/phase-1`
 
-| ID | Task | Req IDs |
-|----|------|---------|
-| S1-1 | `POST /sessions` — register session with config validation | API-11, SR-02 |
-| S1-2 | `PATCH /sessions/:name` — update cron, auto_start, config | API-12 |
-| S1-3 | `DELETE /sessions/:name` — soft-delete via `enabled=0` | API-13, SR-04 |
-| S1-4 | `GET /hosts` — list hosts with reachability flag | API-14 |
-| S1-5 | `GET /dashboard-config.json` — host list + settings | API-15 |
-| S1-6 | `POST /sessions/:name/start` + `stop` — with event logging | API-08, API-09, API-16 |
-| S1-7 | `GET /` — serve dashboard static files | DG-03 |
-| S1-8 | `POST /sessions/:name/jump` — iTerm2 AppleScript (local + SSH) | TL-01..TL-06 |
-| S1-9 | Integration tests T-I-01..T-I-09 | T-I-01..09 |
-| S1-10 | API tests T-A-01..T-A-14 | T-A-01..14 |
+### Sprint 1.1 — Foundation (Config + DB)
 
-**Phase 1 completion gate:**
-- `cargo build --release --workspace` clean, zero warnings
-- All T-D, T-I, T-A tests pass
-- Daemon starts, creates DB, serves `/health`
-- Session registered via API starts via `auto_start` within 30s
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p1-s1-foundation`
+- Base branch: `integrate/phase-1`
+- PR target: `integrate/phase-1`
+- Context: build is clean, but config loading/host seeding/schema parity gaps remain.
+- Deliverables:
+  - `crates/scmux-daemon/src/config.rs` with `Config` model matching architecture section 6 (`daemon`, `polling`, `hosts`).
+  - `Config::load()` from `~/.config/scmux/scmux.toml` with defaults fallback.
+  - `crates/scmux-daemon/src/main.rs` uses config for `port`, `db_path`, intervals; `AppState` adds `config: Config`; default INFO logging.
+  - `crates/scmux-daemon/src/db.rs` adds `seed_hosts_from_config()`, `sessions_updated_at` trigger, schema index names matching `docs/schema.sql`.
+  - `scmux.toml.example` at repo root.
+  - `tests/db_tests.rs` for T-D-01..T-D-04.
+  - `tests/scheduler_tests.rs` for T-D-05..T-D-07 (`should_run_now` exposed as `pub(crate)`).
+- Acceptance criteria:
+  - daemon starts with defaults when config file is missing.
+  - config file values override defaults.
+  - host seeding is idempotent and inserts configured remote hosts.
+  - DB migration parity matches `docs/schema.sql` for trigger/index names.
+  - T-D-01..T-D-07 pass.
+- Requirement IDs: `DG-04`, `DG-05`, `DG-07`, `T-D-01..T-D-07`.
+- Detailed spec: [docs/sprint-specs/p1-s1-foundation.md](./sprint-specs/p1-s1-foundation.md)
 
----
+### Sprint 1.2 — Full API Surface
 
-## Phase 2 — Terminal + Dashboard
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p1-s2-api`
+- Base branch: `feature/p1-s1-foundation`
+- PR target: `integrate/phase-1`
+- Context: foundational daemon loop exists; API endpoints and jump/static serving are incomplete.
+- Deliverables:
+  - `crates/scmux-daemon/src/api.rs` adds `POST /sessions`, `PATCH /sessions/:name`, `DELETE /sessions/:name`, `GET /hosts`, `GET /dashboard-config.json`, `POST /sessions/:name/jump`, `GET /`.
+  - `crates/scmux-daemon/src/tmux.rs` / jump helper module implements iTerm2 AppleScript local+SSH launch.
+  - `crates/scmux-daemon/src/db.rs` and handler validation enforce session registration constraints (`SR-02`, soft delete behavior).
+  - event logging coverage for start/stop/jump actions (`API-16`).
+  - `tests/api_tests.rs` covering T-A-01..T-A-11.
+  - `tests/integration_tests.rs` covering T-I-01..T-I-07.
+- Acceptance criteria:
+  - full API routes respond with documented behavior/status.
+  - jump endpoint returns structured `{ok,message}` for success/failure.
+  - session CRUD flow works end-to-end with soft delete.
+  - integration/API tests listed above pass.
+- Requirement IDs: `API-08..API-16`, `TL-01..TL-08`, `DG-03`, `SR-02`, `SR-04`.
+- Detailed spec: [docs/sprint-specs/p1-s2-api.md](./sprint-specs/p1-s2-api.md)
 
-**Goal:** Jump works end-to-end; multi-host reachability; dashboard shows live data.
+## Phase 2 — Multi-host + Dashboard
 
-### Sprint S2 — Jump + Multi-Host + Live Dashboard
+**Goal:** multi-host reachability is first-class and dashboard is live against daemon APIs.
+**Version:** `0.2.0`
+**Integration branch:** `integrate/phase-2`
 
-| ID | Task | Req IDs |
-|----|------|---------|
-| S2-1 | iTerm2 AppleScript polish + terminal override from request body | TL-07, TL-08 |
-| S2-2 | Remote host health polling — `last_seen`, reachability flag | MH-03..MH-08 |
-| S2-3 | `/hosts` response includes `reachable` + `last_seen` | MH-05 |
-| S2-4 | Dashboard: swap mock data for live API fetch | DV-01..DV-11 |
-| S2-5 | Dashboard: monochrome rendering for unreachable hosts | DV-06, MH-06 |
-| S2-6 | Dashboard: "last seen N ago" indicator | MH-07 |
-| S2-7 | Dashboard: jump modal — pane list, CI badges, "Open in iTerm2" button | DJ-01..DJ-07 |
-| S2-8 | Dashboard: Grid / List / Grouped views + filters | DV-01..DV-10 |
-| S2-9 | Dashboard: header counts | DV-11 |
-| S2-10 | Manual UI tests T-UI-01..T-UI-17 | T-UI-01..17 |
+### Sprint 2.1 — Multi-Host Reachability
 
-**Phase 2 completion gate:**
-- Jump via dashboard opens iTerm2 attached to correct session
-- Disconnecting VPN → host goes monochrome, no error dialog
-- Reconnecting VPN → host resumes full color within one poll cycle
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p2-s1-multihost`
+- Base branch: `integrate/phase-2`
+- PR target: `integrate/phase-2`
+- Context: hosts table exists, but active reachability model/last-seen behavior must be implemented.
+- Deliverables:
+  - `crates/scmux-daemon/src/hosts.rs` for host polling and in-memory reachability state.
+  - `crates/scmux-daemon/src/main.rs` adds host poll loop scheduling.
+  - `crates/scmux-daemon/src/api.rs` `/hosts` and dashboard config include `reachable` and `last_seen` fields.
+  - integration tests for unreachable/restore behavior.
+- Acceptance criteria:
+  - unreachable hosts are represented without daemon errors.
+  - last-known data remains available during outage.
+  - reachability auto-recovers within one poll cycle.
+- Requirement IDs: `MH-01..MH-09`, `T-I-10..T-I-12`.
+- Detailed spec: [docs/sprint-specs/p2-s1-multihost.md](./sprint-specs/p2-s1-multihost.md)
 
----
+### Sprint 2.2 — Live Dashboard
 
-## Phase 3 — CI Integration + CLI
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p2-s2-dashboard`
+- Base branch: `feature/p2-s1-multihost`
+- PR target: `integrate/phase-2`
+- Context: dashboard has static mock data and needs live integration + host-aware rendering.
+- Deliverables:
+  - `dashboard/team-dashboard.jsx` switched to live fetch across hosts.
+  - monochrome rendering for unreachable-host sessions.
+  - jump modal wired to daemon `POST /sessions/:name/jump` and feedback handling.
+  - grid/list/grouped + filters + header aggregate counts validated against API.
+  - dashboard manual test checklist coverage.
+- Acceptance criteria:
+  - dashboard renders live daemon data from all configured hosts.
+  - unreachable hosts are monochrome with `last seen` indicator.
+  - jump modal executes daemon jump and renders response.
+- Requirement IDs: `DV-01..DV-11`, `DC-01..DC-05`, `DJ-01..DJ-07`, `T-UI-01..T-UI-17`.
+- Detailed spec: [docs/sprint-specs/p2-s2-dashboard.md](./sprint-specs/p2-s2-dashboard.md)
 
-**Goal:** CI badges on dashboard; full `scmux` CLI operational.
+## Phase 3 — CI + CLI
 
-### Sprint S3a — CI Integration
+**Goal:** CI signals are integrated and CLI is production-usable.
+**Version:** `0.3.0`
+**Integration branch:** `integrate/phase-3`
 
-| ID | Task | Req IDs |
-|----|------|---------|
-| S3a-1 | Detect `gh` and `az` in PATH at startup | CI-03 |
-| S3a-2 | Record `tool_unavailable` in `session_ci` when CLI missing | CI-04 |
-| S3a-3 | `ci_loop`: adaptive 1min (active) / 5min (idle) intervals | CI-05..CI-08 |
-| S3a-4 | GitHub: `gh pr list` + `gh run list` → `session_ci` | CI-09, CI-12 |
-| S3a-5 | Azure: `az pipelines` → `session_ci` | CI-10, CI-13 |
-| S3a-6 | Dashboard: CI badges + tool-unavailable tooltip | DC-01..DC-05 |
-| S3a-7 | Tests: T-D-10..T-D-13, T-A-09..T-A-10 | T-D-10..13 |
+### Sprint 3.1 — CI Integration
 
-### Sprint S3b — CLI Binary
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p3-s1-ci`
+- Base branch: `integrate/phase-3`
+- PR target: `integrate/phase-3`
+- Context: schema has `session_ci`; provider polling/tool-degradation behavior is not implemented.
+- Deliverables:
+  - `crates/scmux-daemon/src/ci.rs` for provider polling, parsing, persistence.
+  - `crates/scmux-daemon/src/main.rs` adds `ci_loop` with adaptive interval.
+  - tool discovery at startup for `gh`/`az`; `tool_unavailable` persisted to `session_ci`.
+  - API summaries expose provider status payloads.
+  - tests covering interval and tool-unavailable behavior.
+- Acceptance criteria:
+  - active sessions poll every 1 minute; idle/stopped every 5 minutes.
+  - unavailable provider tools yield persisted `tool_unavailable` status.
+  - provider payloads surface in API for dashboard display.
+- Requirement IDs: `CI-01..CI-13`, `T-D-10..T-D-13`.
+- Detailed spec: [docs/sprint-specs/p3-s1-ci.md](./sprint-specs/p3-s1-ci.md)
 
-| ID | Task | Req IDs |
-|----|------|---------|
-| S3b-1 | Add `reqwest`, `clap`, `tokio` to `crates/scmux/Cargo.toml` | CLI-01..03 |
-| S3b-2 | `scmux list` / `show` | CLI-04..05 |
-| S3b-3 | `scmux start` / `stop` / `jump` | CLI-06..08 |
-| S3b-4 | `scmux add` / `edit` / `disable` / `enable` / `remove` | CLI-09..12 |
-| S3b-5 | `scmux hosts` / `scmux daemon status` | CLI-13..14 |
-| S3b-6 | `TMS_HOST` → `SCMUX_HOST` env var support + `--host` flag | CLI-03 |
+### Sprint 3.2 — CLI Binary
 
-**Phase 3 completion gate:**
-- Missing `gh`/`az` shows grayed badges with install tooltip
-- `scmux list` matches dashboard data
-- `scmux jump <name>` opens iTerm2 via daemon
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p3-s2-cli`
+- Base branch: `feature/p3-s1-ci`
+- PR target: `integrate/phase-3`
+- Context: CLI crate is only a stub and lacks network/command plumbing.
+- Deliverables:
+  - `crates/scmux/Cargo.toml` includes `reqwest`, `clap`, `tokio`.
+  - `crates/scmux/src/main.rs` implements command tree and dispatch.
+  - `crates/scmux/src/client.rs` HTTP client with `SCMUX_HOST`/`--host` support.
+  - command coverage for list/show/start/stop/jump/add/edit/disable/enable/remove/hosts/daemon status.
+- Acceptance criteria:
+  - all CLI commands map to daemon API routes and return actionable output.
+  - `scmux list` matches dashboard-visible state.
+  - `scmux jump` triggers daemon jump route successfully.
+- Requirement IDs: `CLI-01..CLI-14`.
+- Detailed spec: [docs/sprint-specs/p3-s2-cli.md](./sprint-specs/p3-s2-cli.md)
 
----
+## Phase 4 — Supervision + Release
 
-## Phase 4 — Hardening + Release
+**Goal:** production hardening, end-to-end validation, and 1.0 release readiness.
+**Version:** `1.0.0`
+**Integration branch:** `integrate/phase-4`
 
-**Goal:** Production-ready, fully tested, published.
+### Sprint 4.1 — Supervision + Performance
 
-### Sprint S4 — Hardening + Acceptance
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p4-s1-supervision`
+- Base branch: `integrate/phase-4`
+- PR target: `integrate/phase-4`
+- Context: core features exist; service lifecycle and perf guarantees are not finalized.
+- Deliverables:
+  - launchd + systemd service assets and install/run docs.
+  - daemon status command and health telemetry refinements.
+  - profiling/optimization pass for poll/API latency constraints.
+- Acceptance criteria:
+  - boot supervision works on macOS and Linux.
+  - NF-03/NF-04 performance targets are measured and met.
+  - daemon remains resilient under partial-host/session failure.
+- Requirement IDs: `DH-04`, `DH-05`, `NF-01..NF-05`, `NF-08`.
+- Detailed spec: [docs/sprint-specs/p4-s1-supervision.md](./sprint-specs/p4-s1-supervision.md)
 
-| ID | Task | Req IDs |
-|----|------|---------|
-| S4-1 | launchd plist: `com.scmux.scmux-daemon.plist` | DH-04 |
-| S4-2 | systemd unit: `scmux-daemon.service` | DH-05 |
-| S4-3 | `scmux daemon status` command | CLI-14 |
-| S4-4 | Performance pass: poll cycle <500ms / 50 sessions | NF-03 |
-| S4-5 | HTTP read endpoints <100ms | NF-04 |
-| S4-6 | Resilience: no crash on single-host/session failure | NF-08 |
-| S4-7 | E2E tests T-E-01..T-E-11 | T-E-01..11 |
-| S4-8 | `cargo build --release --workspace` — zero warnings | AC-1 |
-| S4-9 | 24-hour daemon stability run on macOS | AC-2 |
-| S4-10 | Homebrew formula in `randlee/homebrew-tap` | release |
-| S4-11 | Publish `scmux-daemon` + `scmux` to crates.io | release |
+### Sprint 4.2 — E2E Tests + Release
 
-**Phase 4 completion gate (Acceptance Criteria from requirements §7):**
-1. `cargo build --release --workspace` clean, zero warnings
-2. Daemon survives 24h on macOS without crashing
-3. All T-D, T-I, T-A tests pass
-4. Dashboard shows real live data
-5. Jump via dashboard opens iTerm2 correctly
-6. `auto_start` session killed externally restarts within 30s
-7. Cron-scheduled session starts within 15s of scheduled time
-8. VPN disconnect → no error dialogs; host shows monochrome
-9. VPN reconnect → full color within one poll cycle
-10. Missing `gh`/`az` → grayed badges with install tooltip
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p4-s2-release`
+- Base branch: `feature/p4-s1-supervision`
+- PR target: `integrate/phase-4`
+- Context: all feature work merged; final verification and release packaging required.
+- Deliverables:
+  - complete end-to-end suite T-E-01..T-E-11.
+  - acceptance criteria validation report.
+  - release artifacts/versioning to `1.0.0` and Homebrew publish steps.
+- Acceptance criteria:
+  - all E2E tests pass consistently.
+  - section 7 acceptance criteria in requirements are fully satisfied.
+  - release checklist complete for binary/crate/Homebrew channels.
+- Requirement IDs: `T-E-01..T-E-11`, `AC-1..AC-10`.
+- Detailed spec: [docs/sprint-specs/p4-s2-release.md](./sprint-specs/p4-s2-release.md)
 
----
+## Dependencies Across Sprints
 
-## Agent Execution Model
+- `1.1` must merge before `1.2`.
+- `1.2` must merge before any phase 2 sprint.
+- `2.1` must merge before `2.2`.
+- `2.2` should merge before phase 3 UI-facing CI badge validation.
+- `3.1` must merge before `3.2`.
+- `3.2` must merge before any phase 4 sprint.
+- `4.1` must merge before `4.2`.
 
-| Role | Agent | Responsibility |
-|------|-------|----------------|
-| team-lead | Claude Code (you) | Coordination, task assignment, reviews, merges |
-| arch-cmux | Codex (`scmux-dev` tmux pane) | Implementation work |
-| publisher | Claude Code agent | Release gates and publishing |
-| scmux-qa | Background agent | Compliance validation before phase merges |
+## Current Phase Entry Point
 
----
-
-## Current Status
-
-| Sprint | Status |
-|--------|--------|
-| S0 | 🔄 In progress (arch-cmux) |
-| S1–S4 | Pending |
+- Active planning baseline: `Phase 1`.
+- Next implementation sprint: `1.1`.
+- First QA gate: after `1.1` PR opens on `integrate/phase-1`.
