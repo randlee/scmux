@@ -54,6 +54,9 @@ impl ApiHarness {
                 },
                 hosts: Vec::new(),
             },
+            reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+            last_api_access: std::sync::atomic::AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
         });
 
         let router = api::router(Arc::clone(&state));
@@ -213,6 +216,7 @@ async fn t_a_03_get_sessions_returns_sessions_with_correct_status_and_panes() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Vec<Value> = response.json().await.expect("json");
     assert_eq!(body.len(), 1);
+    assert!(body[0]["host_id"].as_i64().is_some());
     assert_eq!(body[0]["status"], "running");
     assert!(body[0]["panes"].is_array());
     assert!(!body[0]["panes"].as_array().expect("panes").is_empty());
