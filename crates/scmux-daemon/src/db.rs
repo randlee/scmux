@@ -1,6 +1,36 @@
-use rusqlite::{Connection, Result, params};
-use std::sync::Arc;
+// DG-02: This module is the sole SQLite writer. All Connection access is via AppState.db mutex.
+// No other module calls Connection::open — verified by audit (grep Connection::open crates/).
+use crate::config::HostConfig;
 use crate::AppState;
+use anyhow::{anyhow, bail};
+use cron::Schedule;
+use rusqlite::{params, Connection, Result};
+use rusqlite::{types::Value as SqlValue, OptionalExtension};
+use std::sync::Arc;
+use std::{fmt::Write as _, str::FromStr};
+
+#[derive(Debug, Clone)]
+pub struct NewSession {
+    pub name: String,
+    pub project: Option<String>,
+    pub host_id: i64,
+    pub config_json: String,
+    pub cron_schedule: Option<String>,
+    pub auto_start: bool,
+    pub github_repo: Option<String>,
+    pub azure_project: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionPatch {
+    pub project: Option<Option<String>>,
+    pub config_json: Option<String>,
+    pub cron_schedule: Option<Option<String>>,
+    pub auto_start: Option<bool>,
+    pub enabled: Option<bool>,
+    pub github_repo: Option<Option<String>>,
+    pub azure_project: Option<Option<String>>,
+}
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -10,26 +40,194 @@ pub fn open(path: &str) -> Result<Connection> {
 }
 
 pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
+    if let Ok(id) = conn.query_row("SELECT id FROM hosts WHERE is_local = 1 LIMIT 1", [], |r| {
+        r.get(0)
+    }) {
+        return Ok(id);
+    }
+
+    let hostname = system_hostname();
     conn.execute(
-        "INSERT OR IGNORE INTO hosts (name, address, is_local) VALUES ('local', 'localhost', 1)",
-        [],
+        "INSERT INTO hosts (name, address, is_local) VALUES (?1, 'localhost', 1)",
+        params![hostname],
     )?;
-    conn.query_row(
-        "SELECT id FROM hosts WHERE is_local = 1 LIMIT 1",
-        [],
-        |r| r.get(0),
-    )
+    conn.query_row("SELECT id FROM hosts WHERE is_local = 1 LIMIT 1", [], |r| {
+        r.get(0)
+    })
+}
+
+pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow::Result<()> {
+    for host in hosts {
+        conn.execute(
+            "INSERT OR IGNORE INTO hosts (name, address, ssh_user, api_port, is_local)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                host.name,
+                host.address,
+                host.ssh_user,
+                host.api_port.unwrap_or(7700),
+                host.is_local.unwrap_or(false)
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn create_session(conn: &Connection, session: &NewSession) -> anyhow::Result<i64> {
+    validate_config_session_name(&session.name, &session.config_json)?;
+    if let Some(expr) = &session.cron_schedule {
+        validate_cron(expr)?;
+    }
+
+    conn.execute(
+        "INSERT INTO sessions (
+            name, project, host_id, config_json, cron_schedule, auto_start, enabled, github_repo, azure_project
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
+        params![
+            session.name,
+            session.project,
+            session.host_id,
+            session.config_json,
+            session.cron_schedule,
+            session.auto_start,
+            session.github_repo,
+            session.azure_project
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_session(
+    conn: &Connection,
+    host_id: i64,
+    name: &str,
+    patch: &SessionPatch,
+) -> anyhow::Result<bool> {
+    let session_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2 AND enabled = 1",
+            params![name, host_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if session_id.is_none() {
+        return Ok(false);
+    }
+
+    if let Some(config_json) = &patch.config_json {
+        validate_config_session_name(name, config_json)?;
+    }
+    if let Some(Some(expr)) = &patch.cron_schedule {
+        validate_cron(expr)?;
+    }
+
+    let mut set_parts: Vec<&str> = Vec::new();
+    let mut values: Vec<SqlValue> = Vec::new();
+
+    if let Some(project) = &patch.project {
+        set_parts.push("project = ?");
+        values.push(match project {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(config_json) = &patch.config_json {
+        set_parts.push("config_json = ?");
+        values.push(SqlValue::Text(config_json.clone()));
+    }
+    if let Some(cron_schedule) = &patch.cron_schedule {
+        set_parts.push("cron_schedule = ?");
+        values.push(match cron_schedule {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(auto_start) = patch.auto_start {
+        set_parts.push("auto_start = ?");
+        values.push(SqlValue::Integer(if auto_start { 1 } else { 0 }));
+    }
+    if let Some(enabled) = patch.enabled {
+        set_parts.push("enabled = ?");
+        values.push(SqlValue::Integer(if enabled { 1 } else { 0 }));
+    }
+    if let Some(github_repo) = &patch.github_repo {
+        set_parts.push("github_repo = ?");
+        values.push(match github_repo {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(azure_project) = &patch.azure_project {
+        set_parts.push("azure_project = ?");
+        values.push(match azure_project {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+
+    if set_parts.is_empty() {
+        return Ok(true);
+    }
+
+    let mut sql = String::from("UPDATE sessions SET ");
+    for (idx, part) in set_parts.iter().enumerate() {
+        if idx > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(part);
+    }
+    let _ = write!(&mut sql, " WHERE name = ? AND host_id = ? AND enabled = 1");
+    values.push(SqlValue::Text(name.to_string()));
+    values.push(SqlValue::Integer(host_id));
+
+    conn.execute(&sql, rusqlite::params_from_iter(values))?;
+    Ok(true)
+}
+
+pub fn soft_delete_session(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE sessions SET enabled = 0 WHERE name = ?1 AND host_id = ?2 AND enabled = 1",
+        params![name, host_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<Option<i64>> {
+    let value = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
+            params![name, host_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(value)
+}
+
+pub fn log_session_event(
+    conn: &Connection,
+    session_id: i64,
+    event: &str,
+    trigger: &str,
+    note: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO session_events (session_id, event, trigger, note) VALUES (?1, ?2, ?3, ?4)",
+        params![session_id, event, trigger, note],
+    )?;
+    Ok(())
 }
 
 pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
     let state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let db = state.db.lock().unwrap();
-        let running: i64 = db.query_row(
-            "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
-            [],
-            |r| r.get(0),
-        ).unwrap_or(0);
+        let running: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
 
         db.execute(
             "INSERT INTO daemon_health (host_id, status, sessions_running) VALUES (?1, 'ok', ?2)",
@@ -50,6 +248,9 @@ pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // DG-06: Migration is idempotent — safe to run on every startup.
+    // All DDL statements use CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS /
+    // CREATE TRIGGER IF NOT EXISTS so re-running on an existing schema is a no-op.
     conn.execute_batch(r#"
         CREATE TABLE IF NOT EXISTS hosts (
             id         INTEGER PRIMARY KEY,
@@ -120,7 +321,57 @@ fn migrate(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_sessions_host    ON sessions (host_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions (project);
-        CREATE INDEX IF NOT EXISTS idx_events_session   ON session_events (session_id, occurred_at);
-        CREATE INDEX IF NOT EXISTS idx_health_recorded  ON daemon_health (recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events (session_id, occurred_at);
+        CREATE INDEX IF NOT EXISTS idx_daemon_health_recorded ON daemon_health (recorded_at);
+
+        CREATE TRIGGER IF NOT EXISTS sessions_updated_at
+          AFTER UPDATE ON sessions
+          FOR EACH ROW
+          BEGIN
+            UPDATE sessions SET updated_at = datetime('now') WHERE id = OLD.id;
+          END;
     "#)
+}
+
+fn validate_config_session_name(name: &str, config_json: &str) -> anyhow::Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| anyhow!("invalid config_json JSON: {e}"))?;
+    let json_session_name = value
+        .get("session_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("config_json.session_name is required"))?;
+    if json_session_name != name {
+        bail!("config_json.session_name must equal session name");
+    }
+    Ok(())
+}
+
+fn validate_cron(expr: &str) -> anyhow::Result<()> {
+    let normalized = normalize_cron_expr(expr);
+    Schedule::from_str(&normalized).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
+    Ok(())
+}
+
+fn normalize_cron_expr(expr: &str) -> String {
+    if expr.split_whitespace().count() == 5 {
+        format!("0 {expr}")
+    } else {
+        expr.to_string()
+    }
+}
+
+fn system_hostname() -> String {
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "local".to_string())
 }

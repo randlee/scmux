@@ -63,7 +63,7 @@ Ensure `poll_cycle()` in `scheduler.rs` enforces `SL-01..SL-11`:
 
 Ensure `tmux.rs` implements `PS-01..PS-06`:
 - `PS-01..PS-03`: list panes for a session and their status
-- `PS-04..PS-06`: store pane data in `sessions_panes` table
+- `PS-04..PS-06`: store pane data in `session_status.panes_json`
 
 ## Acceptance Criteria
 
@@ -81,7 +81,7 @@ Ensure `tmux.rs` implements `PS-01..PS-06`:
 - `T-D-09`: `tmux::live_sessions()` returns an empty vec (not an error) when tmux is not running.
 - Poll cycle correctly detects a killed session and marks it stopped within one cycle.
 - Poll cycle restarts an `auto_start` session killed externally within 30s.
-- Pane data is written to `sessions_panes` on each poll.
+- Pane data is stored as JSON in `session_status.panes_json` on each poll.
 
 ## Requirement IDs Covered
 

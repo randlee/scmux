@@ -36,3 +36,4 @@ target
 *.pyc
 __pycache__/
 .pytest_cache/
+.claude/scripts/__pycache__/
