@@ -8,6 +8,7 @@ use axum::{
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -57,6 +58,17 @@ struct SessionSummary {
     auto_start: bool,
     panes: serde_json::Value,
     polled_at: Option<String>,
+    session_ci: Vec<SessionCiSummary>,
+}
+
+#[derive(Serialize, Clone)]
+struct SessionCiSummary {
+    provider: String,
+    status: String,
+    data_json: Option<serde_json::Value>,
+    tool_message: Option<String>,
+    polled_at: Option<String>,
+    next_poll_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -168,6 +180,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
     let sessions = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SessionSummary>> {
         let db = state.db.lock().unwrap();
+        let ci_by_session = load_ci_by_session(&db)?;
         let mut stmt = db.prepare(
             "SELECT s.id, s.name, s.project, s.host_id, s.cron_schedule, s.auto_start,
                     COALESCE(ss.status, 'stopped') as status,
@@ -181,8 +194,9 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
 
         let rows = stmt.query_map([], |r| {
             let panes_str: String = r.get(7)?;
+            let id: i64 = r.get(0)?;
             Ok(SessionSummary {
-                id: r.get(0)?,
+                id,
                 name: r.get(1)?,
                 project: r.get(2)?,
                 host_id: r.get(3)?,
@@ -191,6 +205,7 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
                 status: r.get(6)?,
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at: r.get(8)?,
+                session_ci: ci_by_session.get(&id).cloned().unwrap_or_default(),
             })
         })?;
 
@@ -253,6 +268,8 @@ async fn get_session(
             panes_str,
             polled_at,
         ) = row;
+        let session_ci =
+            load_ci_for_session(&db, id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let mut estmt = db
             .prepare(
@@ -287,6 +304,7 @@ async fn get_session(
                 status,
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at,
+                session_ci,
             },
             config_json: serde_json::from_str(&config_str).unwrap_or(serde_json::json!({})),
             recent_events: events,
@@ -612,6 +630,64 @@ async fn fetch_hosts(state: Arc<AppState>) -> anyhow::Result<Vec<HostSummary>> {
     })
     .await??;
     Ok(hosts)
+}
+
+fn load_ci_by_session(
+    db: &rusqlite::Connection,
+) -> anyhow::Result<HashMap<i64, Vec<SessionCiSummary>>> {
+    let mut stmt = db.prepare(
+        "SELECT session_id, provider, status, data_json, tool_message, polled_at, next_poll_at
+         FROM session_ci
+         ORDER BY session_id, provider",
+    )?;
+    let mut map: HashMap<i64, Vec<SessionCiSummary>> = HashMap::new();
+    let rows = stmt.query_map([], |r| {
+        let data_json: Option<String> = r.get(3)?;
+        Ok((
+            r.get::<_, i64>(0)?,
+            SessionCiSummary {
+                provider: r.get(1)?,
+                status: r.get(2)?,
+                data_json: data_json.and_then(|raw| serde_json::from_str(&raw).ok()),
+                tool_message: r.get(4)?,
+                polled_at: r.get(5)?,
+                next_poll_at: r.get(6)?,
+            },
+        ))
+    })?;
+
+    for row in rows {
+        let (session_id, entry) = row?;
+        map.entry(session_id).or_default().push(entry);
+    }
+    Ok(map)
+}
+
+fn load_ci_for_session(
+    db: &rusqlite::Connection,
+    session_id: i64,
+) -> anyhow::Result<Vec<SessionCiSummary>> {
+    let mut stmt = db.prepare(
+        "SELECT provider, status, data_json, tool_message, polled_at, next_poll_at
+         FROM session_ci
+         WHERE session_id = ?1
+         ORDER BY provider",
+    )?;
+    let rows = stmt
+        .query_map(params![session_id], |r| {
+            let data_json: Option<String> = r.get(2)?;
+            Ok(SessionCiSummary {
+                provider: r.get(0)?,
+                status: r.get(1)?,
+                data_json: data_json.and_then(|raw| serde_json::from_str(&raw).ok()),
+                tool_message: r.get(3)?,
+                polled_at: r.get(4)?,
+                next_poll_at: r.get(5)?,
+            })
+        })?
+        .filter_map(|row| row.ok())
+        .collect::<Vec<_>>();
+    Ok(rows)
 }
 
 async fn log_action_result(

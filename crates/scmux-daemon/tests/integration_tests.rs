@@ -1,6 +1,6 @@
 use chrono::{Datelike, Duration, Timelike, Utc};
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
-use scmux_daemon::{db, hosts, scheduler, AppState};
+use scmux_daemon::{ci, db, hosts, scheduler, AppState};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -41,6 +41,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
         host_id,
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ci_tools: ci::ToolAvailability::default(),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });

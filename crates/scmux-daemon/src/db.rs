@@ -43,6 +43,26 @@ pub struct RemoteSessionUpsert {
     pub polled_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CiSession {
+    pub id: i64,
+    pub name: String,
+    pub github_repo: Option<String>,
+    pub azure_project: Option<String>,
+    pub has_active_pane: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionCiUpdate {
+    pub session_id: i64,
+    pub provider: String,
+    pub status: String,
+    pub data_json: Option<String>,
+    pub tool_message: Option<String>,
+    pub polled_at: String,
+    pub next_poll_at: String,
+}
+
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
@@ -280,6 +300,74 @@ pub fn upsert_remote_session(
     Ok(())
 }
 
+pub fn list_ci_sessions(conn: &Connection) -> anyhow::Result<Vec<CiSession>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.name, s.github_repo, s.azure_project, COALESCE(ss.panes_json, '[]')
+         FROM sessions s
+         LEFT JOIN session_status ss ON ss.session_id = s.id
+         WHERE s.enabled = 1
+           AND (s.github_repo IS NOT NULL OR s.azure_project IS NOT NULL)
+         ORDER BY s.id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let panes_json: String = r.get(4)?;
+            Ok(CiSession {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                github_repo: r.get(2)?,
+                azure_project: r.get(3)?,
+                has_active_pane: panes_json_has_active(&panes_json),
+            })
+        })?
+        .filter_map(|row| row.ok())
+        .collect::<Vec<_>>();
+    Ok(rows)
+}
+
+pub fn ci_provider_due(
+    conn: &Connection,
+    session_id: i64,
+    provider: &str,
+    now_iso: &str,
+) -> anyhow::Result<bool> {
+    let due = conn
+        .query_row(
+            "SELECT next_poll_at <= ?3
+             FROM session_ci
+             WHERE session_id = ?1 AND provider = ?2",
+            params![session_id, provider, now_iso],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(true);
+    Ok(due)
+}
+
+pub fn upsert_session_ci(conn: &Connection, update: &SessionCiUpdate) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO session_ci (
+            session_id, provider, status, data_json, tool_message, polled_at, next_poll_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(session_id, provider) DO UPDATE SET
+            status = excluded.status,
+            data_json = excluded.data_json,
+            tool_message = excluded.tool_message,
+            polled_at = excluded.polled_at,
+            next_poll_at = excluded.next_poll_at",
+        params![
+            update.session_id,
+            update.provider,
+            update.status,
+            update.data_json,
+            update.tool_message,
+            update.polled_at,
+            update.next_poll_at
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn log_session_event(
     conn: &Connection,
     session_id: i64,
@@ -442,6 +530,20 @@ fn validate_cron(expr: &str) -> anyhow::Result<()> {
     let normalized = normalize_cron_expr(expr);
     Schedule::from_str(&normalized).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
     Ok(())
+}
+
+fn panes_json_has_active(panes_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(panes_json) else {
+        return false;
+    };
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    items.iter().any(|item| {
+        item.get("status")
+            .and_then(|status| status.as_str())
+            .is_some_and(|status| status.eq_ignore_ascii_case("active"))
+    })
 }
 
 fn normalize_cron_expr(expr: &str) -> String {
