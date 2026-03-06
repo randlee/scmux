@@ -1,6 +1,6 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, db, logging, scheduler, AppState};
+use scmux_daemon::{api, ci, db, hosts, logging, scheduler, AppState};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
     )?;
     let host_id = db::ensure_local_host(&conn)?;
+    let ci_tools = ci::detect_tools();
 
     info!("scmux-daemon starting — db={db_path} host_id={host_id}");
 
@@ -93,6 +94,10 @@ async fn main() -> anyhow::Result<()> {
         db: std::sync::Mutex::new(conn),
         host_id,
         config,
+        reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ci_tools,
+        last_api_access: std::sync::atomic::AtomicU64::new(0),
+        started_at: std::time::Instant::now(),
     });
 
     // Poll loop — every 15 seconds
@@ -117,6 +122,39 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             if let Err(e) = db::write_health(&health_state).await {
                 tracing::error!("health write error: {e}");
+            }
+        }
+    });
+
+    // Host reachability loop — adaptive interval based on API activity and live sessions
+    let host_poll_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = hosts::poll_hosts(Arc::clone(&host_poll_state)).await {
+                tracing::warn!("host poll error: {e}");
+            }
+
+            let active = hosts::should_use_active_interval(&host_poll_state)
+                .await
+                .unwrap_or(false);
+            let sleep_secs = if active {
+                health_interval_secs
+            } else {
+                health_interval_secs.saturating_mul(10)
+            }
+            .max(1);
+            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+        }
+    });
+
+    // CI loop — provider polling with per-session adaptive cadence via next_poll_at
+    let ci_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            if let Err(e) = ci::poll_once(&ci_state).await {
+                tracing::warn!("ci poll loop error: {e}");
             }
         }
     });
