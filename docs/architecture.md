@@ -444,5 +444,5 @@ scmux-daemon
 | `scmux edit` TUI | Interactive session config editor |
 | Azure DevOps deep integration | PR links, pipeline status, work items |
 | Host auto-discovery | mDNS broadcast from daemon |
-| `GET /public-status` endpoint | Unauthenticated, no session details — returns `{active, idle, stopped}` counts only. Allows scanning multiple user daemons on a shared machine to determine safe-to-reboot status without exposing session names or content. `scmux hosts reboot-check <host>` CLI command scans well-known port range and aggregates. |
+| `GET /public-status` endpoint | Unauthenticated — returns `{user, active, idle, stopped}`. Username is included (not sensitive on a shared machine where all users are known). Allows scanning multiple user daemons to determine safe-to-reboot status. `scmux hosts reboot-check <host>` scans well-known port range and prints per-user verdict. |
 | Session templates | Parameterized configs for spinning up new teams quickly |
