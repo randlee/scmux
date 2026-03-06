@@ -20,6 +20,10 @@ scmux provides:
 
 **Missing tools degrade gracefully.** If `gh` or `az` CLI are not installed, CI status shows "unavailable" with a tooltip explaining what to install. The rest of the system works normally.
 
+**One daemon per user per machine.** The daemon runs as the logged-in OS user and only sees that user's tmux sessions — this is enforced naturally by tmux's user isolation. Multiple people can use the same remote machine simultaneously; each person runs their own daemon on their own port. There is no cross-user session visibility. The `api_port` field in host config is the differentiator. A user's local scmux config points to the specific port for their daemon on each remote machine.
+
+**Dashboard → local daemon only.** The browser dashboard never contacts remote hosts directly. The local daemon polls remote daemons via HTTP (`GET remote:api_port/sessions`) and caches the results locally. When a remote host is unreachable, the local daemon serves last-known session data from its local cache. This decouples dashboard availability from remote host availability.
+
 ## 3. System Diagram
 
 ```
