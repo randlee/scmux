@@ -46,8 +46,9 @@ agent-team-b    stopped   dgx-spark  0 9 * * *   work
 agent-team-c    running   local      —           main
 ```
 
-- `CRON/AUTO`: shows cron expression if set; `auto` if `auto_start=1` and no cron; `—` otherwise.
-- `WINDOW`: active tmux window name, or `—` if session is stopped.
+- `CRON/AUTO`: shows cron expression if set. If no cron is set and `auto_start=1`, shows `auto`; otherwise shows `—`.
+  If both cron and auto-start are configured, cron is shown (cron takes precedence in display).
+- `WINDOW`: active tmux window name proxy derived from pane metadata (`pane.name`) until daemon adds a dedicated window field; `—` if session is stopped.
 - `--json` flag (future scope, not MVP): outputs raw JSON from `GET /sessions`.
 
 ### Error behavior
