@@ -1,6 +1,6 @@
 // DG-02: This module is the sole SQLite writer. All Connection access is via AppState.db mutex.
 // No other module calls Connection::open — verified by audit (grep Connection::open crates/).
-use crate::config::RemoteHost;
+use crate::config::HostConfig;
 use crate::AppState;
 use rusqlite::{params, Connection, Result};
 use std::sync::Arc;
@@ -29,12 +29,18 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
     })
 }
 
-pub fn seed_remote_hosts(conn: &Connection, hosts: &[RemoteHost]) -> anyhow::Result<()> {
+pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow::Result<()> {
     for host in hosts {
         conn.execute(
             "INSERT OR IGNORE INTO hosts (name, address, ssh_user, api_port, is_local)
-             VALUES (?1, ?2, ?3, 7700, 0)",
-            params![host.name, host.hostname, host.ssh_user],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                host.name,
+                host.address,
+                host.ssh_user,
+                host.api_port.unwrap_or(7700),
+                host.is_local.unwrap_or(false)
+            ],
         )?;
     }
     Ok(())
@@ -209,7 +215,14 @@ mod tests {
         let conn = open(path.to_str().expect("utf8 path")).expect("second open");
 
         // Verify core tables still exist after second open
-        for table in &["hosts", "sessions", "session_status", "session_events", "daemon_health", "session_ci"] {
+        for table in &[
+            "hosts",
+            "sessions",
+            "session_status",
+            "session_events",
+            "daemon_health",
+            "session_ci",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -244,18 +257,8 @@ mod tests {
     }
 
     #[test]
-    fn td_03_ensure_local_host_returns_same_id_on_repeated_calls() {
+    fn td_03_ensure_local_host_uses_system_hostname() {
         let path = temp_db_path("td03");
-        let conn = open(path.to_str().expect("utf8 path")).expect("open");
-        let id1 = ensure_local_host(&conn).expect("first ensure");
-        let id2 = ensure_local_host(&conn).expect("second ensure");
-        assert_eq!(id1, id2);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn td_04_ensure_local_host_uses_system_hostname() {
-        let path = temp_db_path("td04");
         let conn = open(path.to_str().expect("utf8 path")).expect("open");
         let id = ensure_local_host(&conn).expect("ensure host");
         let name: String = conn
@@ -264,6 +267,16 @@ mod tests {
             })
             .expect("query host name");
         assert_eq!(name, system_hostname());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn td_04_ensure_local_host_returns_same_id_on_repeated_calls() {
+        let path = temp_db_path("td04");
+        let conn = open(path.to_str().expect("utf8 path")).expect("open");
+        let id1 = ensure_local_host(&conn).expect("first ensure");
+        let id2 = ensure_local_host(&conn).expect("second ensure");
+        assert_eq!(id1, id2);
         let _ = std::fs::remove_file(path);
     }
 }

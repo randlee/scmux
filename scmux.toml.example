@@ -1,9 +1,18 @@
+[daemon]
 log_level = "info"
 port = 7700
 db_path = "~/.config/scmux/scmux.db"
-poll_interval_secs = 15
+default_terminal = "iterm2"
 
-[[remote_hosts]]
+[polling]
+tmux_interval_secs = 15
+health_interval_secs = 60
+ci_active_interval_secs = 60
+ci_idle_interval_secs = 300
+
+[[hosts]]
 name = "dgx-spark"
-hostname = "192.168.1.50"
+address = "192.168.1.50"
 ssh_user = "randlee"
+api_port = 7700
+is_local = false

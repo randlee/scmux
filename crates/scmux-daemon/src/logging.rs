@@ -31,6 +31,8 @@ fn _init_stderr() {
 
 #[derive(Debug, Clone)]
 pub struct RotationConfig {
+    // TODO: size-based rotation (50 MiB / 5 files) requires a custom appender or
+    // tracing-appender extension. Current implementation writes JSONL to one file.
     pub max_bytes: u64,
     pub max_files: u32,
 }
@@ -66,7 +68,7 @@ impl LoggingGuards {
     }
 }
 
-pub fn init_unified(
+pub fn init_logging(
     source_binary: &'static str,
     mode: UnifiedLogMode,
 ) -> anyhow::Result<LoggingGuards> {
@@ -88,7 +90,7 @@ pub fn init_stderr_only() -> LoggingGuards {
 }
 
 fn setup_daemon_writer(
-    source_binary: &'static str,
+    _source_binary: &'static str,
     file_path: std::path::PathBuf,
     rotation: RotationConfig,
 ) -> anyhow::Result<LoggingGuards> {
@@ -99,59 +101,51 @@ fn setup_daemon_writer(
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)?;
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("scmux-daemon.log");
+    let dir = file_path.parent().unwrap_or(std::path::Path::new("."));
 
-    let level = parse_level();
-    let writer_path = file_path.clone();
+    let file_appender = tracing_appender::rolling::never(dir, file_name);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
-        .with_writer(move || -> Box<dyn std::io::Write + Send> {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&writer_path)
-            {
-                Ok(file) => Box::new(file),
-                Err(_) => Box::new(std::io::stderr()),
-            }
-        })
-        .with_ansi(false)
-        .with_max_level(level)
-        .with_target(false)
+        .json()
+        .with_writer(non_blocking)
+        .with_max_level(parse_level())
         .try_init()
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .ok();
 
     tracing::debug!(
-        source_binary,
         path = %file_path.display(),
         max_bytes = rotation.max_bytes,
         max_files = rotation.max_files,
-        "DaemonWriter logging initialized"
+        "daemon writer logging initialized"
     );
     let _ = INIT.set(());
-    Ok(LoggingGuards::empty())
+    Ok(LoggingGuards {
+        _guards: vec![Box::new(guard)],
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// T-D-14: init_unified() with DaemonWriter mode creates the parent directory for the log file.
+    /// T-D-14: init_logging() with DaemonWriter mode creates the parent directory for the log file.
     /// Uses a tempdir so this test is side-effect-free and does not touch ~/.config/scmux/.
     #[test]
     fn td_14_daemon_writer_creates_log_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let log_path = dir.path().join("subdir").join("scmux-daemon.log");
 
-        // The subdirectory does not exist yet — init_unified must create it.
+        // The subdirectory does not exist yet — init_logging must create it.
         assert!(!log_path.parent().unwrap().exists());
 
-        // init_unified may fail if a global subscriber is already installed (other tests),
+        // init_logging may fail if a global subscriber is already installed (other tests),
         // but the directory creation happens before subscriber registration, so we only
         // check the filesystem outcome.
-        let _ = init_unified(
+        let _ = init_logging(
             "test",
             UnifiedLogMode::DaemonWriter {
                 file_path: log_path.clone(),
@@ -161,7 +155,7 @@ mod tests {
 
         assert!(
             log_path.parent().unwrap().exists(),
-            "parent directory was not created by init_unified DaemonWriter"
+            "parent directory was not created by init_logging DaemonWriter"
         );
     }
 
@@ -171,11 +165,18 @@ mod tests {
         // Use a sub-process-safe approach: set env var, call parse_level, restore.
         // This is safe in a single-threaded test context.
         let prev = std::env::var("SCMUX_LOG").ok();
-        std::env::set_var("SCMUX_LOG", "warn");
+        // SAFETY: test-only env mutation around immediate parse_level() call.
+        unsafe { std::env::set_var("SCMUX_LOG", "warn") };
         let level = parse_level();
         match prev {
-            Some(v) => std::env::set_var("SCMUX_LOG", v),
-            None => std::env::remove_var("SCMUX_LOG"),
+            Some(v) => {
+                // SAFETY: restoring env var in test teardown.
+                unsafe { std::env::set_var("SCMUX_LOG", v) }
+            }
+            None => {
+                // SAFETY: restoring env var in test teardown.
+                unsafe { std::env::remove_var("SCMUX_LOG") }
+            }
         }
         assert_eq!(level, tracing::Level::WARN);
     }
@@ -186,11 +187,18 @@ mod tests {
     #[test]
     fn td_16_parse_level_returns_debug_for_scmux_log_debug() {
         let prev = std::env::var("SCMUX_LOG").ok();
-        std::env::set_var("SCMUX_LOG", "debug");
+        // SAFETY: test-only env mutation around immediate parse_level() call.
+        unsafe { std::env::set_var("SCMUX_LOG", "debug") };
         let level = parse_level();
         match prev {
-            Some(v) => std::env::set_var("SCMUX_LOG", v),
-            None => std::env::remove_var("SCMUX_LOG"),
+            Some(v) => {
+                // SAFETY: restoring env var in test teardown.
+                unsafe { std::env::set_var("SCMUX_LOG", v) }
+            }
+            None => {
+                // SAFETY: restoring env var in test teardown.
+                unsafe { std::env::remove_var("SCMUX_LOG") }
+            }
         }
         assert_eq!(level, tracing::Level::DEBUG);
     }
