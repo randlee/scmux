@@ -1,4 +1,5 @@
 use scmux_daemon::api;
+use scmux_daemon::ci;
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
 use scmux_daemon::AppState;
@@ -55,6 +56,7 @@ impl ApiHarness {
                 hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ci_tools: ci::ToolAvailability::default(),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
         });
@@ -464,6 +466,82 @@ async fn t_a_14_get_hosts_returns_all_hosts_with_reachability_flag() {
     let body: Vec<Value> = response.json().await.expect("json");
     assert!(body.len() >= 2);
     assert!(body.iter().all(|row| row["reachable"].is_boolean()));
+}
+
+#[tokio::test]
+async fn t_a_15_get_sessions_includes_ci_summary_payload() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    {
+        let db = h.state.db.lock().expect("db lock");
+        let session_id: i64 = db
+            .query_row("SELECT id FROM sessions WHERE name = 'alpha'", [], |r| {
+                r.get(0)
+            })
+            .expect("session id");
+        db.execute(
+            "INSERT INTO session_ci (session_id, provider, status, data_json, tool_message, polled_at, next_poll_at)
+             VALUES (?1, 'github', 'ok', ?2, NULL, datetime('now'), datetime('now', '+1 minute'))",
+            rusqlite::params![
+                session_id,
+                r#"{"prs":[{"number":123,"title":"feat: test"}],"runs":[{"status":"completed"}]}"#
+            ],
+        )
+        .expect("insert session ci");
+    }
+
+    let response = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Vec<Value> = response.json().await.expect("json");
+    assert_eq!(body.len(), 1);
+    assert!(body[0]["session_ci"].is_array());
+    assert_eq!(body[0]["session_ci"][0]["provider"], "github");
+    assert_eq!(body[0]["session_ci"][0]["status"], "ok");
+    assert_eq!(
+        body[0]["session_ci"][0]["data_json"]["prs"][0]["number"],
+        123
+    );
+}
+
+#[tokio::test]
+async fn t_a_16_get_session_detail_includes_ci_summary_payload() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    {
+        let db = h.state.db.lock().expect("db lock");
+        let session_id: i64 = db
+            .query_row("SELECT id FROM sessions WHERE name = 'alpha'", [], |r| {
+                r.get(0)
+            })
+            .expect("session id");
+        db.execute(
+            "INSERT INTO session_ci (session_id, provider, status, data_json, tool_message, polled_at, next_poll_at)
+             VALUES (?1, 'github', 'tool_unavailable', NULL, 'Install gh CLI: brew install gh', datetime('now'), datetime('now', '+5 minute'))",
+            rusqlite::params![session_id],
+        )
+        .expect("insert session ci");
+    }
+
+    let response = h
+        .client
+        .get(format!("{}/sessions/alpha", h.base_url))
+        .send()
+        .await
+        .expect("detail request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert!(body["session_ci"].is_array());
+    assert_eq!(body["session_ci"][0]["provider"], "github");
+    assert_eq!(body["session_ci"][0]["status"], "tool_unavailable");
+    assert!(body["session_ci"][0]["tool_message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("brew install gh"));
 }
 
 #[tokio::test]
