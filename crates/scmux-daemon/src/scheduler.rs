@@ -46,7 +46,7 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
 
     let now = Utc::now();
 
-    // Phase 2: Update status + stop events via spawn_blocking
+    // Phase 2: Update status and write transition events via spawn_blocking
     let state2 = Arc::clone(state);
     let live2 = live.clone();
     let sessions2 = sessions
@@ -61,6 +61,13 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
             let panes_json = live2
                 .get(name)
                 .map(|p| serde_json::to_string(p).unwrap_or_default());
+            let previous_status: Option<String> = db
+                .query_row(
+                    "SELECT status FROM session_status WHERE session_id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .ok();
 
             db.execute(
                 "INSERT INTO session_status (session_id, status, panes_json, polled_at)
@@ -72,26 +79,13 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
                 params![id, status, panes_json],
             )?;
 
-            if !is_live {
-                let was_running: bool = db
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM session_events
-                         WHERE session_id = ?1 AND event = 'started'
-                         AND occurred_at > (
-                           SELECT COALESCE(MAX(occurred_at), '1970-01-01')
-                           FROM session_events
-                           WHERE session_id = ?1 AND event = 'stopped'
-                         )",
-                        params![id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(false);
-
-                if was_running {
+            if let Some(prev) = previous_status.as_deref() {
+                if prev != status {
+                    let event = if is_live { "started" } else { "stopped" };
                     db.execute(
                         "INSERT INTO session_events (session_id, event, trigger)
-                         VALUES (?1, 'stopped', 'daemon')",
-                        params![id],
+                         VALUES (?1, ?2, 'daemon')",
+                        params![id, event],
                     )?;
                 }
             }

@@ -8,7 +8,6 @@ use tracing::info;
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
 const DEFAULT_PORT: u16 = 7700;
-
 #[derive(Debug, Parser)]
 #[command(name = "scmux-daemon")]
 struct Args {
