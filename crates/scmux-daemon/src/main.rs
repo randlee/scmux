@@ -1,6 +1,6 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, db, logging, scheduler, AppState};
+use scmux_daemon::{api, db, hosts, logging, scheduler, AppState};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -93,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
         db: std::sync::Mutex::new(conn),
         host_id,
         config,
+        reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        last_api_access: std::sync::atomic::AtomicU64::new(0),
+        started_at: std::time::Instant::now(),
     });
 
     // Poll loop — every 15 seconds
@@ -118,6 +121,27 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = db::write_health(&health_state).await {
                 tracing::error!("health write error: {e}");
             }
+        }
+    });
+
+    // Host reachability loop — adaptive interval based on API activity and live sessions
+    let host_poll_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = hosts::poll_hosts(Arc::clone(&host_poll_state)).await {
+                tracing::warn!("host poll error: {e}");
+            }
+
+            let active = hosts::should_use_active_interval(&host_poll_state)
+                .await
+                .unwrap_or(false);
+            let sleep_secs = if active {
+                health_interval_secs
+            } else {
+                health_interval_secs.saturating_mul(10)
+            }
+            .max(1);
+            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
         }
     });
 

@@ -1,7 +1,8 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
-    response::{Html, Json},
+    middleware::{from_fn_with_state, Next},
+    response::{Html, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -15,6 +16,7 @@ use crate::tmux::{self, HostTarget};
 use crate::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let middleware_state = Arc::clone(&state);
     Router::new()
         .route("/", get(dashboard_index))
         .route("/health", get(health))
@@ -29,6 +31,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/:name/stop", post(stop_session))
         .route("/sessions/:name/jump", post(jump_session))
         .layer(CorsLayer::permissive())
+        .layer(from_fn_with_state(middleware_state, touch_last_api_access))
         .with_state(state)
 }
 
@@ -48,6 +51,7 @@ struct SessionSummary {
     id: i64,
     name: String,
     project: Option<String>,
+    host_id: i64,
     status: String,
     cron_schedule: Option<String>,
     auto_start: bool,
@@ -130,6 +134,15 @@ async fn dashboard_index() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
 
+async fn touch_last_api_access(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    state.mark_api_access();
+    next.run(request).await
+}
+
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let host_id = state.host_id;
     let running: i64 = tokio::task::spawn_blocking(move || {
@@ -156,27 +169,28 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
     let sessions = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SessionSummary>> {
         let db = state.db.lock().unwrap();
         let mut stmt = db.prepare(
-            "SELECT s.id, s.name, s.project, s.cron_schedule, s.auto_start,
+            "SELECT s.id, s.name, s.project, s.host_id, s.cron_schedule, s.auto_start,
                     COALESCE(ss.status, 'stopped') as status,
                     COALESCE(ss.panes_json, '[]') as panes_json,
                     ss.polled_at
                  FROM sessions s
                  LEFT JOIN session_status ss ON ss.session_id = s.id
-                 WHERE s.host_id = ?1 AND s.enabled = 1
-                 ORDER BY s.project, s.name",
+                 WHERE s.enabled = 1
+                 ORDER BY s.host_id, s.project, s.name",
         )?;
 
-        let rows = stmt.query_map(params![state.host_id], |r| {
-            let panes_str: String = r.get(6)?;
+        let rows = stmt.query_map([], |r| {
+            let panes_str: String = r.get(7)?;
             Ok(SessionSummary {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 project: r.get(2)?,
-                cron_schedule: r.get(3)?,
-                auto_start: r.get(4)?,
-                status: r.get(5)?,
+                host_id: r.get(3)?,
+                cron_schedule: r.get(4)?,
+                auto_start: r.get(5)?,
+                status: r.get(6)?,
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
-                polled_at: r.get(7)?,
+                polled_at: r.get(8)?,
             })
         })?;
 
@@ -199,7 +213,7 @@ async fn get_session(
 
         let row = db
             .query_row(
-                "SELECT s.id, s.name, s.project, s.cron_schedule, s.auto_start,
+                "SELECT s.id, s.host_id, s.name, s.project, s.cron_schedule, s.auto_start,
                     s.config_json,
                     COALESCE(ss.status, 'stopped'),
                     COALESCE(ss.panes_json, '[]'),
@@ -209,18 +223,19 @@ async fn get_session(
              WHERE s.name = ?1 AND s.host_id = ?2 AND s.enabled = 1",
                 params![name, state.host_id],
                 |r| {
-                    let panes_str: String = r.get(7)?;
-                    let config_str: String = r.get(5)?;
+                    let panes_str: String = r.get(8)?;
+                    let config_str: String = r.get(6)?;
                     Ok((
                         r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
                         r.get::<_, Option<String>>(3)?,
-                        r.get::<_, bool>(4)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, bool>(5)?,
                         config_str,
-                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
                         panes_str,
-                        r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
@@ -228,6 +243,7 @@ async fn get_session(
 
         let (
             id,
+            host_id,
             name,
             project,
             cron_schedule,
@@ -265,6 +281,7 @@ async fn get_session(
                 id,
                 name,
                 project,
+                host_id,
                 cron_schedule,
                 auto_start,
                 status,
@@ -551,6 +568,10 @@ async fn get_dashboard_config(
 }
 
 async fn fetch_hosts(state: Arc<AppState>) -> anyhow::Result<Vec<HostSummary>> {
+    let reachability = {
+        let map = state.reachability.lock().expect("reachability lock");
+        map.clone()
+    };
     let hosts = tokio::task::spawn_blocking(move || {
         let db_conn = state.db.lock().unwrap();
         let mut stmt = db_conn.prepare(
@@ -559,19 +580,29 @@ async fn fetch_hosts(state: Arc<AppState>) -> anyhow::Result<Vec<HostSummary>> {
         )?;
         let rows = stmt
             .query_map([], |r| {
+                let id: i64 = r.get(0)?;
                 let is_local: bool = r.get(5)?;
                 let address: String = r.get(2)?;
                 let api_port: u16 = r.get(4)?;
-                let last_seen: Option<String> = r.get(6)?;
+                let db_last_seen: Option<String> = r.get(6)?;
+                let reach = reachability.get(&id);
+                let reachable = if is_local {
+                    true
+                } else {
+                    reach.map(|entry| entry.reachable).unwrap_or(false)
+                };
+                let last_seen = reach
+                    .and_then(|entry| entry.last_seen.clone())
+                    .or(db_last_seen);
                 Ok(HostSummary {
-                    id: r.get(0)?,
+                    id,
                     name: r.get(1)?,
                     address: address.clone(),
                     ssh_user: r.get(3)?,
                     api_port,
                     is_local,
-                    last_seen: last_seen.clone(),
-                    reachable: is_local || last_seen.is_some(),
+                    last_seen,
+                    reachable,
                     url: format!("http://{address}:{api_port}"),
                 })
             })?

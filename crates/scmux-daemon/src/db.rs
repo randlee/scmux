@@ -32,6 +32,17 @@ pub struct SessionPatch {
     pub azure_project: Option<Option<String>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoteSessionUpsert {
+    pub name: String,
+    pub project: Option<String>,
+    pub cron_schedule: Option<String>,
+    pub auto_start: bool,
+    pub status: String,
+    pub panes_json: String,
+    pub polled_at: Option<String>,
+}
+
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
@@ -70,6 +81,18 @@ pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow
             ],
         )?;
     }
+    Ok(())
+}
+
+pub fn update_host_last_seen(
+    conn: &Connection,
+    host_id: i64,
+    last_seen: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE hosts SET last_seen = ?1 WHERE id = ?2",
+        params![last_seen, host_id],
+    )?;
     Ok(())
 }
 
@@ -203,6 +226,60 @@ pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result
     Ok(value)
 }
 
+pub fn upsert_remote_session(
+    conn: &Connection,
+    host_id: i64,
+    session: &RemoteSessionUpsert,
+) -> anyhow::Result<()> {
+    let config_json = serde_json::json!({ "session_name": session.name }).to_string();
+    conn.execute(
+        "INSERT INTO sessions (
+            name, project, host_id, config_json, cron_schedule, auto_start, enabled
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+         ON CONFLICT(name, host_id) DO UPDATE SET
+            project = excluded.project,
+            cron_schedule = excluded.cron_schedule,
+            auto_start = excluded.auto_start,
+            enabled = 1",
+        params![
+            session.name,
+            session.project,
+            host_id,
+            config_json,
+            session.cron_schedule,
+            session.auto_start
+        ],
+    )?;
+
+    let session_id: i64 = conn.query_row(
+        "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
+        params![session.name, host_id],
+        |r| r.get(0),
+    )?;
+
+    conn.execute(
+        "INSERT INTO session_status (session_id, status, panes_json, polled_at)
+         VALUES (
+            ?1,
+            ?2,
+            ?3,
+            COALESCE(?4, datetime('now'))
+         )
+         ON CONFLICT(session_id) DO UPDATE SET
+            status = excluded.status,
+            panes_json = excluded.panes_json,
+            polled_at = excluded.polled_at",
+        params![
+            session_id,
+            session.status,
+            session.panes_json,
+            session.polled_at
+        ],
+    )?;
+
+    Ok(())
+}
+
 pub fn log_session_event(
     conn: &Connection,
     session_id: i64,
@@ -260,7 +337,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             api_port   INTEGER NOT NULL DEFAULT 7700,
             is_local   BOOLEAN NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-            last_seen  DATETIME
+            last_seen  TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -330,7 +407,22 @@ fn migrate(conn: &Connection) -> Result<()> {
           BEGIN
             UPDATE sessions SET updated_at = datetime('now') WHERE id = OLD.id;
           END;
-    "#)
+    "#)?;
+    ensure_hosts_last_seen_column(conn)?;
+    Ok(())
+}
+
+fn ensure_hosts_last_seen_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(hosts)")?;
+    let has_last_seen = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "last_seen");
+
+    if !has_last_seen {
+        conn.execute("ALTER TABLE hosts ADD COLUMN last_seen TEXT", [])?;
+    }
+    Ok(())
 }
 
 fn validate_config_session_name(name: &str, config_json: &str) -> anyhow::Result<()> {
