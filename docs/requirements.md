@@ -261,7 +261,6 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
 | T-D-19 | Single unreachable host does not abort poll cycle; remaining hosts and sessions processed normally | 4.1 |
 | T-D-20 | Single session with bad tmux state does not abort session loop; other sessions processed normally | 4.1 |
-| T-D-21 | `events` table rows older than TTL are absent after prune cycle | 4.1 |
 | T-D-22 | Poll cycle p95 < 500ms with 50 seeded sessions using deterministic fake tmux (`SCMUX_TMUX_BIN`), run in `--release` mode with warm-up cycle before measurement (NF-03) | 4.1 |
 | T-D-23 | GET /sessions p95 < 100ms with 50 seeded sessions, `--release` mode (NF-04) | 4.1 |
 | T-D-24 | Daemon RSS < 50MB after loading 20 sessions (NF-02) | 4.1 |
