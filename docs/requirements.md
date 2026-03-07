@@ -333,10 +333,10 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-E-03 | Kill session externally → daemon detects stopped within 15s | 4.2 |
 | T-E-04 | POST /start → session appears in tmux | 4.2 |
 | T-E-05 | POST /stop → session disappears from tmux | 4.2 |
-| T-E-06 | POST /jump → iTerm2 opens, attaches to correct session | 4.2 |
-| T-E-07 | Dashboard loads → shows real data from daemon | 4.2 |
-| T-E-08 | Disconnect from VPN → remote host goes monochrome, no error dialog | 4.2 |
-| T-E-09 | Reconnect VPN → remote host resumes full color | 4.2 |
+| T-E-06 | POST /jump → iTerm2 opens, attaches to correct session (manual runbook) | 4.2 |
+| T-E-07 | Cron session starts at scheduled time with injected test clock | 4.2 |
+| T-E-08 | Disconnect from VPN → remote host goes monochrome, no error dialog (manual runbook) | 4.2 |
+| T-E-09 | Reconnect VPN → remote host resumes full color (manual runbook) | 4.2 |
 | T-E-10 | `scmux list` → matches dashboard data | 4.2 |
 | T-E-11 | `scmux jump <name>` → iTerm2 opens via daemon | 4.2 |
 

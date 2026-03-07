@@ -1,6 +1,6 @@
 use chrono::{Datelike, Duration, Timelike, Utc};
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
-use scmux_daemon::{ci, db, hosts, scheduler, AppState};
+use scmux_daemon::{ci, db, hosts, scheduler, AppState, SystemClock};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -43,6 +43,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
         ci_tools: ci::ToolAvailability::default(),
+        clock: Arc::new(SystemClock),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });
@@ -430,6 +431,7 @@ async fn t_i_12_success_after_failures_marks_host_reachable() {
 }
 
 #[tokio::test]
+#[ignore = "perf-gate: run in --release CI job"]
 async fn td_22_poll_cycle_latency_under_500ms_for_50_sessions() {
     let (state, _tmp) = build_state();
     for idx in 0..50 {
@@ -441,16 +443,24 @@ async fn td_22_poll_cycle_latency_under_500ms_for_50_sessions() {
     let script = write_script("#!/bin/sh\nexit 1\n");
     let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
 
-    let started = std::time::Instant::now();
-    let poll_result = scheduler::poll_cycle(&state).await;
-    let elapsed = started.elapsed();
+    scheduler::poll_cycle(&state)
+        .await
+        .expect("warm-up poll cycle");
+    let mut samples = Vec::new();
+    for _ in 0..10 {
+        let started = std::time::Instant::now();
+        scheduler::poll_cycle(&state).await.expect("poll cycle");
+        samples.push(started.elapsed());
+    }
     restore_env_var("SCMUX_TMUX_BIN", prev);
-    poll_result.expect("poll cycle");
 
+    samples.sort();
+    let p95_index = ((samples.len() as f64) * 0.95).ceil() as usize - 1;
+    let p95 = samples[p95_index];
     assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "poll cycle exceeded 500ms with 50 sessions: {:?}",
-        elapsed
+        p95 < std::time::Duration::from_millis(500),
+        "poll cycle p95 exceeded 500ms with 50 sessions: {:?}",
+        p95
     );
 }
 
