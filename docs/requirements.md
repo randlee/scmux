@@ -243,13 +243,15 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| ATM-01 | For sessions whose name matches an ATM team member, the daemon shall query the local ATM daemon API for agent state (active/idle/last-active timestamp) | P5.3 |
-| ATM-02 | The daemon shall store ATM state in a new `session_atm` table: `session_name, agent_id, team, state, last_active_at, last_message_at` | P5.3 |
+| ATM-01 | For sessions whose `name` matches the session component of an ATM entry's `session_id` field (e.g., `"scmux"` from `"scmux:1.2"`), the daemon shall query the local ATM daemon via Unix socket IPC (`${ATM_HOME}/.claude/daemon/atm-daemon.sock`, overridable via `scmux.toml atm.socket_path`) for agent state | P5.3 |
+| ATM-02 | The daemon shall store ATM state in a new `session_atm` table: `session_name, agent_id, team, state, last_transition, updated_at`; state values: `active\|idle\|offline\|unknown\|stuck` | P5.3 |
 | ATM-03 | `GET /sessions` shall include an `atm` field (state object or null) for each session | P5.3 |
 | ATM-04 | The dashboard shall display an activity indicator (active / idle / stuck) for ATM-enrolled sessions | P5.3 |
 | ATM-05 | `scmux list` shall include an activity column for ATM-enrolled sessions | P5.3 |
 | ATM-06 | When the ATM daemon is unreachable, the `atm` field shall be null and the rest of the system shall be unaffected | P5.3 |
 | ATM-07 | Non-ATM sessions shall fall back to `pane_last_activity` from tmux as a proxy for agent activity | P5.3 |
+| ATM-08 | The daemon shall derive a `stuck` state for ATM sessions where `state == "active"` and `(now - last_transition) > atm.stuck_minutes` (default 10); this derived state shall be stored in `session_atm` and returned in `/sessions` | P5.3 |
+| ATM-09 | The ATM socket path shall default to `${ATM_HOME}/.claude/daemon/atm-daemon.sock` and be overridable via `[atm] socket_path` in `scmux.toml`; `atm.stuck_minutes` shall be configurable (default 10) | P5.3 |
 
 ---
 
