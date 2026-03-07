@@ -1,13 +1,13 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, ci, db, hosts, logging, scheduler, AppState};
+use scmux_daemon::{api, ci, db, hosts, logging, scheduler, AppState, SystemClock};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
-const DEFAULT_PORT: u16 = 7700;
+const DEFAULT_PORT: u16 = 7878;
 #[derive(Debug, Parser)]
 #[command(name = "scmux-daemon")]
 struct Args {
@@ -92,10 +92,12 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
+        db_path: db_path.clone(),
         host_id,
         config,
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
         ci_tools,
+        clock: std::sync::Arc::new(SystemClock),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });

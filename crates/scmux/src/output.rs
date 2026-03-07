@@ -59,9 +59,10 @@ pub fn print_hosts(hosts: &[HostSummary]) {
 
 pub fn print_health(status: &HealthResponse) {
     println!("status: {}", status.status);
-    println!("host_id: {}", status.host_id);
-    println!("sessions_running: {}", status.sessions_running);
-    println!("polled_at: {}", status.polled_at);
+    println!("version: {}", status.version);
+    println!("uptime_secs: {}", status.uptime_secs);
+    println!("session_count: {}", status.session_count);
+    println!("db_path: {}", status.db_path);
 }
 
 pub fn print_action(result: &ActionResponse) {

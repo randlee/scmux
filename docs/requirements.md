@@ -120,7 +120,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-01 | The daemon shall expose HTTP on a configurable port (default 7878) | 1.2 |
 | API-02 | All responses shall be JSON | 1.2 |
 | API-03 | CORS shall be permissive | 1.2 |
-| API-04 | `GET /health` — daemon status, host_id, running count, timestamp | 1.2 |
+| API-04 | `GET /health` — daemon status, uptime seconds, enabled session count, DB path, version | 1.2 |
 | API-05 | `GET /sessions` — all enabled sessions with live status, panes, CI summary | 1.2 |
 | API-06 | `GET /sessions/:name` — full detail: config, panes, CI, last 20 events | 1.2 |
 | API-07 | `GET /sessions/:name` — 404 if not found | 1.2 |
@@ -229,7 +229,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | NF-03 | Poll cycle shall complete in < 500ms for up to 50 sessions | 4.1 |
 | NF-04 | HTTP read endpoints shall respond in < 100ms | 4.1 |
 | NF-05 | The system shall work on macOS (primary) and Linux (DGX Spark) | 4.1 |
-| NF-06 | The SQLite database shall be reconstructible from live tmux state on next poll if lost | 4.1 |
+| NF-06 | If the SQLite database is deleted while the daemon is stopped, the next start shall reconstruct currently-running session state from live tmux output without error. Stopped or disabled session definitions that were not in tmux at restart time are not recoverable and need not be reconstructed. | 4.1 |
 | NF-07 | All CI errors (network failure, auth error, rate limit) shall be handled gracefully and logged | 3.1 |
 | NF-08 | The daemon shall not crash on any single-host or single-session failure | 4.1 |
 
@@ -259,6 +259,11 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-D-16 | `--verbose` flag sets effective log level to DEBUG | 1.1 |
 | T-D-17 | CI fetch with network failure (simulated) does not crash daemon; records error in `session_ci` | 3.1 |
 | T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
+| T-D-19 | Single unreachable host does not abort poll cycle; remaining hosts and sessions processed normally | 4.1 |
+| T-D-20 | Single session with bad tmux state does not abort session loop; other sessions processed normally | 4.1 |
+| T-D-22 | Poll cycle p95 < 500ms with 50 seeded sessions using deterministic fake tmux (`SCMUX_TMUX_BIN`), run in `--release` mode with warm-up cycle before measurement (NF-03) | 4.1 |
+| T-D-23 | GET /sessions p95 < 100ms with 50 seeded sessions, `--release` mode (NF-04) | 4.1 |
+| T-D-24 | Daemon RSS < 50MB after loading 20 sessions (NF-02) | 4.1 |
 
 ### 6.2 Daemon Integration Tests
 
@@ -276,6 +281,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-I-10 | Unreachable remote host does not crash poll cycle | 2.1 |
 | T-I-11 | Host marked unreachable when /health times out | 2.1 |
 | T-I-12 | Host resumes reachable when /health responds again | 2.1 |
+| T-I-20 | DB deleted while daemon stopped → next start reconstructs currently-running tmux sessions without error; daemon does not crash or return errors on /health or /sessions | 4.1 |
 
 ### 6.3 API Tests
 
@@ -327,10 +333,10 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-E-03 | Kill session externally → daemon detects stopped within 15s | 4.2 |
 | T-E-04 | POST /start → session appears in tmux | 4.2 |
 | T-E-05 | POST /stop → session disappears from tmux | 4.2 |
-| T-E-06 | POST /jump → iTerm2 opens, attaches to correct session | 4.2 |
-| T-E-07 | Dashboard loads → shows real data from daemon | 4.2 |
-| T-E-08 | Disconnect from VPN → remote host goes monochrome, no error dialog | 4.2 |
-| T-E-09 | Reconnect VPN → remote host resumes full color | 4.2 |
+| T-E-06 | POST /jump → iTerm2 opens, attaches to correct session (manual runbook) | 4.2 |
+| T-E-07 | Cron session starts at scheduled time with injected test clock | 4.2 |
+| T-E-08 | Disconnect from VPN → remote host goes monochrome, no error dialog (manual runbook) | 4.2 |
+| T-E-09 | Reconnect VPN → remote host resumes full color (manual runbook) | 4.2 |
 | T-E-10 | `scmux list` → matches dashboard data | 4.2 |
 | T-E-11 | `scmux jump <name>` → iTerm2 opens via daemon | 4.2 |
 

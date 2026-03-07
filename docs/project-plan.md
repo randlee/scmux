@@ -9,7 +9,7 @@ scmux is delivered in four phases with explicit integration branches and version
 | 1 | Foundation + API | 0.1.0 | `integrate/phase-1` |
 | 2 | Multi-host + Dashboard | 0.2.0 | `integrate/phase-2` |
 | 3 | CI + CLI | 0.3.0 | `integrate/phase-3` |
-| 4 | Supervision + Release | 1.0.0 | `integrate/phase-4` |
+| 4 | Supervision + Release | 0.3.0 | `integrate/phase-4` |
 
 ## Execution Model
 
@@ -198,7 +198,7 @@ scmux is delivered in four phases with explicit integration branches and version
 ## Phase 4 — Supervision + Release
 
 **Goal:** production hardening, end-to-end validation, and 1.0 release readiness.
-**Version:** `1.0.0`
+**Version:** `0.3.0`
 **Integration branch:** `integrate/phase-4`
 
 ### Sprint 4.1 — Supervision + Performance
@@ -227,7 +227,7 @@ scmux is delivered in four phases with explicit integration branches and version
 - Deliverables:
   - complete end-to-end suite T-E-01..T-E-11.
   - acceptance criteria validation report.
-  - release artifacts/versioning to `1.0.0` and Homebrew publish steps.
+  - release artifacts/versioning to `0.3.0` and Homebrew publish steps.
 - Acceptance criteria:
   - all E2E tests pass consistently.
   - section 7 acceptance criteria in requirements are fully satisfied.
