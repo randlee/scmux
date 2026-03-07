@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>scmux Team Control Dashboard</title>
+  <script src="react.js"></script>
+  <script src="react-dom.js"></script>
+  <style>
+    body { margin: 0; background: #060810; }
+    #error-display {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: #060810; color: #ef4444; font-family: monospace;
+      padding: 40px; font-size: 14px; z-index: 9999; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="error-display"></div>
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      var d = document.getElementById('error-display');
+      d.style.display = 'block';
+      d.textContent = 'JS Error: ' + msg + '\n\nFile: ' + src + '\nLine: ' + line + '\n\n' + (err ? err.stack : '');
+      return true;
+    };
+    window.addEventListener('unhandledrejection', function(e) {
+      var d = document.getElementById('error-display');
+      d.style.display = 'block';
+      d.textContent = 'Unhandled Promise: ' + e.reason;
+    });
+  </script>
+  <script src="dashboard-compiled.js"></script>
+</body>
+</html>
