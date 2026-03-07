@@ -11,8 +11,14 @@ Final sprint validates complete system behavior and prepares release artifacts.
 
 ## Deliverables
 
-1. End-to-end tests
+1. Clock abstraction for scheduler (prerequisite for cron E2E)
+- Add `Clock` trait (or `now: fn() -> DateTime<Utc>` parameter) to `AppState`/scheduler so tests can inject deterministic time.
+- Required for T-E-07 (`scmux list` cron session started at scheduled time) to be automatable without wall-clock sleeping.
+- If Clock injection proves too invasive, T-E-07 may be demoted to manual test and this deliverable omitted — confirm with team-lead before omitting.
+
+2. End-to-end tests
 - `tests/e2e_tests.rs` — automated suite covering **T-E-01..T-E-05, T-E-07, T-E-10, T-E-11** only.
+- Perf benchmarks (T-D-22/T-D-23) run via `cargo test --release` with `SCMUX_TMUX_BIN` fake tmux binary; separated into a `perf-gate` job to avoid polluting functional test output.
 - `docs/e2e-manual-runbook.md` — manual test runbooks for:
   - **T-E-06**: iTerm2 jump (requires iTerm2 + display; not automatable headless)
   - **T-E-08**: VPN disconnect → monochrome (requires two machines + VPN)
