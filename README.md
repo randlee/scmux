@@ -6,7 +6,7 @@ tmux session manager for multi-agent Claude Code teams.
 
 - **Declarative session configs** stored in SQLite (tmuxp JSON format)
 - **Per-machine daemon** (`scmux-daemon`) polls tmux, auto-starts scheduled sessions, serves HTTP status API
-- **Web dashboard** shows all teams across all hosts — agent status, open PRs, jump-to-session via WezTerm
+- **Web dashboard** shows all teams across all hosts — agent status, open PRs, jump-to-session via iTerm2
 
 ## Structure
 
@@ -20,6 +20,7 @@ scmux/
 │   └── README.md
 └── docs/
     ├── architecture.md     # Full system design
+    ├── deploy.md           # launchd/systemd setup
     ├── schema.sql          # SQLite schema (reference)
     └── example-session.json
 ```
@@ -31,7 +32,7 @@ scmux/
 ```bash
 cd crates/scmux-daemon
 cargo build --release
-SCMUX_PORT=7700 ./target/release/scmux-daemon
+SCMUX_PORT=7878 ./target/release/scmux-daemon
 ```
 
 ### Dashboard
@@ -67,4 +68,4 @@ See [docs/architecture.md](docs/architecture.md) for the full design including m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCMUX_DB` | `~/.config/scmux/scmux.db` | SQLite database path |
-| `SCMUX_PORT` | `7700` | HTTP API port |
+| `SCMUX_PORT` | `7878` | HTTP API port |

@@ -1,6 +1,6 @@
 [daemon]
 log_level = "info"
-port = 7700
+port = 7878
 db_path = "~/.config/scmux/scmux.db"
 default_terminal = "iterm2"
 
@@ -14,5 +14,5 @@ ci_idle_interval_secs = 300
 name = "dgx-spark"
 address = "192.168.1.50"
 ssh_user = "randlee"
-api_port = 7700
+api_port = 7878
 is_local = false

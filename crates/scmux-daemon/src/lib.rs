@@ -10,6 +10,7 @@ pub mod tmux;
 #[derive(Debug)]
 pub struct AppState {
     pub db: std::sync::Mutex<rusqlite::Connection>,
+    pub db_path: String,
     pub host_id: i64,
     pub config: config::Config,
     pub reachability: std::sync::Mutex<std::collections::HashMap<i64, hosts::HostReachability>>,

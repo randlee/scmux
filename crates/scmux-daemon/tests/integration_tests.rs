@@ -38,6 +38,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
     let host_id = db::ensure_local_host(&conn).expect("local host");
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
+        db_path: db_path.to_string_lossy().to_string(),
         host_id,
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -360,7 +361,7 @@ async fn t_i_09_write_health_prunes_older_than_seven_days() {
 #[tokio::test]
 async fn t_i_10_poll_hosts_unreachable_test_net_returns_ok() {
     let (state, _tmp) = build_state();
-    insert_remote_host(&state, "ti10-remote", "192.0.2.1", 7700);
+    insert_remote_host(&state, "ti10-remote", "192.0.2.1", 7878);
 
     let _guard = env_lock().lock().await;
     let script = write_script("#!/bin/sh\nexit 1\n");
@@ -374,7 +375,7 @@ async fn t_i_10_poll_hosts_unreachable_test_net_returns_ok() {
 #[tokio::test]
 async fn t_i_11_three_failures_mark_host_unreachable() {
     let (state, _tmp) = build_state();
-    let remote_id = insert_remote_host(&state, "ti11-remote", "192.0.2.1", 7700);
+    let remote_id = insert_remote_host(&state, "ti11-remote", "192.0.2.1", 7878);
 
     let _guard = env_lock().lock().await;
     let script = write_script("#!/bin/sh\nexit 1\n");
@@ -426,4 +427,73 @@ async fn t_i_12_success_after_failures_marks_host_reachable() {
     let entry = map.get(&remote_id).expect("remote host entry");
     assert!(entry.reachable);
     assert_eq!(entry.consecutive_failures, 0);
+}
+
+#[tokio::test]
+async fn t_i_20_poll_cycle_latency_under_500ms_for_50_sessions() {
+    let (state, _tmp) = build_state();
+    for idx in 0..50 {
+        let name = format!("ti20-{idx}");
+        insert_session(&state, &name, false, None);
+    }
+
+    let _guard = env_lock().lock().await;
+    let script = write_script("#!/bin/sh\nexit 1\n");
+    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let started = std::time::Instant::now();
+    let poll_result = scheduler::poll_cycle(&state).await;
+    let elapsed = started.elapsed();
+    restore_env_var("SCMUX_TMUX_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "poll cycle exceeded 500ms with 50 sessions: {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn t_i_22_reconstructs_registry_from_live_tmux_after_db_loss() {
+    let (state, _tmp) = build_state();
+
+    let _guard = env_lock().lock().await;
+    let script = write_script(
+        r#"#!/bin/sh
+if [ "$1" = "list-sessions" ]; then
+  echo "ti22-alpha"
+  echo "ti22-beta"
+  exit 0
+fi
+if [ "$1" = "list-panes" ]; then
+  echo "0|lead|zsh|1"
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let poll_result = scheduler::poll_cycle(&state).await;
+    restore_env_var("SCMUX_TMUX_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    let db_conn = state.db.lock().expect("db lock");
+    let recovered_sessions: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND enabled = 1",
+            [state.host_id],
+            |r| r.get(0),
+        )
+        .expect("session count");
+    let running_rows: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("running count");
+    assert_eq!(recovered_sessions, 2);
+    assert_eq!(running_rows, 2);
 }

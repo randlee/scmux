@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::sync::{oneshot, Mutex};
 
@@ -32,13 +33,14 @@ impl ApiHarness {
         let host_id = db::ensure_local_host(&conn).expect("local host");
         conn.execute(
             "INSERT INTO hosts (name, address, ssh_user, api_port, is_local, last_seen)
-             VALUES ('dgx-spark', '192.168.1.50', 'randlee', 7700, 0, datetime('now'))",
+             VALUES ('dgx-spark', '192.168.1.50', 'randlee', 7878, 0, datetime('now'))",
             [],
         )
         .expect("seed host");
 
         let state = Arc::new(AppState {
             db: std::sync::Mutex::new(conn),
+            db_path: db_path.to_string_lossy().to_string(),
             host_id,
             config: Config {
                 daemon: DaemonConfig {
@@ -168,9 +170,9 @@ async fn t_a_01_get_health_returns_200_with_correct_fields() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["status"], "ok");
-    assert!(body["host_id"].as_i64().is_some());
-    assert!(body["sessions_running"].as_i64().is_some());
-    assert!(body["polled_at"].as_str().is_some());
+    assert!(body["uptime_secs"].as_u64().is_some());
+    assert!(body["session_count"].as_i64().is_some());
+    assert!(body["db_path"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -542,6 +544,30 @@ async fn t_a_16_get_session_detail_includes_ci_summary_payload() {
         .as_str()
         .unwrap_or_default()
         .contains("brew install gh"));
+}
+
+#[tokio::test]
+async fn t_i_21_get_sessions_latency_under_100ms_at_50_sessions() {
+    let h = ApiHarness::new().await;
+    for idx in 0..50 {
+        h.create_session(&format!("perf-{idx}")).await;
+    }
+
+    let started = Instant::now();
+    let response = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "GET /sessions exceeded 100ms at 50 sessions: {:?}",
+        elapsed
+    );
 }
 
 #[tokio::test]

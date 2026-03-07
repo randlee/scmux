@@ -20,29 +20,19 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
     let live = tmux::live_sessions().await?;
 
     // Phase 1: Read sessions via spawn_blocking (rusqlite::Connection is !Send)
-    let state1 = Arc::clone(state);
-    let sessions: Vec<SessionRow> = tokio::task::spawn_blocking(move || {
-        let db = state1.db.lock().unwrap();
-        let mut stmt = db.prepare(
-            "SELECT id, name, cron_schedule, auto_start, config_json
-             FROM sessions
-             WHERE host_id = ?1 AND enabled = 1",
-        )?;
-        let rows: Vec<SessionRow> = stmt
-            .query_map(params![state1.host_id], |r| {
-                Ok(SessionRow {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    cron_schedule: r.get(2)?,
-                    auto_start: r.get(3)?,
-                    config_json: r.get(4)?,
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok::<_, anyhow::Error>(rows)
-    })
-    .await??;
+    let mut sessions = load_enabled_sessions_for_host(state).await?;
+
+    // NF-06: If the DB was lost while daemon was down, rebuild local sessions from live tmux.
+    if sessions.is_empty() && !live.is_empty() {
+        match reconstruct_registry_from_live(state, &live).await {
+            Ok(0) => {}
+            Ok(recovered) => {
+                info!("reconstructed {recovered} local sessions from live tmux");
+                sessions = load_enabled_sessions_for_host(state).await?;
+            }
+            Err(err) => warn!("failed to reconstruct session registry from tmux: {err}"),
+        }
+    }
 
     let now = Utc::now();
 
@@ -69,7 +59,7 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
                 )
                 .ok();
 
-            db.execute(
+            if let Err(err) = db.execute(
                 "INSERT INTO session_status (session_id, status, panes_json, polled_at)
                  VALUES (?1, ?2, ?3, datetime('now'))
                  ON CONFLICT(session_id) DO UPDATE SET
@@ -77,16 +67,21 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
                    panes_json = excluded.panes_json,
                    polled_at  = excluded.polled_at",
                 params![id, status, panes_json],
-            )?;
+            ) {
+                warn!("status upsert failed for session '{name}': {err}");
+                continue;
+            }
 
             if let Some(prev) = previous_status.as_deref() {
                 if prev != status {
                     let event = if is_live { "started" } else { "stopped" };
-                    db.execute(
+                    if let Err(err) = db.execute(
                         "INSERT INTO session_events (session_id, event, trigger)
                          VALUES (?1, ?2, 'daemon')",
                         params![id, event],
-                    )?;
+                    ) {
+                        warn!("event write failed for session '{name}': {err}");
+                    }
                 }
             }
         }
@@ -128,15 +123,21 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
             Ok(()) => {
                 let state4 = Arc::clone(state);
                 let trigger4 = trigger.clone();
-                tokio::task::spawn_blocking(move || {
+                let write_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     let db = state4.db.lock().unwrap();
                     db.execute(
                         "INSERT INTO session_events (session_id, event, trigger)
                          VALUES (?1, 'started', ?2)",
                         params![id, trigger4],
-                    )
+                    )?;
+                    Ok(())
                 })
-                .await??;
+                .await;
+                match write_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => warn!("failed to log start event for '{name}': {err}"),
+                    Err(err) => warn!("failed to join start-event task for '{name}': {err}"),
+                }
                 info!("session '{name}' started");
             }
             Err(e) => {
@@ -144,20 +145,103 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
                 let state4 = Arc::clone(state);
                 let trigger4 = trigger.clone();
                 let note = e.to_string();
-                tokio::task::spawn_blocking(move || {
+                let write_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     let db = state4.db.lock().unwrap();
                     db.execute(
                         "INSERT INTO session_events (session_id, event, trigger, note)
                          VALUES (?1, 'failed', ?2, ?3)",
                         params![id, trigger4, note],
-                    )
+                    )?;
+                    Ok(())
                 })
-                .await??;
+                .await;
+                match write_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => warn!("failed to log failure event for '{name}': {err}"),
+                    Err(err) => warn!("failed to join failure-event task for '{name}': {err}"),
+                }
             }
         }
     }
 
     Ok(())
+}
+
+async fn load_enabled_sessions_for_host(state: &Arc<AppState>) -> anyhow::Result<Vec<SessionRow>> {
+    let state1 = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let db = state1.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT id, name, cron_schedule, auto_start, config_json
+             FROM sessions
+             WHERE host_id = ?1 AND enabled = 1",
+        )?;
+        let rows: Vec<SessionRow> = stmt
+            .query_map(params![state1.host_id], |r| {
+                Ok(SessionRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    cron_schedule: r.get(2)?,
+                    auto_start: r.get(3)?,
+                    config_json: r.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok::<_, anyhow::Error>(rows)
+    })
+    .await?
+}
+
+async fn reconstruct_registry_from_live(
+    state: &Arc<AppState>,
+    live: &std::collections::HashMap<String, Vec<tmux::PaneInfo>>,
+) -> anyhow::Result<usize> {
+    let state = Arc::clone(state);
+    let live = live.clone();
+    tokio::task::spawn_blocking(move || {
+        let db = state.db.lock().unwrap();
+        let session_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap_or(0);
+        if session_count > 0 {
+            return Ok::<_, anyhow::Error>(0);
+        }
+
+        for name in live.keys() {
+            let config_json = serde_json::json!({ "session_name": name }).to_string();
+            db.execute(
+                "INSERT INTO sessions (
+                    name, project, host_id, config_json, cron_schedule, auto_start, enabled
+                 ) VALUES (?1, NULL, ?2, ?3, NULL, 0, 1)
+                 ON CONFLICT(name, host_id) DO UPDATE SET
+                    enabled = 1,
+                    config_json = excluded.config_json",
+                params![name, state.host_id, config_json],
+            )?;
+        }
+
+        for (name, panes) in &live {
+            let session_id: i64 = db.query_row(
+                "SELECT id FROM sessions WHERE host_id = ?1 AND name = ?2",
+                params![state.host_id, name],
+                |r| r.get(0),
+            )?;
+            let panes_json = serde_json::to_string(panes).unwrap_or_else(|_| "[]".to_string());
+            db.execute(
+                "INSERT INTO session_status (session_id, status, panes_json, polled_at)
+                 VALUES (?1, 'running', ?2, datetime('now'))
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    status = excluded.status,
+                    panes_json = excluded.panes_json,
+                    polled_at = excluded.polled_at",
+                params![session_id, panes_json],
+            )?;
+        }
+
+        Ok::<_, anyhow::Error>(live.len())
+    })
+    .await?
 }
 
 /// Returns true if the cron expression should fire within the current 15s window.

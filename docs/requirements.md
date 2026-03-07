@@ -120,7 +120,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-01 | The daemon shall expose HTTP on a configurable port (default 7878) | 1.2 |
 | API-02 | All responses shall be JSON | 1.2 |
 | API-03 | CORS shall be permissive | 1.2 |
-| API-04 | `GET /health` — daemon status, host_id, running count, timestamp | 1.2 |
+| API-04 | `GET /health` — daemon status, uptime seconds, enabled session count, DB path | 1.2 |
 | API-05 | `GET /sessions` — all enabled sessions with live status, panes, CI summary | 1.2 |
 | API-06 | `GET /sessions/:name` — full detail: config, panes, CI, last 20 events | 1.2 |
 | API-07 | `GET /sessions/:name` — 404 if not found | 1.2 |
@@ -276,6 +276,9 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-I-10 | Unreachable remote host does not crash poll cycle | 2.1 |
 | T-I-11 | Host marked unreachable when /health times out | 2.1 |
 | T-I-12 | Host resumes reachable when /health responds again | 2.1 |
+| T-I-20 | Poll cycle completes in <500ms with 50 sessions (benchmark check) | 4.1 |
+| T-I-21 | `GET /sessions` responds in <100ms with 50 sessions (benchmark check) | 4.1 |
+| T-I-22 | Fresh DB reconstructs local session registry from live tmux on next poll | 4.1 |
 
 ### 6.3 API Tests
 

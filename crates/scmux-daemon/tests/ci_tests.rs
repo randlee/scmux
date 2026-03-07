@@ -39,6 +39,7 @@ fn build_state(ci_tools: ToolAvailability) -> (Arc<AppState>, TempDir) {
     let host_id = db::ensure_local_host(&conn).expect("local host");
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
+        db_path: db_path.to_string_lossy().to_string(),
         host_id,
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),

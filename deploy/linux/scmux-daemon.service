@@ -1,0 +1,14 @@
+[Unit]
+Description=scmux daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/scmux-daemon
+Restart=always
+RestartSec=5
+Environment=SCMUX_LOG=info
+
+[Install]
+WantedBy=multi-user.target

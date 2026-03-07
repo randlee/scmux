@@ -143,9 +143,9 @@ pub struct HostSummary {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub host_id: i64,
-    pub sessions_running: i64,
-    pub polled_at: String,
+    pub uptime_secs: u64,
+    pub session_count: i64,
+    pub db_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
