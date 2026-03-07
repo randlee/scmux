@@ -218,6 +218,39 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | SR-05 | `cron_schedule` shall use standard 5-field cron format; NULL = manual-only | 1.2 |
 | SR-06 | `github_repo` format: `owner/repo` (e.g. `randlee/scmux`) | 1.2 |
 
+### 4.14 Dashboard Embed & Self-Contained Binary (v0.4.0 / P5.1)
+
+| ID | Requirement | Sprint |
+|----|-------------|--------|
+| DE-01 | The daemon shall embed the dashboard JS asset at compile time (via `include_str!` or `rust-embed`) so no runtime file dependencies are required | P5.1 |
+| DE-02 | `GET /` shall serve the embedded `index.html` | P5.1 |
+| DE-03 | `GET /dashboard.js` shall serve the pre-compiled dashboard JavaScript (JSX transpiled to React.createElement calls; no Babel in browser) | P5.1 |
+| DE-04 | The `SCMUX_DASHBOARD_DIR` env var, when set, shall override embedded assets and serve files from disk (development mode) | P5.1 |
+| DE-05 | The dashboard shall poll `/sessions`, `/hosts`, and `/dashboard-config.json` to populate live data | P5.1 |
+| DE-06 | The dashboard visual design shall match the reference design: dark background (#060810), monospace font, per-project color bars, pulsing status dots, grid/list/grouped views, click-to-open jump modal with WezTerm button | P5.1 |
+| DE-07 | `cargo package` shall succeed with embedded assets; `cargo install scmux-daemon` on a clean machine shall serve the dashboard | P5.1 |
+| DE-08 | Both `scmux` and `scmux-daemon` crates shall be published to crates.io on each release tag | P5.1 |
+
+### 4.15 Release Automation (v0.4.0 / P5.2)
+
+| ID | Requirement | Sprint |
+|----|-------------|--------|
+| RA-01 | The release workflow shall automatically update the `randlee/homebrew-tap` Formula after each release tag, patching version, tarball URLs, and SHA256 checksums | P5.2 |
+| RA-02 | The Homebrew formula update shall complete within 5 minutes of the release tag being pushed | P5.2 |
+| RA-03 | No manual intervention shall be required for the Homebrew formula update after tagging | P5.2 |
+
+### 4.16 ATM Integration — Agent Activity Monitoring (v0.4.0 / P5.3)
+
+| ID | Requirement | Sprint |
+|----|-------------|--------|
+| ATM-01 | For sessions whose name matches an ATM team member, the daemon shall query the local ATM daemon API for agent state (active/idle/last-active timestamp) | P5.3 |
+| ATM-02 | The daemon shall store ATM state in a new `session_atm` table: `session_name, agent_id, team, state, last_active_at, last_message_at` | P5.3 |
+| ATM-03 | `GET /sessions` shall include an `atm` field (state object or null) for each session | P5.3 |
+| ATM-04 | The dashboard shall display an activity indicator (active / idle / stuck) for ATM-enrolled sessions | P5.3 |
+| ATM-05 | `scmux list` shall include an activity column for ATM-enrolled sessions | P5.3 |
+| ATM-06 | When the ATM daemon is unreachable, the `atm` field shall be null and the rest of the system shall be unaffected | P5.3 |
+| ATM-07 | Non-ATM sessions shall fall back to `pane_last_activity` from tmux as a proxy for agent activity | P5.3 |
+
 ---
 
 ## 5. Non-Functional Requirements
@@ -340,6 +373,26 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-E-10 | `scmux list` → matches dashboard data | 4.2 |
 | T-E-11 | `scmux jump <name>` → iTerm2 opens via daemon | 4.2 |
 
+### 6.6 Dashboard Embed Tests (v0.4.0 / P5.1)
+
+| ID | Test | Sprint |
+|----|------|--------|
+| T-DE-01 | `cargo package --no-verify` succeeds with no runtime file dependencies | P5.1 |
+| T-DE-02 | `GET /` returns 200 with HTML containing `<div id="root">` | P5.1 |
+| T-DE-03 | `GET /dashboard.js` returns 200 with JavaScript (no JSX syntax) | P5.1 |
+| T-DE-04 | Dashboard loads in browser and renders session list from `/sessions` | P5.1 |
+| T-DE-05 | `SCMUX_DASHBOARD_DIR=/path` causes daemon to serve files from disk instead of embedded | P5.1 |
+| T-DE-06 | `cargo install --path crates/scmux-daemon` on a clean machine serves the dashboard | P5.1 |
+
+### 6.7 ATM Integration Tests (v0.4.0 / P5.3)
+
+| ID | Test | Sprint |
+|----|------|--------|
+| T-ATM-01 | `GET /sessions` includes `"atm": null` for non-ATM sessions | P5.3 |
+| T-ATM-02 | `GET /sessions` includes `"atm": {"state": "active", ...}` for ATM-enrolled sessions when ATM daemon is reachable | P5.3 |
+| T-ATM-03 | ATM daemon unreachable → `atm` field is null, no daemon crash, no error in response body | P5.3 |
+| T-ATM-04 | Dashboard renders activity badge for ATM sessions; no badge for non-ATM sessions | P5.3 |
+
 ---
 
 ## 7. Acceptance Criteria
@@ -360,6 +413,15 @@ The system is complete when:
 8. Disconnecting VPN for a remote host produces no error dialogs; host shows monochrome
 9. Reconnecting VPN restores full-color display within one poll cycle
 10. Missing `gh`/`az` tools show grayed badges with install tooltip
+
+**v0.4.0 additional gates (AC-11..AC-16):**
+
+11. `http://localhost:7878/` shows the real scmux dashboard matching the reference design (project colors, status dots, views, click-to-open jump modal with terminal button)
+12. `cargo install scmux-daemon` on a clean machine serves the embedded dashboard
+13. Both `scmux` and `scmux-daemon` are published to crates.io on release tag
+14. `SCMUX_DASHBOARD_DIR` override loads from disk for local dev
+15. Pushing a release tag auto-updates the Homebrew formula within 5 minutes
+16. ATM-enrolled sessions show agent state in dashboard and CLI; ATM unavailable degrades gracefully
 
 ---
 
