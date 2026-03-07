@@ -229,7 +229,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | NF-03 | Poll cycle shall complete in < 500ms for up to 50 sessions | 4.1 |
 | NF-04 | HTTP read endpoints shall respond in < 100ms | 4.1 |
 | NF-05 | The system shall work on macOS (primary) and Linux (DGX Spark) | 4.1 |
-| NF-06 | The SQLite database shall be reconstructible from live tmux state on next poll if lost | 4.1 |
+| NF-06 | If the SQLite database is deleted while the daemon is stopped, the next start shall reconstruct currently-running session state from live tmux output without error. Stopped or disabled session definitions that were not in tmux at restart time are not recoverable and need not be reconstructed. | 4.1 |
 | NF-07 | All CI errors (network failure, auth error, rate limit) shall be handled gracefully and logged | 3.1 |
 | NF-08 | The daemon shall not crash on any single-host or single-session failure | 4.1 |
 
@@ -261,8 +261,8 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
 | T-D-19 | Single unreachable host does not abort poll cycle; remaining hosts and sessions processed normally | 4.1 |
 | T-D-20 | Single session with bad tmux state does not abort session loop; other sessions processed normally | 4.1 |
-| T-D-22 | Poll cycle completes in < 500ms with 50 mock sessions (NF-03) | 4.1 |
-| T-D-23 | GET /sessions responds in < 100ms (NF-04) | 4.1 |
+| T-D-22 | Poll cycle p95 < 500ms with 50 seeded sessions using deterministic fake tmux (`SCMUX_TMUX_BIN`), run in `--release` mode with warm-up cycle before measurement (NF-03) | 4.1 |
+| T-D-23 | GET /sessions p95 < 100ms with 50 seeded sessions, `--release` mode (NF-04) | 4.1 |
 | T-D-24 | Daemon RSS < 50MB after loading 20 sessions (NF-02) | 4.1 |
 
 ### 6.2 Daemon Integration Tests
