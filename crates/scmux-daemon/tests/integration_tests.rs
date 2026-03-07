@@ -1,6 +1,6 @@
 use chrono::{Datelike, Duration, Timelike, Utc};
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
-use scmux_daemon::{db, scheduler, AppState};
+use scmux_daemon::{ci, db, hosts, scheduler, AppState};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -40,6 +40,10 @@ fn build_state() -> (Arc<AppState>, TempDir) {
         db: std::sync::Mutex::new(conn),
         host_id,
         config: test_config(),
+        reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ci_tools: ci::ToolAvailability::default(),
+        last_api_access: std::sync::atomic::AtomicU64::new(0),
+        started_at: std::time::Instant::now(),
     });
     (state, tmp)
 }
@@ -117,6 +121,18 @@ fn event_count(state: &Arc<AppState>, session_id: i64, event: &str, trigger: &st
             |r| r.get(0),
         )
         .expect("event count")
+}
+
+fn insert_remote_host(state: &Arc<AppState>, name: &str, address: &str, api_port: u16) -> i64 {
+    let db_conn = state.db.lock().expect("db lock");
+    db_conn
+        .execute(
+            "INSERT INTO hosts (name, address, ssh_user, api_port, is_local)
+             VALUES (?1, ?2, 'tester', ?3, 0)",
+            rusqlite::params![name, address, api_port],
+        )
+        .expect("insert remote host");
+    db_conn.last_insert_rowid()
 }
 
 #[tokio::test]
@@ -339,4 +355,75 @@ async fn t_i_09_write_health_prunes_older_than_seven_days() {
         )
         .expect("old row count");
     assert_eq!(old_count, 0);
+}
+
+#[tokio::test]
+async fn t_i_10_poll_hosts_unreachable_test_net_returns_ok() {
+    let (state, _tmp) = build_state();
+    insert_remote_host(&state, "ti10-remote", "192.0.2.1", 7700);
+
+    let _guard = env_lock().lock().await;
+    let script = write_script("#!/bin/sh\nexit 1\n");
+    let prev = set_env_var("SCMUX_PING_BIN", script.to_string_lossy().as_ref());
+
+    let result = hosts::poll_hosts(Arc::clone(&state)).await;
+    restore_env_var("SCMUX_PING_BIN", prev);
+    result.expect("poll hosts");
+}
+
+#[tokio::test]
+async fn t_i_11_three_failures_mark_host_unreachable() {
+    let (state, _tmp) = build_state();
+    let remote_id = insert_remote_host(&state, "ti11-remote", "192.0.2.1", 7700);
+
+    let _guard = env_lock().lock().await;
+    let script = write_script("#!/bin/sh\nexit 1\n");
+    let prev = set_env_var("SCMUX_PING_BIN", script.to_string_lossy().as_ref());
+
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts #1");
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts #2");
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts #3");
+    restore_env_var("SCMUX_PING_BIN", prev);
+
+    let map = state.reachability.lock().expect("reachability lock");
+    let entry = map.get(&remote_id).expect("remote host entry");
+    assert!(!entry.reachable);
+    assert!(entry.consecutive_failures >= 3);
+}
+
+#[tokio::test]
+async fn t_i_12_success_after_failures_marks_host_reachable() {
+    let (state, _tmp) = build_state();
+    let remote_id = insert_remote_host(&state, "ti12-remote", "127.0.0.1", 1);
+
+    let _guard = env_lock().lock().await;
+    let fail_script = write_script("#!/bin/sh\nexit 1\n");
+    let success_script = write_script("#!/bin/sh\nexit 0\n");
+    let prev = set_env_var("SCMUX_PING_BIN", fail_script.to_string_lossy().as_ref());
+
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts fail #1");
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts fail #2");
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts fail #3");
+    let _ = set_env_var("SCMUX_PING_BIN", success_script.to_string_lossy().as_ref());
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("poll hosts success");
+    restore_env_var("SCMUX_PING_BIN", prev);
+
+    let map = state.reachability.lock().expect("reachability lock");
+    let entry = map.get(&remote_id).expect("remote host entry");
+    assert!(entry.reachable);
+    assert_eq!(entry.consecutive_failures, 0);
 }

@@ -32,6 +32,37 @@ pub struct SessionPatch {
     pub azure_project: Option<Option<String>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoteSessionUpsert {
+    pub name: String,
+    pub project: Option<String>,
+    pub cron_schedule: Option<String>,
+    pub auto_start: bool,
+    pub status: String,
+    pub panes_json: String,
+    pub polled_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CiSession {
+    pub id: i64,
+    pub name: String,
+    pub github_repo: Option<String>,
+    pub azure_project: Option<String>,
+    pub has_active_pane: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionCiUpdate {
+    pub session_id: i64,
+    pub provider: String,
+    pub status: String,
+    pub data_json: Option<String>,
+    pub tool_message: Option<String>,
+    pub polled_at: String,
+    pub next_poll_at: String,
+}
+
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
@@ -70,6 +101,18 @@ pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow
             ],
         )?;
     }
+    Ok(())
+}
+
+pub fn update_host_last_seen(
+    conn: &Connection,
+    host_id: i64,
+    last_seen: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE hosts SET last_seen = ?1 WHERE id = ?2",
+        params![last_seen, host_id],
+    )?;
     Ok(())
 }
 
@@ -203,6 +246,128 @@ pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result
     Ok(value)
 }
 
+pub fn upsert_remote_session(
+    conn: &Connection,
+    host_id: i64,
+    session: &RemoteSessionUpsert,
+) -> anyhow::Result<()> {
+    let config_json = serde_json::json!({ "session_name": session.name }).to_string();
+    conn.execute(
+        "INSERT INTO sessions (
+            name, project, host_id, config_json, cron_schedule, auto_start, enabled
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+         ON CONFLICT(name, host_id) DO UPDATE SET
+            project = excluded.project,
+            cron_schedule = excluded.cron_schedule,
+            auto_start = excluded.auto_start,
+            enabled = 1",
+        params![
+            session.name,
+            session.project,
+            host_id,
+            config_json,
+            session.cron_schedule,
+            session.auto_start
+        ],
+    )?;
+
+    let session_id: i64 = conn.query_row(
+        "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
+        params![session.name, host_id],
+        |r| r.get(0),
+    )?;
+
+    conn.execute(
+        "INSERT INTO session_status (session_id, status, panes_json, polled_at)
+         VALUES (
+            ?1,
+            ?2,
+            ?3,
+            COALESCE(?4, datetime('now'))
+         )
+         ON CONFLICT(session_id) DO UPDATE SET
+            status = excluded.status,
+            panes_json = excluded.panes_json,
+            polled_at = excluded.polled_at",
+        params![
+            session_id,
+            session.status,
+            session.panes_json,
+            session.polled_at
+        ],
+    )?;
+
+    Ok(())
+}
+
+pub fn list_ci_sessions(conn: &Connection) -> anyhow::Result<Vec<CiSession>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.name, s.github_repo, s.azure_project, COALESCE(ss.panes_json, '[]')
+         FROM sessions s
+         LEFT JOIN session_status ss ON ss.session_id = s.id
+         WHERE s.enabled = 1
+           AND (s.github_repo IS NOT NULL OR s.azure_project IS NOT NULL)
+         ORDER BY s.id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let panes_json: String = r.get(4)?;
+            Ok(CiSession {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                github_repo: r.get(2)?,
+                azure_project: r.get(3)?,
+                has_active_pane: panes_json_has_active(&panes_json),
+            })
+        })?
+        .filter_map(|row| row.ok())
+        .collect::<Vec<_>>();
+    Ok(rows)
+}
+
+pub fn ci_provider_due(
+    conn: &Connection,
+    session_id: i64,
+    provider: &str,
+    now_iso: &str,
+) -> anyhow::Result<bool> {
+    let due = conn
+        .query_row(
+            "SELECT next_poll_at <= ?3
+             FROM session_ci
+             WHERE session_id = ?1 AND provider = ?2",
+            params![session_id, provider, now_iso],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(true);
+    Ok(due)
+}
+
+pub fn upsert_session_ci(conn: &Connection, update: &SessionCiUpdate) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO session_ci (
+            session_id, provider, status, data_json, tool_message, polled_at, next_poll_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(session_id, provider) DO UPDATE SET
+            status = excluded.status,
+            data_json = excluded.data_json,
+            tool_message = excluded.tool_message,
+            polled_at = excluded.polled_at,
+            next_poll_at = excluded.next_poll_at",
+        params![
+            update.session_id,
+            update.provider,
+            update.status,
+            update.data_json,
+            update.tool_message,
+            update.polled_at,
+            update.next_poll_at
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn log_session_event(
     conn: &Connection,
     session_id: i64,
@@ -260,7 +425,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             api_port   INTEGER NOT NULL DEFAULT 7700,
             is_local   BOOLEAN NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-            last_seen  DATETIME
+            last_seen  TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -330,7 +495,22 @@ fn migrate(conn: &Connection) -> Result<()> {
           BEGIN
             UPDATE sessions SET updated_at = datetime('now') WHERE id = OLD.id;
           END;
-    "#)
+    "#)?;
+    ensure_hosts_last_seen_column(conn)?;
+    Ok(())
+}
+
+fn ensure_hosts_last_seen_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(hosts)")?;
+    let has_last_seen = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "last_seen");
+
+    if !has_last_seen {
+        conn.execute("ALTER TABLE hosts ADD COLUMN last_seen TEXT", [])?;
+    }
+    Ok(())
 }
 
 fn validate_config_session_name(name: &str, config_json: &str) -> anyhow::Result<()> {
@@ -350,6 +530,20 @@ fn validate_cron(expr: &str) -> anyhow::Result<()> {
     let normalized = normalize_cron_expr(expr);
     Schedule::from_str(&normalized).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
     Ok(())
+}
+
+fn panes_json_has_active(panes_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(panes_json) else {
+        return false;
+    };
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    items.iter().any(|item| {
+        item.get("status")
+            .and_then(|status| status.as_str())
+            .is_some_and(|status| status.eq_ignore_ascii_case("active"))
+    })
 }
 
 fn normalize_cron_expr(expr: &str) -> String {

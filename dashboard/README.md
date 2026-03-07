@@ -1,47 +1,50 @@
 # scmux Dashboard
 
-React single-file dashboard for monitoring and jumping to tmux agent teams.
+`dashboard/team-dashboard.jsx` is the live dashboard UI for `scmux-daemon`.
 
-## Features
+## Daemon URL Discovery
 
-- **Grid / List / Grouped** views
-- Per-session pane status (active / idle / stopped)
-- Open PRs with links
-- Jump modal — fires WezTerm SSH command to attach to session
-- Filter by status (running / idle / stopped) and project
-- Search sessions by name
+The dashboard resolves the daemon base URL from `window.location.origin`.
 
-## Running
+- Normal daemon-served mode: uses the page origin directly.
+- Local file/dev fallback: if origin is `null` or protocol is `file:`, uses `http://localhost:7878`.
 
-The dashboard is a single React JSX file (`team-dashboard.jsx`). To run:
+## Multi-Host Polling Model
+
+The browser only calls the local daemon.
+
+- `GET /dashboard-config.json` on initial load
+  - reads `default_terminal`
+  - reads `poll_interval_ms`
+  - seeds host metadata
+- `GET /sessions` and `GET /hosts` every `poll_interval_ms`
+  - sessions are cross-referenced by `host_id`
+  - host reachability and `last_seen` are taken from `/hosts`
+  - unreachable host sessions render monochrome in the UI
+
+## Opening the Dashboard
+
+Recommended path:
+
+1. Start daemon:
 
 ```bash
-# Option 1: Vite
-npm create vite@latest dashboard -- --template react
-cp team-dashboard.jsx src/App.jsx
-npm run dev
-
-# Option 2: Serve as artifact in Claude.ai
-# Paste team-dashboard.jsx contents into a Claude artifact
+scmux-daemon
 ```
 
-## Connecting to scmux-daemon
+2. Open in browser:
 
-Replace the static `TEAMS` array with a `useEffect` fetch from your daemon:
-
-```js
-useEffect(() => {
-  fetch('http://localhost:7700/sessions')
-    .then(r => r.json())
-    .then(setTeams);
-}, []);
+```text
+http://localhost:7878/
 ```
 
-For multiple hosts, fetch from each and merge with a `host` field added to each session.
+## Local Development
 
-## Jump Command
+You can iterate on the JSX file with a static server while keeping daemon APIs running:
 
-The jump modal shows the WezTerm command for the selected session:
+```bash
+cd dashboard
+python3 -m http.server 8080
+```
 
-- **Local:** `wezterm start -- tmux attach -t <session-name>`
-- **Remote:** `wezterm ssh user@host -- tmux attach -t <session-name>`
+Then open `http://localhost:8080/` and ensure a daemon is running on `http://localhost:7878` (fallback URL), or serve from daemon origin directly.
