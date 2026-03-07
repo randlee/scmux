@@ -5,14 +5,21 @@ use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::json;
-use std::io::Write;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use tempfile::TempDir;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
+#[cfg(target_os = "macos")]
+use tokio::sync::Mutex;
+
+#[cfg(target_os = "macos")]
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
 fn env_lock() -> &'static Mutex<()> {
     ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -105,6 +112,7 @@ impl Drop for CliE2eHarness {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn write_script(contents: &str) -> tempfile::TempPath {
     let mut file = tempfile::NamedTempFile::new().expect("temp script");
     file.write_all(contents.as_bytes()).expect("write script");
