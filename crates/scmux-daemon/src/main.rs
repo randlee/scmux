@@ -7,7 +7,7 @@ use tracing::info;
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
-const DEFAULT_PORT: u16 = 7700;
+const DEFAULT_PORT: u16 = 7878;
 #[derive(Debug, Parser)]
 #[command(name = "scmux-daemon")]
 struct Args {
@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
+        db_path: db_path.clone(),
         host_id,
         config,
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),

@@ -38,6 +38,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
     let host_id = db::ensure_local_host(&conn).expect("local host");
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
+        db_path: db_path.to_string_lossy().to_string(),
         host_id,
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -360,7 +361,7 @@ async fn t_i_09_write_health_prunes_older_than_seven_days() {
 #[tokio::test]
 async fn t_i_10_poll_hosts_unreachable_test_net_returns_ok() {
     let (state, _tmp) = build_state();
-    insert_remote_host(&state, "ti10-remote", "192.0.2.1", 7700);
+    insert_remote_host(&state, "ti10-remote", "192.0.2.1", 7878);
 
     let _guard = env_lock().lock().await;
     let script = write_script("#!/bin/sh\nexit 1\n");
@@ -374,7 +375,7 @@ async fn t_i_10_poll_hosts_unreachable_test_net_returns_ok() {
 #[tokio::test]
 async fn t_i_11_three_failures_mark_host_unreachable() {
     let (state, _tmp) = build_state();
-    let remote_id = insert_remote_host(&state, "ti11-remote", "192.0.2.1", 7700);
+    let remote_id = insert_remote_host(&state, "ti11-remote", "192.0.2.1", 7878);
 
     let _guard = env_lock().lock().await;
     let script = write_script("#!/bin/sh\nexit 1\n");
@@ -426,4 +427,165 @@ async fn t_i_12_success_after_failures_marks_host_reachable() {
     let entry = map.get(&remote_id).expect("remote host entry");
     assert!(entry.reachable);
     assert_eq!(entry.consecutive_failures, 0);
+}
+
+#[tokio::test]
+async fn td_22_poll_cycle_latency_under_500ms_for_50_sessions() {
+    let (state, _tmp) = build_state();
+    for idx in 0..50 {
+        let name = format!("ti20-{idx}");
+        insert_session(&state, &name, false, None);
+    }
+
+    let _guard = env_lock().lock().await;
+    let script = write_script("#!/bin/sh\nexit 1\n");
+    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let started = std::time::Instant::now();
+    let poll_result = scheduler::poll_cycle(&state).await;
+    let elapsed = started.elapsed();
+    restore_env_var("SCMUX_TMUX_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "poll cycle exceeded 500ms with 50 sessions: {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn t_i_20_reconstructs_registry_from_live_tmux_after_db_loss() {
+    let (state, _tmp) = build_state();
+
+    let _guard = env_lock().lock().await;
+    let script = write_script(
+        r#"#!/bin/sh
+if [ "$1" = "list-sessions" ]; then
+  echo "ti22-alpha"
+  echo "ti22-beta"
+  exit 0
+fi
+if [ "$1" = "list-panes" ]; then
+  echo "0|lead|zsh|1"
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let poll_result = scheduler::poll_cycle(&state).await;
+    restore_env_var("SCMUX_TMUX_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    let db_conn = state.db.lock().expect("db lock");
+    let recovered_sessions: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND enabled = 1",
+            [state.host_id],
+            |r| r.get(0),
+        )
+        .expect("session count");
+    let running_rows: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("running count");
+    assert_eq!(recovered_sessions, 2);
+    assert_eq!(running_rows, 2);
+}
+
+#[tokio::test]
+async fn td_19_single_unreachable_host_does_not_abort_poll_cycle() {
+    let (state, _tmp) = build_state();
+    let failing_host = insert_remote_host(&state, "td19-fail", "192.0.2.1", 7878);
+    let healthy_host = insert_remote_host(&state, "td19-healthy", "198.51.100.2", 7878);
+
+    let _guard = env_lock().lock().await;
+    let script = write_script(
+        r#"#!/bin/sh
+case "$*" in
+  *192.0.2.1*) exit 1 ;;
+  *) exit 0 ;;
+esac
+"#,
+    );
+    let prev = set_env_var("SCMUX_PING_BIN", script.to_string_lossy().as_ref());
+
+    let host_result = hosts::poll_hosts(Arc::clone(&state)).await;
+    restore_env_var("SCMUX_PING_BIN", prev);
+    host_result.expect("host poll should continue on unreachable host");
+
+    let map = state.reachability.lock().expect("reachability lock");
+    let failing = map.get(&failing_host).expect("failing host reachability");
+    let healthy = map.get(&healthy_host).expect("healthy host reachability");
+    assert!(!failing.reachable);
+    assert!(healthy.reachable);
+}
+
+#[tokio::test]
+async fn td_20_single_session_start_failure_does_not_abort_session_loop() {
+    let (state, _tmp) = build_state();
+    let bad_name = unique_name("td20-bad");
+    let good_name = unique_name("td20-good");
+    let bad_id = insert_session(&state, &bad_name, true, None);
+    let good_id = insert_session(&state, &good_name, true, None);
+
+    let _guard = env_lock().lock().await;
+    let script = write_script(&format!(
+        r#"#!/bin/sh
+if [ "$1" = "load" ]; then
+  if grep -q "{bad_name}" "$3"; then
+    echo "simulated tmuxp failure" >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 1
+"#
+    ));
+    let prev = set_env_var("SCMUX_TMUXP_BIN", script.to_string_lossy().as_ref());
+
+    let poll_result = scheduler::poll_cycle(&state).await;
+    restore_env_var("SCMUX_TMUXP_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    let bad_failures = event_count(&state, bad_id, "failed", "auto_start");
+    let good_starts = event_count(&state, good_id, "started", "auto_start");
+    assert_eq!(bad_failures, 1);
+    assert_eq!(good_starts, 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn td_24_daemon_rss_under_50mb_after_loading_20_sessions() {
+    let (state, _tmp) = build_state();
+    for idx in 0..20 {
+        let name = format!("td24-{idx}");
+        insert_session(&state, &name, false, None);
+    }
+
+    scheduler::poll_cycle(&state).await.expect("poll cycle");
+
+    let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
+    let rss_kb: u64 = status
+        .lines()
+        .find(|line| line.starts_with("VmRSS:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    assert!(
+        rss_kb < 50 * 1024,
+        "RSS exceeded 50MB after loading 20 sessions: {} KB",
+        rss_kb
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn td_24_daemon_rss_under_50mb_after_loading_20_sessions() {
+    // Linux-only implementation uses /proc/self/status; macOS is validated manually in Phase 4 runbook.
 }

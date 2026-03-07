@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS hosts (
   name         TEXT    NOT NULL UNIQUE,   -- "mac-studio", "dgx-spark"
   address      TEXT    NOT NULL,          -- "localhost" or IP/hostname
   ssh_user     TEXT,                      -- NULL for localhost
-  api_port     INTEGER NOT NULL DEFAULT 7700,
+  api_port     INTEGER NOT NULL DEFAULT 7878,
   is_local     BOOLEAN NOT NULL DEFAULT 0,
   created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
   last_seen    DATETIME                   -- last successful health check

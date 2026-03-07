@@ -132,38 +132,48 @@ pub async fn jump_session(
         anyhow::bail!("unsupported terminal '{terminal}'");
     }
 
-    let escaped_session = shell_escape(session);
-    let command = match host {
-        HostTarget::Local => format!("tmux attach -t {escaped_session}"),
-        HostTarget::Remote { user, host } => {
-            format!(
-                "ssh {}@{} tmux attach -t {escaped_session}",
-                shell_escape(&user),
-                shell_escape(&host)
-            )
-        }
-    };
-    let script = format!(
-        "tell application \"iTerm2\"\n  create window with default profile\n  tell current session of current window\n    write text \"{}\"\n  end tell\nend tell",
-        apple_script_escape(&command)
-    );
-
-    let out = Command::new(osascript_bin())
-        .args(["-e", script.as_str()])
-        .output()
-        .await?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let message = if err.is_empty() {
-            "osascript failed to launch iTerm2".to_string()
-        } else {
-            format!("osascript failed: {err}")
-        };
-        anyhow::bail!(message);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = host;
+        let _ = session;
+        anyhow::bail!("iTerm2 jump is only supported on macOS");
     }
 
-    Ok("launched iTerm2".to_string())
+    #[cfg(target_os = "macos")]
+    {
+        let escaped_session = shell_escape(session);
+        let command = match host {
+            HostTarget::Local => format!("tmux attach -t {escaped_session}"),
+            HostTarget::Remote { user, host } => {
+                format!(
+                    "ssh {}@{} tmux attach -t {escaped_session}",
+                    shell_escape(&user),
+                    shell_escape(&host)
+                )
+            }
+        };
+        let script = format!(
+            "tell application \"iTerm2\"\n  create window with default profile\n  tell current session of current window\n    write text \"{}\"\n  end tell\nend tell",
+            apple_script_escape(&command)
+        );
+
+        let out = Command::new(osascript_bin())
+            .args(["-e", script.as_str()])
+            .output()
+            .await?;
+
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let message = if err.is_empty() {
+                "osascript failed to launch iTerm2".to_string()
+            } else {
+                format!("osascript failed: {err}")
+            };
+            anyhow::bail!(message);
+        }
+
+        Ok("launched iTerm2".to_string())
+    }
 }
 
 fn tmux_bin() -> String {
@@ -174,10 +184,12 @@ fn tmuxp_bin() -> String {
     std::env::var("SCMUX_TMUXP_BIN").unwrap_or_else(|_| "tmuxp".to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn osascript_bin() -> String {
     std::env::var("SCMUX_OSASCRIPT_BIN").unwrap_or_else(|_| "osascript".to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn shell_escape(input: &str) -> String {
     if input
         .chars()
@@ -188,6 +200,7 @@ fn shell_escape(input: &str) -> String {
     format!("'{}'", input.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(target_os = "macos")]
 fn apple_script_escape(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }

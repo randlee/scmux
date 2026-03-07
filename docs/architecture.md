@@ -92,13 +92,22 @@ main()
 
 ```rust
 pub struct AppState {
-    pub db:      Mutex<rusqlite::Connection>,
-    pub host_id: i64,
-    pub config:  Config,   // loaded from scmux.toml at startup
+    pub db:          Mutex<rusqlite::Connection>,
+    pub db_path:     String,
+    pub host_id:     i64,
+    pub config:      Config,   // loaded from scmux.toml at startup
+    pub started_at:  Instant,
 }
 ```
 
 Only the daemon writes to SQLite. HTTP handlers read from `session_status` (written by poll_loop). Start/stop/jump handlers call subprocess, then write events.
+
+`GET /health` returns:
+- `status`
+- `uptime_secs`
+- `session_count`
+- `db_path`
+- `version`
 
 ### 4.2 Jump Flow
 
