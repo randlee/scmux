@@ -5,8 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::tmux;
-use crate::AppState;
+use crate::{tmux, AppState};
 
 struct SessionRow {
     id: i64,

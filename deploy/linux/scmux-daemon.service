@@ -11,4 +11,4 @@ RestartSec=5
 Environment=SCMUX_LOG=info
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

@@ -120,7 +120,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-01 | The daemon shall expose HTTP on a configurable port (default 7878) | 1.2 |
 | API-02 | All responses shall be JSON | 1.2 |
 | API-03 | CORS shall be permissive | 1.2 |
-| API-04 | `GET /health` — daemon status, uptime seconds, enabled session count, DB path | 1.2 |
+| API-04 | `GET /health` — daemon status, uptime seconds, enabled session count, DB path, version | 1.2 |
 | API-05 | `GET /sessions` — all enabled sessions with live status, panes, CI summary | 1.2 |
 | API-06 | `GET /sessions/:name` — full detail: config, panes, CI, last 20 events | 1.2 |
 | API-07 | `GET /sessions/:name` — 404 if not found | 1.2 |
@@ -259,6 +259,11 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-D-16 | `--verbose` flag sets effective log level to DEBUG | 1.1 |
 | T-D-17 | CI fetch with network failure (simulated) does not crash daemon; records error in `session_ci` | 3.1 |
 | T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
+| T-D-19 | Single unreachable host does not abort poll cycle; remaining hosts and sessions processed normally | 4.1 |
+| T-D-20 | Single session with bad tmux state does not abort session loop; other sessions processed normally | 4.1 |
+| T-D-22 | Poll cycle completes in < 500ms with 50 mock sessions (NF-03) | 4.1 |
+| T-D-23 | GET /sessions responds in < 100ms (NF-04) | 4.1 |
+| T-D-24 | Daemon RSS < 50MB after loading 20 sessions (NF-02) | 4.1 |
 
 ### 6.2 Daemon Integration Tests
 
@@ -276,9 +281,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-I-10 | Unreachable remote host does not crash poll cycle | 2.1 |
 | T-I-11 | Host marked unreachable when /health times out | 2.1 |
 | T-I-12 | Host resumes reachable when /health responds again | 2.1 |
-| T-I-20 | Poll cycle completes in <500ms with 50 sessions (benchmark check) | 4.1 |
-| T-I-21 | `GET /sessions` responds in <100ms with 50 sessions (benchmark check) | 4.1 |
-| T-I-22 | Fresh DB reconstructs local session registry from live tmux on next poll | 4.1 |
+| T-I-20 | DB deleted while daemon stopped → next start reconstructs currently-running tmux sessions without error; daemon does not crash or return errors on /health or /sessions | 4.1 |
 
 ### 6.3 API Tests
 

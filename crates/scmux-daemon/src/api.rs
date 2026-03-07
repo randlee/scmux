@@ -45,6 +45,7 @@ struct HealthResponse {
     uptime_secs: u64,
     session_count: i64,
     db_path: String,
+    version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -173,6 +174,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
         uptime_secs,
         session_count,
         db_path,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 

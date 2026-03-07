@@ -107,6 +107,7 @@ Only the daemon writes to SQLite. HTTP handlers read from `session_status` (writ
 - `uptime_secs`
 - `session_count`
 - `db_path`
+- `version`
 
 ### 4.2 Jump Flow
 

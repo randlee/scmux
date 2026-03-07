@@ -173,6 +173,7 @@ async fn t_a_01_get_health_returns_200_with_correct_fields() {
     assert!(body["uptime_secs"].as_u64().is_some());
     assert!(body["session_count"].as_i64().is_some());
     assert!(body["db_path"].as_str().is_some());
+    assert!(body["version"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -336,6 +337,7 @@ exit 1
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
 async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
@@ -358,6 +360,28 @@ async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
     assert_eq!(body["ok"], true);
     assert_eq!(body["message"], "launched iTerm2");
     assert!(h.session_event_count("alpha") >= 1);
+}
+
+#[tokio::test]
+#[cfg(not(target_os = "macos"))]
+async fn t_a_09_post_sessions_name_jump_returns_ok_false_when_not_macos() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+
+    let response = h
+        .client
+        .post(format!("{}/sessions/alpha/jump", h.base_url))
+        .json(&json!({ "terminal": "iterm2" }))
+        .send()
+        .await
+        .expect("jump request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("only supported on macOS"));
 }
 
 #[tokio::test]
@@ -547,7 +571,7 @@ async fn t_a_16_get_session_detail_includes_ci_summary_payload() {
 }
 
 #[tokio::test]
-async fn t_i_21_get_sessions_latency_under_100ms_at_50_sessions() {
+async fn td_23_get_sessions_latency_under_100ms_at_50_sessions() {
     let h = ApiHarness::new().await;
     for idx in 0..50 {
         h.create_session(&format!("perf-{idx}")).await;

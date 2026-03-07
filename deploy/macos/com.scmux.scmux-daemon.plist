@@ -24,5 +24,11 @@
         <key>SCMUX_LOG</key>
         <string>info</string>
     </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/scmux/scmux-daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/scmux/scmux-daemon-error.log</string>
 </dict>
 </plist>

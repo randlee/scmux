@@ -146,6 +146,7 @@ pub struct HealthResponse {
     pub uptime_secs: u64,
     pub session_count: i64,
     pub db_path: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
