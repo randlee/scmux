@@ -259,6 +259,12 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-D-16 | `--verbose` flag sets effective log level to DEBUG | 1.1 |
 | T-D-17 | CI fetch with network failure (simulated) does not crash daemon; records error in `session_ci` | 3.1 |
 | T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
+| T-D-19 | Single unreachable host does not abort poll cycle; remaining hosts and sessions processed normally | 4.1 |
+| T-D-20 | Single session with bad tmux state does not abort session loop; other sessions processed normally | 4.1 |
+| T-D-21 | `events` table rows older than TTL are absent after prune cycle | 4.1 |
+| T-D-22 | Poll cycle completes in < 500ms with 50 mock sessions (NF-03) | 4.1 |
+| T-D-23 | GET /sessions responds in < 100ms (NF-04) | 4.1 |
+| T-D-24 | Daemon RSS < 50MB after loading 20 sessions (NF-02) | 4.1 |
 
 ### 6.2 Daemon Integration Tests
 
@@ -276,6 +282,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-I-10 | Unreachable remote host does not crash poll cycle | 2.1 |
 | T-I-11 | Host marked unreachable when /health times out | 2.1 |
 | T-I-12 | Host resumes reachable when /health responds again | 2.1 |
+| T-I-20 | DB deleted while daemon stopped → next start reconstructs session state from live tmux output without error | 4.1 |
 
 ### 6.3 API Tests
 
