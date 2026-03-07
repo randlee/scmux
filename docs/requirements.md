@@ -416,7 +416,7 @@ The system is complete when:
 
 **v0.4.0 additional gates (AC-11..AC-16):**
 
-11. `http://localhost:7878/` shows the real scmux dashboard matching the reference design (project colors, status dots, views, jump modal with WezTerm button)
+11. `http://localhost:7878/` shows the real scmux dashboard matching the reference design (project colors, status dots, views, click-to-open jump modal with terminal button)
 12. `cargo install scmux-daemon` on a clean machine serves the embedded dashboard
 13. Both `scmux` and `scmux-daemon` are published to crates.io on release tag
 14. `SCMUX_DASHBOARD_DIR` override loads from disk for local dev
