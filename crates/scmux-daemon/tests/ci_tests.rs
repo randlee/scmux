@@ -1,7 +1,7 @@
 use chrono::DateTime;
 use scmux_daemon::ci::{self, ToolAvailability};
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
-use scmux_daemon::{db, AppState};
+use scmux_daemon::{db, AppState, SystemClock};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -44,6 +44,7 @@ fn build_state(ci_tools: ToolAvailability) -> (Arc<AppState>, TempDir) {
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
         ci_tools,
+        clock: Arc::new(SystemClock),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });

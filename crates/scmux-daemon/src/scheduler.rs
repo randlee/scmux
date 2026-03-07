@@ -33,7 +33,7 @@ pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
         }
     }
 
-    let now = Utc::now();
+    let now = state.clock.now_utc();
 
     // Phase 2: Update status and write transition events via spawn_blocking
     let state2 = Arc::clone(state);

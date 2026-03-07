@@ -1,6 +1,6 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, ci, db, hosts, logging, scheduler, AppState};
+use scmux_daemon::{api, ci, db, hosts, logging, scheduler, AppState, SystemClock};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         config,
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
         ci_tools,
+        clock: std::sync::Arc::new(SystemClock),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });
