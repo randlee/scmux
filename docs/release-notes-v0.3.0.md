@@ -1,8 +1,8 @@
-# scmux v1.0.0 Release Notes
+# scmux v0.3.0 Release Notes
 
 ## Summary
 
-`v1.0.0` is the first production release of scmux: a daemon-backed tmux session manager for multi-agent workflows across local and remote hosts.
+`v0.3.0` is the Phase 4 release of scmux: a daemon-backed tmux session manager for multi-agent workflows across local and remote hosts.
 
 ## Highlights Since v0.x
 
@@ -29,4 +29,4 @@
 
 ## Upgrade Path
 
-No migration path is required for `v1.0.0` because this is the first public stable release.
+No schema migration is required for `v0.3.0` from prior Phase 3/4 development builds.

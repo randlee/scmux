@@ -33,11 +33,11 @@ Final sprint validates complete system behavior and prepares release artifacts.
 4. Release and acceptance docs
 - `docs/release-checklist.md` with `AC-01..AC-10` pass/fail state.
 - `AC-02` recorded as manual attestation (not a CI gate).
-- `docs/release-notes-v1.0.0.md` draft.
+- `docs/release-notes-v0.3.0.md` draft.
 - Homebrew formula update noted as placeholder checklist item (non-blocking).
 
 5. Release pipeline artifacts
-- Bump workspace version to `1.0.0`.
+- Bump workspace version to `0.3.0`.
 - Add perf-gate CI execution for `T-D-22`/`T-D-23` in `--release`.
 
 ## Acceptance Criteria

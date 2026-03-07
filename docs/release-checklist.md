@@ -1,4 +1,4 @@
-# Release Checklist (v1.0.0)
+# Release Checklist (v0.3.0)
 
 ## Acceptance Gates
 
@@ -25,8 +25,8 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| Workspace version bumped to `1.0.0` | [ ] | |
-| `docs/release-notes-v1.0.0.md` complete | [ ] | |
+| Workspace version bumped to `0.3.0` | [ ] | |
+| `docs/release-notes-v0.3.0.md` complete | [ ] | |
 | launchd/systemd docs verified | [ ] | |
 | Checksums generated for release assets | [ ] | |
 | Homebrew formula checklist placeholder reviewed (non-blocking) | [ ] | Tap not created yet |
