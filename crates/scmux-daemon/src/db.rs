@@ -96,7 +96,7 @@ pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow
                 host.name,
                 host.address,
                 host.ssh_user,
-                host.api_port.unwrap_or(7700),
+                host.api_port.unwrap_or(7878),
                 host.is_local.unwrap_or(false)
             ],
         )?;
@@ -422,7 +422,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             name       TEXT    NOT NULL UNIQUE,
             address    TEXT    NOT NULL,
             ssh_user   TEXT,
-            api_port   INTEGER NOT NULL DEFAULT 7700,
+            api_port   INTEGER NOT NULL DEFAULT 7878,
             is_local   BOOLEAN NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT (datetime('now')),
             last_seen  TEXT

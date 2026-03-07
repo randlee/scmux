@@ -42,9 +42,10 @@ const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
-    host_id: i64,
-    sessions_running: i64,
-    polled_at: String,
+    uptime_secs: u64,
+    session_count: i64,
+    db_path: String,
+    version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -156,14 +157,13 @@ async fn touch_last_api_access(
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let host_id = state.host_id;
-    let running: i64 = tokio::task::spawn_blocking(move || {
+    let uptime_secs = state.started_at.elapsed().as_secs();
+    let db_path = state.db_path.clone();
+    let session_count: i64 = tokio::task::spawn_blocking(move || {
         let db = state.db.lock().unwrap();
-        db.query_row(
-            "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
-            [],
-            |r| r.get(0),
-        )
+        db.query_row("SELECT COUNT(*) FROM sessions WHERE enabled = 1", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(0)
     })
     .await
@@ -171,9 +171,10 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
 
     Json(HealthResponse {
         status: "ok",
-        host_id,
-        sessions_running: running,
-        polled_at: chrono::Utc::now().to_rfc3339(),
+        uptime_secs,
+        session_count,
+        db_path,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 

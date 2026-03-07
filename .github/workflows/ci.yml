@@ -86,5 +86,37 @@ jobs:
       - name: Build workspace
         run: cargo build --verbose
 
+      - name: Build release daemon (NF-01)
+        run: cargo build --release -p scmux-daemon
+
+      - name: NF-01 dynamic dependency check
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/release/scmux-daemon"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            ldd "$BIN"
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            otool -L "$BIN"
+          else
+            echo "Skipping dependency check for unsupported runner OS"
+          fi
+
       - name: Run tests
         run: cargo test --verbose
+
+  perf-gate:
+    name: perf-gate (release benchmarks)
+    needs: [clippy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run T-D-22 in release mode
+        run: cargo test --release -p scmux-daemon td_22_poll_cycle_latency_under_500ms_for_50_sessions -- --exact --ignored
+
+      - name: Run T-D-23 in release mode
+        run: cargo test --release -p scmux-daemon td_23_get_sessions_latency_under_100ms_at_50_sessions -- --exact --ignored

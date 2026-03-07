@@ -2,11 +2,12 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
-use scmux_daemon::AppState;
+use scmux_daemon::{AppState, SystemClock};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::sync::{oneshot, Mutex};
 
@@ -32,13 +33,14 @@ impl ApiHarness {
         let host_id = db::ensure_local_host(&conn).expect("local host");
         conn.execute(
             "INSERT INTO hosts (name, address, ssh_user, api_port, is_local, last_seen)
-             VALUES ('dgx-spark', '192.168.1.50', 'randlee', 7700, 0, datetime('now'))",
+             VALUES ('dgx-spark', '192.168.1.50', 'randlee', 7878, 0, datetime('now'))",
             [],
         )
         .expect("seed host");
 
         let state = Arc::new(AppState {
             db: std::sync::Mutex::new(conn),
+            db_path: db_path.to_string_lossy().to_string(),
             host_id,
             config: Config {
                 daemon: DaemonConfig {
@@ -57,6 +59,7 @@ impl ApiHarness {
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
             ci_tools: ci::ToolAvailability::default(),
+            clock: Arc::new(SystemClock),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
         });
@@ -168,9 +171,10 @@ async fn t_a_01_get_health_returns_200_with_correct_fields() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["status"], "ok");
-    assert!(body["host_id"].as_i64().is_some());
-    assert!(body["sessions_running"].as_i64().is_some());
-    assert!(body["polled_at"].as_str().is_some());
+    assert!(body["uptime_secs"].as_u64().is_some());
+    assert!(body["session_count"].as_i64().is_some());
+    assert!(body["db_path"].as_str().is_some());
+    assert!(body["version"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -334,6 +338,7 @@ exit 1
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
 async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
@@ -356,6 +361,28 @@ async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
     assert_eq!(body["ok"], true);
     assert_eq!(body["message"], "launched iTerm2");
     assert!(h.session_event_count("alpha") >= 1);
+}
+
+#[tokio::test]
+#[cfg(not(target_os = "macos"))]
+async fn t_a_09_post_sessions_name_jump_returns_ok_false_when_not_macos() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+
+    let response = h
+        .client
+        .post(format!("{}/sessions/alpha/jump", h.base_url))
+        .json(&json!({ "terminal": "iterm2" }))
+        .send()
+        .await
+        .expect("jump request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("only supported on macOS"));
 }
 
 #[tokio::test]
@@ -542,6 +569,45 @@ async fn t_a_16_get_session_detail_includes_ci_summary_payload() {
         .as_str()
         .unwrap_or_default()
         .contains("brew install gh"));
+}
+
+#[tokio::test]
+#[ignore = "perf-gate: run in --release CI job"]
+async fn td_23_get_sessions_latency_under_100ms_at_50_sessions() {
+    let h = ApiHarness::new().await;
+    for idx in 0..50 {
+        h.create_session(&format!("perf-{idx}")).await;
+    }
+
+    let warmup = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("warm-up sessions request");
+    assert_eq!(warmup.status(), reqwest::StatusCode::OK);
+
+    let mut samples = Vec::new();
+    for _ in 0..10 {
+        let started = Instant::now();
+        let response = h
+            .client
+            .get(format!("{}/sessions", h.base_url))
+            .send()
+            .await
+            .expect("sessions request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let p95_index = ((samples.len() as f64) * 0.95).ceil() as usize - 1;
+    let p95 = samples[p95_index];
+    assert!(
+        p95 < Duration::from_millis(100),
+        "GET /sessions p95 exceeded 100ms at 50 sessions: {:?}",
+        p95
+    );
 }
 
 #[tokio::test]
