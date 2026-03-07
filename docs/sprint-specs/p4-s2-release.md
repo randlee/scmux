@@ -12,22 +12,35 @@ Final sprint validates complete system behavior and prepares release artifacts.
 ## Deliverables
 
 1. End-to-end tests
-- `tests/e2e_tests.rs` (or equivalent suite) covering `T-E-01..T-E-11`.
-- environment setup docs/scripts for reproducible E2E execution.
+- `tests/e2e_tests.rs` — automated suite covering **T-E-01..T-E-05, T-E-07, T-E-10, T-E-11** only.
+- `docs/e2e-manual-runbook.md` — manual test runbooks for:
+  - **T-E-06**: iTerm2 jump (requires iTerm2 + display; not automatable headless)
+  - **T-E-08**: VPN disconnect → monochrome (requires two machines + VPN)
+  - **T-E-09**: VPN reconnect → restore (same)
+- `docs/e2e-environment.md` — E2E environment prerequisites:
+  - macOS 14+ (Sonoma) primary machine
+  - tmux ≥ 3.3, tmuxp ≥ 1.30
+  - iTerm2 ≥ 3.5 (for T-E-06 manual test)
+  - `gh` CLI authenticated (for CI badge tests)
+  - Single machine sufficient for automated suite; second machine required for T-E-08/09
 
 2. Acceptance verification report
-- add release checklist document summarizing section 7 acceptance completion.
+- `docs/release-checklist.md` — AC-01..AC-10 checklist with pass/fail column.
+- **AC-02 (24h soak)**: manual attestation — run daemon on dev machine for 24h, record result in release checklist. Not a CI gate.
+- Release checklist must be complete before v1.0.0 tag.
 
 3. Release pipeline artifacts
-- version update to `1.0.0`.
-- release notes draft.
-- Homebrew formula update checklist.
+- Version update to `1.0.0` in workspace `Cargo.toml`.
+- `docs/release-notes-v1.0.0.md` — must include: what changed since v0.x, known limitations, install instructions (macOS launchd + Linux systemd), upgrade path (none for first release).
+- Homebrew formula update checklist (note: Homebrew tap not yet created; checklist is a placeholder for post-release packaging).
 
 ## Acceptance Criteria
 
-- T-E-01..T-E-11 pass.
-- requirements section 7 acceptance criteria all satisfied.
-- release checklist is complete and reviewable.
+- Automated E2E suite (T-E-01..T-E-05, T-E-07, T-E-10, T-E-11) passes in CI.
+- Manual runbooks present and complete for T-E-06, T-E-08, T-E-09.
+- AC-02 (24h soak) attested manually in release checklist.
+- Release checklist AC-01..AC-10 complete and reviewable.
+- `cargo clippy` clean, `cargo test --workspace` passes.
 
 ## Requirement IDs Covered
 
