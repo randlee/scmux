@@ -42,6 +42,16 @@ pub enum Command {
         #[arg(long)]
         host_id: Option<i64>,
     },
+    /// Session definition write commands (enabled in Sprint 6.cli)
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Host definition write commands (enabled in Sprint 6.cli)
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
     /// Register a new session
     Add {
         #[arg(long)]
@@ -99,4 +109,83 @@ pub enum Command {
 pub enum DaemonCommand {
     /// Show daemon health status
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// Create a session definition
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        config: String,
+        #[arg(long)]
+        cron: Option<String>,
+        #[arg(long)]
+        auto_start: bool,
+        #[arg(long)]
+        host_id: Option<i64>,
+        #[arg(long)]
+        github_repo: Option<String>,
+        #[arg(long)]
+        azure_project: Option<String>,
+    },
+    /// Update a session definition
+    Edit {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long)]
+        cron: Option<String>,
+        /// Set auto-start behavior. Supports `--auto-start` and `--auto-start=false`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        auto_start: Option<bool>,
+        #[arg(long)]
+        github_repo: Option<String>,
+        #[arg(long)]
+        azure_project: Option<String>,
+    },
+    /// Disable a session definition
+    Disable { name: String },
+    /// Enable a session definition
+    Enable { name: String },
+    /// Remove a session definition
+    Remove { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HostCommand {
+    /// Create a host definition
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        address: String,
+        #[arg(long)]
+        ssh_user: Option<String>,
+        #[arg(long)]
+        api_port: Option<u16>,
+        #[arg(long)]
+        is_local: Option<bool>,
+    },
+    /// Update a host definition
+    Edit {
+        id: i64,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long)]
+        ssh_user: Option<String>,
+        #[arg(long)]
+        clear_ssh_user: bool,
+        #[arg(long)]
+        api_port: Option<u16>,
+    },
+    /// Remove a host definition
+    Remove { id: i64 },
 }
