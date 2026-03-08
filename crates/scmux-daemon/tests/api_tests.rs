@@ -232,7 +232,7 @@ async fn t_a_03_get_sessions_returns_sessions_with_correct_status_and_panes() {
 }
 
 #[tokio::test]
-async fn t_a_04_get_sessions_name_returns_200_with_config_and_events() {
+async fn t_a_04_get_sessions_name_returns_200_with_config() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -246,7 +246,7 @@ async fn t_a_04_get_sessions_name_returns_200_with_config_and_events() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["name"], "alpha");
     assert_eq!(body["config_json"]["session_name"], "alpha");
-    assert!(body["recent_events"].is_array());
+    assert!(body.get("recent_events").is_none());
 }
 
 #[tokio::test]
