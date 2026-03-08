@@ -40,20 +40,22 @@ scmux is delivered in six phases with explicit integration branches and version 
 | Sprint | Status |
 |--------|--------|
 | S0 | Complete (foundation: cargo build, workspace scaffold, env var rename) |
-| S1.1 | Pending |
-| S1.2 | Pending |
-| S2.1 | Pending |
-| S2.2 | Pending |
-| S3.1 | Pending |
-| S3.2 | Pending |
-| S4.1 | Pending |
-| S4.2 | Pending |
+| S1.1 | Complete |
+| S1.2 | Complete |
+| S2.1 | Complete |
+| S2.2 | Complete |
+| S3.1 | Complete |
+| S3.2 | Complete |
+| S4.1 | Complete |
+| S4.2 | Complete |
 | S5.1 | Complete |
 | S5.2 | Complete |
 | S5.3 | Complete |
-| S6.0 | In Progress (requirements/architecture realignment) |
-| S6.1 | Complete (writer-gate + runtime projection backend) |
-| S6.2 | In Progress (dashboard runtime-projection wiring) |
+| S6.0 | Complete — PR #27 |
+| S6.1 | Complete — PR #28 |
+| S6.2 | Complete — PR #29 |
+| S6.3 | Complete — PR #38 |
+| S6.fix | In Progress — critical review fix pass |
 
 ## Sprint S0 — Foundation (Complete)
 
@@ -309,7 +311,7 @@ scmux is delivered in six phases with explicit integration branches and version 
 - Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s2-runtime-projection`
 - Base branch: `feature/p6-s1-writer-gate`
 - PR target: `integrate/phase-6`
-- Status: In Progress — PR #29 open (ea82804), QA running
+- Status: Complete — merged PR #29 (d13d1dc)
 - Scope:
   - Dashboard primary view: all defined projects (running + stopped)
   - Per-pane ATM state on project cards (active/idle/stuck/offline/unknown)
@@ -325,7 +327,7 @@ scmux is delivered in six phases with explicit integration branches and version 
 - Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s3-cleanup-tests`
 - Base branch: `feature/p6-s2-runtime-projection`
 - PR target: `integrate/phase-6`
-- Status: Pending (awaiting S6.2 QA verdict)
+- Status: Complete — merged PR #38 (956a389 + 155ee50)
 - Scope:
   - #30 SCMUX-QA-P6S1-004: Remove deprecated table DDL (session_status, session_ci, session_atm) from db::migrate()
   - #31 SCMUX-QA-P6S1-006: Explicit per-pane ATM field in API response (ATM-03)
@@ -339,6 +341,17 @@ scmux is delivered in six phases with explicit integration branches and version 
   - T-LC-01..T-LC-06 named and passing
   - recent_events populated or removed
   - GH issues #30–34 closed
+
+### Critical Review Fix Pass
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-critical-review-fixes`
+- Base branch: `integrate/phase-6`
+- PR target: `integrate/phase-6`
+- Status: In Progress — assigned to arch-cmux
+- Sprint spec: `docs/sprint-specs/p6-critical-review-fixes.md`
+- Scope: B-01..B-10 + `scmux doctor` CLI command (see sprint spec for full details)
+- Design decisions: ATM auto-discovery removed; daemon_health moved to in-memory; ATM opt-in config
+- Pending: B-11 (CLI write commands) — owner decision required
 
 ## Dependencies Across Sprints
 
@@ -355,5 +368,6 @@ scmux is delivered in six phases with explicit integration branches and version 
 ## Current Phase Entry Point
 
 - Active planning baseline: `Phase 6`.
-- Current sprint: `6.0` (requirements + architecture realignment).
-- Next implementation sprint: `6.1` (writer subsystem + runtime projection refactor, pending approval).
+- All sprints 6.0–6.3 complete and merged to `integrate/phase-6`.
+- Fix pass in progress (`feature/p6-critical-review-fixes`).
+- After fix pass merges: final PR `integrate/phase-6 → develop` for v0.5.0.
