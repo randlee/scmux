@@ -28,6 +28,12 @@ pub struct PollingConfig {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct AtmConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub teams: Vec<String>,
+    #[serde(default)]
+    pub allow_shutdown: bool,
     pub socket_path: Option<String>,
     pub stuck_minutes: Option<u64>,
     pub stop_grace_secs: Option<u64>,

@@ -46,7 +46,7 @@ fn td_02_open_is_idempotent_on_existing_db() {
     let _ = open(path.to_str().expect("utf8 path")).expect("first open");
     let conn = open(path.to_str().expect("utf8 path")).expect("second open");
 
-    for table in &["hosts", "sessions", "session_events", "daemon_health"] {
+    for table in &["hosts", "sessions", "session_events"] {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",

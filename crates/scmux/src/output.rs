@@ -70,6 +70,34 @@ pub fn print_health(status: &HealthResponse) {
     println!("db_path: {}", status.db_path);
 }
 
+pub fn print_doctor(status: &HealthResponse) {
+    println!("doctor");
+    println!("  status: {}", status.status);
+    println!("  version: {}", status.version);
+    println!("  host_id: {}", status.host_id);
+    println!("  uptime_secs: {}", status.uptime_secs);
+    println!("  sessions_running: {}", status.sessions_running);
+    println!("  session_count: {}", status.session_count);
+    println!("  atm_available: {}", status.atm_available);
+    if let Some(ci) = &status.ci_available {
+        println!("  ci_available: gh={} az={}", ci.gh, ci.az);
+    }
+    if let Some(pollers) = &status.pollers {
+        println!("  pollers:");
+        print_poller("tmux", &pollers.tmux);
+        print_poller("hosts", &pollers.hosts);
+        print_poller("ci", &pollers.ci);
+        print_poller("atm", &pollers.atm);
+    }
+    if !status.recent_errors.is_empty() {
+        println!("  recent_errors:");
+        for row in &status.recent_errors {
+            println!("    - {row}");
+        }
+    }
+    println!("  db_path: {}", status.db_path);
+}
+
 pub fn print_action(result: &ActionResponse) {
     println!("{}", result.message);
 }
@@ -78,6 +106,16 @@ pub fn print_json_pretty<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     let output = serde_json::to_string_pretty(value)?;
     println!("{output}");
     Ok(())
+}
+
+fn print_poller(name: &str, poller: &crate::client::PollerHealth) {
+    println!(
+        "    {}: status={} last_ok={} last_error={}",
+        name,
+        poller.status,
+        poller.last_ok.as_deref().unwrap_or(""),
+        poller.last_error.as_deref().unwrap_or("")
+    );
 }
 
 fn window_name(session: &SessionSummary) -> String {

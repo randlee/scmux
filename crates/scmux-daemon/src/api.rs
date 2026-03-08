@@ -57,8 +57,28 @@ struct HealthResponse {
     status: &'static str,
     uptime_secs: u64,
     session_count: i64,
+    sessions_running: i64,
+    host_id: i64,
+    atm_available: bool,
+    ci_available: CiAvailability,
+    pollers: PollerStates,
+    recent_errors: Vec<String>,
     db_path: String,
     version: &'static str,
+}
+
+#[derive(Serialize)]
+struct CiAvailability {
+    gh: bool,
+    az: bool,
+}
+
+#[derive(Serialize)]
+struct PollerStates {
+    tmux: crate::PollerHealth,
+    hosts: crate::PollerHealth,
+    ci: crate::PollerHealth,
+    atm: crate::PollerHealth,
 }
 
 #[derive(Serialize)]
@@ -234,39 +254,82 @@ async fn touch_last_api_access(
     next.run(request).await
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+async fn health(State(state): State<Arc<AppState>>) -> Result<Json<HealthResponse>, StatusCode> {
     let uptime_secs = state.started_at.elapsed().as_secs();
     let db_path = state.db_path.clone();
-    let session_count: i64 = tokio::task::spawn_blocking(move || {
-        let db = state.db.lock().unwrap();
+    let host_id = state.host_id;
+    let atm_available = state.atm_available.load(Ordering::Relaxed);
+    let ci_available = CiAvailability {
+        gh: state.ci_tools.gh_available,
+        az: state.ci_tools.az_available,
+    };
+    let sessions_running = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime.live_session_count()
+    };
+    let health_state = state.runtime_health();
+
+    let session_count_task = tokio::task::spawn_blocking(move || {
+        let db = state.db.lock().expect("db lock");
         db.query_row("SELECT COUNT(*) FROM sessions WHERE enabled = 1", [], |r| {
             r.get(0)
         })
-        .unwrap_or(0)
-    })
-    .await
-    .unwrap_or(0);
+    });
 
-    Json(HealthResponse {
+    let session_count: i64 = match session_count_task.await {
+        Ok(Ok(value)) => value,
+        Ok(Err(err)) => {
+            tracing::warn!("health query failed: {err}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Err(err) => {
+            tracing::warn!("health join error: {err}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    Ok(Json(HealthResponse {
         status: "ok",
         uptime_secs,
         session_count,
+        sessions_running,
+        host_id,
+        atm_available,
+        ci_available,
+        pollers: PollerStates {
+            tmux: health_state.tmux,
+            hosts: health_state.hosts,
+            ci: health_state.ci,
+            atm: health_state.atm,
+        },
+        recent_errors: health_state.recent_errors,
         db_path,
         version: env!("CARGO_PKG_VERSION"),
-    })
+    }))
 }
 
-async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
+async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SessionSummary>>, StatusCode> {
     let session_rows = {
         let state = Arc::clone(&state);
-        tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             let db = state.db.lock().expect("db lock");
             db::list_sessions_for_host(&db, state.host_id)
         })
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
+        .await;
+
+        match joined {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(err)) => {
+                tracing::warn!("list_sessions DB error: {err}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            Err(err) => {
+                tracing::warn!("list_sessions join error: {err}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
     };
 
     let atm_available = state.atm_available.load(Ordering::Relaxed);
@@ -304,7 +367,7 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
             .collect::<Vec<_>>()
     };
 
-    Json(sessions)
+    Ok(Json(sessions))
 }
 
 async fn get_session(
@@ -524,10 +587,14 @@ async fn start_session(
         Err(err) => {
             let mut runtime = state.runtime.lock().expect("runtime lock");
             runtime.mark_start_failed(&name, err.to_string());
-            Ok(Json(ActionResponse {
-                ok: false,
-                message: err.to_string(),
-            }))
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    ok: false,
+                    code: "start_failed".to_string(),
+                    message: err.to_string(),
+                }),
+            ))
         }
     }
 }
@@ -550,7 +617,9 @@ async fn stop_session(
     .ok_or(StatusCode::NOT_FOUND)?;
 
     let targets = extract_shutdown_targets(&definition.config_json);
-    let _ = atm::send_shutdown_messages(&targets).await;
+    if let Err(err) = atm::send_shutdown_messages(state.as_ref(), &targets).await {
+        tracing::warn!("atm shutdown send failed for session '{name}': {err}");
+    }
 
     let grace_secs = state
         .config

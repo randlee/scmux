@@ -138,3 +138,12 @@ fn td_c_08_parse_edit_auto_start_true_without_value() {
         other => panic!("expected edit command, got {other:?}"),
     }
 }
+
+#[test]
+fn td_c_09_parse_doctor_command() {
+    let cli = Cli::try_parse_from(["scmux", "doctor"]).expect("parse doctor command");
+    match cli.command {
+        Command::Doctor => {}
+        other => panic!("expected doctor command, got {other:?}"),
+    }
+}

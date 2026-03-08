@@ -145,8 +145,43 @@ pub struct HealthResponse {
     pub status: String,
     pub uptime_secs: u64,
     pub session_count: i64,
+    #[serde(default)]
+    pub sessions_running: i64,
+    #[serde(default)]
+    pub host_id: i64,
+    #[serde(default)]
+    pub atm_available: bool,
+    #[serde(default)]
+    pub ci_available: Option<CiAvailability>,
+    #[serde(default)]
+    pub pollers: Option<PollerStates>,
+    #[serde(default)]
+    pub recent_errors: Vec<String>,
     pub db_path: String,
     pub version: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CiAvailability {
+    pub gh: bool,
+    pub az: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PollerHealth {
+    pub status: String,
+    #[serde(default)]
+    pub last_ok: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PollerStates {
+    pub tmux: PollerHealth,
+    pub hosts: PollerHealth,
+    pub ci: PollerHealth,
+    pub atm: PollerHealth,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -50,8 +50,15 @@ struct AgentStateEntry {
 }
 
 pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
+    if !state.config.atm.enabled {
+        state.atm_available.store(false, Ordering::Relaxed);
+        let mut runtime = state.runtime.lock().expect("runtime lock");
+        runtime.clear_atm();
+        return Ok(());
+    }
+
     let socket_path = resolve_socket_path(state);
-    let teams = discover_teams();
+    let teams = configured_teams(state);
 
     if teams.is_empty() {
         state.atm_available.store(false, Ordering::Relaxed);
@@ -142,13 +149,28 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn send_shutdown_messages(targets: &[ShutdownTarget]) -> anyhow::Result<usize> {
+pub async fn send_shutdown_messages(
+    state: &AppState,
+    targets: &[ShutdownTarget],
+) -> anyhow::Result<usize> {
+    if !state.config.atm.enabled || !state.config.atm.allow_shutdown {
+        tracing::warn!("ATM send not implemented");
+        return Ok(0);
+    }
+
     if targets.is_empty() {
+        return Ok(0);
+    }
+
+    let allowed_teams = configured_teams(state).into_iter().collect::<HashSet<_>>();
+    if allowed_teams.is_empty() {
+        tracing::warn!("ATM shutdown skipped: atm.teams allowlist is empty");
         return Ok(0);
     }
 
     let unique = targets
         .iter()
+        .filter(|target| allowed_teams.contains(&target.team))
         .map(|target| (target.team.clone(), target.agent.clone()))
         .collect::<HashSet<_>>();
 
@@ -217,24 +239,15 @@ fn atm_home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn discover_teams() -> Vec<String> {
-    let teams_dir = atm_home_dir().join(".claude/teams");
-    let Ok(entries) = std::fs::read_dir(teams_dir) else {
-        return Vec::new();
-    };
-
-    let mut teams = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || !path.join("config.json").exists() {
-            continue;
-        }
-        if let Some(name) = entry.file_name().to_str() {
-            teams.push(name.to_string());
-        }
-    }
-    teams.sort();
-    teams
+fn configured_teams(state: &AppState) -> Vec<String> {
+    state
+        .config
+        .atm
+        .teams
+        .iter()
+        .map(|team| team.trim().to_string())
+        .filter(|team| !team.is_empty())
+        .collect::<Vec<_>>()
 }
 
 fn normalize_state(state: &str) -> &'static str {

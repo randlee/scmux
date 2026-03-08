@@ -1,7 +1,5 @@
 use crate::db;
-use crate::AppState;
 use rusqlite::Connection;
-use std::sync::Arc;
 
 pub struct WriteGuard(());
 
@@ -85,10 +83,6 @@ pub fn delete_host(conn: &Connection, host_id: i64) -> Result<bool, WriteError> 
 
 pub fn ensure_local_host(conn: &Connection) -> Result<i64, WriteError> {
     db::ensure_local_host(conn).map_err(|err| WriteError::Internal(err.to_string()))
-}
-
-pub async fn write_health(state: &Arc<AppState>) -> Result<(), WriteError> {
-    db::write_health(state).await.map_err(map_write_error)
 }
 
 fn validate_approved_project(session_name: &str, config_json: &str) -> Result<(), WriteError> {
