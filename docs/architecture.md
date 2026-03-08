@@ -1,440 +1,206 @@
 # scmux — Architecture
 
-## 1. Purpose
+## 1. Product Architecture (Target)
 
-scmux solves a specific problem: when running 20–30 concurrent Claude Code agent teams across multiple machines and terminal emulators, there is no single place to see what is running, find a session by name, or jump to it instantly.
+scmux is a multi-team operations dashboard and launcher for AI agent teams.
 
-scmux provides:
-- A **daemon** per machine — sole owner of SQLite, session lifecycle, CI polling, and terminal launch
-- A **web dashboard** — browser UI, read/command only, talks to daemon via HTTP
-- A **CLI** (`scmux`) — shell client, same HTTP API as the web UI
-- **Graceful degradation** — missing tools, unreachable hosts, and VPN gaps are normal operating conditions, not errors
+Primary value: show all defined projects at once (running or stopped), expose per-agent runtime state, show CI health, and start/stop safely without requiring a terminal window.
 
-## 2. Core Design Principles
+## 2. Hard Invariants
 
-**Daemon is the single source of truth.** All state lives in SQLite. Only the daemon writes to SQLite. The CLI and web UI are pure clients — they send commands to the daemon and read responses. This keeps the system in sync regardless of how many clients are connected simultaneously.
+1. SQLite is a definition store only.
+- Stores user-approved project/host/roster definitions.
+- Does not auto-ingest tmux discovery.
 
-**Browser → daemon → terminal.** The web UI never launches processes directly. A "jump" button click sends `POST /sessions/:name/jump` to the daemon, which spawns the terminal. This eliminates race conditions and stale state from multiple browser tabs.
+2. Exactly one persistent writer subsystem exists.
+- Multiple editor entry points are allowed (`New Project`, `Project Editor`, card-level `Edit`), but all persistent writes must route through the same writer subsystem.
+- Compile boundary is enforced via Rust visibility: persistent-write functions in `db.rs` are restricted (`pub(crate)`/`pub(super)`) and callable only from `definition_writer`.
+- All pollers and runtime loops are SQLite read-only.
 
-**Unavailability is normal.** A host behind a VPN that goes offline is not an error — it is an expected state. The dashboard shows last known data in monochrome. When the host returns, it resumes full color automatically.
+3. Approved-project write policy is mandatory.
+- Any persistent write must validate that target project is approved (`enabled = 1` and non-empty `config_json.panes[]` created via editor flow).
 
-**Missing tools degrade gracefully.** If `gh` or `az` CLI are not installed, CI status shows "unavailable" with a tooltip explaining what to install. The rest of the system works normally.
+4. Discovery is read-only.
+- Raw tmux discovery is informational and never mutates project definitions.
 
-## 3. System Diagram
+5. Safety-first session control.
+- Stop is graceful-first (ATM shutdown request), then scoped hard-stop only if needed.
+- Panic/error paths must not bulk-stop unrelated sessions.
 
-```
-┌─ Mac Studio ────────────────────────────────────────────┐
-│                                                         │
-│  Browser Dashboard + scmux CLI                          │
-│          │                                              │
-│          └───────────── HTTP :7878 ───────────────┐     │
-│                                                    ▼     │
-│  local scmux-daemon (aggregation + SSOT)                │
-│  ├── SQLite  ~/.config/scmux/scmux.db                   │
-│  ├── poll_loop        every 15s  → tmux ls              │
-│  ├── ci_loop          adaptive   → gh / az cli          │
-│  ├── health_loop      every 60s  → heartbeat            │
-│  ├── host_loop        polls remote daemons              │
-│  └── axum HTTP server                                    │
-│                                                         │
-└──────────────────────────┬──────────────────────────────┘
-                           │ daemon-to-daemon polling
-                           │
-┌─ DGX Spark ──────────────▼──────────────────────────────┐
-│  remote scmux-daemon (HTTP :7878)                       │
-│  SQLite  ~/.config/scmux/scmux.db                       │
-│  ... (same structure)                                   │
-└─────────────────────────────────────────────────────────┘
-```
+6. Runtime state is live/ephemeral.
+- Runtime status is refreshed continuously for UI/CLI display.
+- Runtime status is not persisted as definition truth.
 
-## 4. Components
+## 3. Runtime Data Flow
 
-### 4.1 scmux-daemon
+```text
+User Form/Edit Action
+  -> Definition Write Module (only persistent writer)
+  -> SQLite definitions (projects/hosts/approved roster)
 
-**Language:** Rust
-**Binary:** `scmux-daemon`
-**Owns:** SQLite database, tmux lifecycle, CI polling, terminal launch, HTTP server, static file serving
+Pollers (read-only persistence)
+  -> tmux_poller reads tmux runtime
+  -> atm_poller reads ATM socket runtime
+  -> ci_poller reads gh/az runtime
+  -> hosts_poller reads remote health/runtime
 
-#### Internal task structure
-
-```
-main()
-  ├── spawn: poll_loop        every 15s
-  │     └── scheduler::poll_cycle()
-  │           ├── tmux::live_sessions()
-  │           ├── update session_status
-  │           ├── detect stops → session_events
-  │           ├── check auto_start → tmuxp load
-  │           └── check cron_schedule → tmuxp load
-  │
-  ├── spawn: ci_loop          adaptive interval
-  │     └── ci::poll_all_sessions()
-  │           ├── for each session with github_repo → gh pr list / gh run list
-  │           ├── for each session with azure_project → az pipelines list
-  │           ├── write results to session_ci table
-  │           └── adjust next interval based on agent activity
-  │
-  ├── spawn: health_loop      every 60s
-  │     └── db::write_health()
-  │
-  └── axum::serve
-        ├── GET  /                         → serve dashboard HTML
-        ├── GET  /dashboard-config.json    → host list + settings
-        ├── GET  /health
-        ├── GET  /sessions
-        ├── GET  /sessions/:name
-        ├── POST /sessions/:name/start
-        ├── POST /sessions/:name/stop
-        └── POST /sessions/:name/jump      → spawn terminal
+Runtime projection
+  -> in-memory aggregate session/project view
+  -> HTTP API
+  -> Dashboard + CLI
 ```
 
-#### Shared state
+P6 decision: runtime cache tables (`session_status`, `session_ci`, `session_atm`) are replaced by in-memory projection for runtime display paths.
 
-```rust
-pub struct AppState {
-    pub db:          Mutex<rusqlite::Connection>,
-    pub db_path:     String,
-    pub host_id:     i64,
-    pub config:      Config,   // loaded from scmux.toml at startup
-    pub started_at:  Instant,
-}
-```
+## 4. Module Responsibilities
 
-Only the daemon writes to SQLite. HTTP handlers read from `session_status` (written by poll_loop). Start/stop/jump handlers call subprocess, then write events.
+### 4.1 `definition_writer` (new/central)
+- Only module allowed to persist project definitions.
+- Can be invoked by multiple editor UX entry points.
+- Handles create/edit/delete for projects/hosts/approved roster changes.
+- Enforces approved-project constraints.
 
-`GET /health` returns:
-- `status`
-- `uptime_secs`
-- `session_count`
-- `db_path`
-- `version`
+### 4.2 `tmux_poller` (rename target for current `scheduler.rs`)
+- Reads tmux session/pane runtime state.
+- Computes runtime state (`stopped|starting|running|idle|done`) for API projection.
+- No persistent writes.
 
-### 4.2 Jump Flow
+### 4.3 `hosts.rs`
+- Reads remote daemon health/runtime snapshots.
+- Aggregates reachability and stale status for dashboard.
+- No persistent writes from discovery.
+- In-memory projection retains last-known remote session snapshots across consecutive failed poll cycles.
+- `last_seen` is updated on each successful poll in-memory for display.
+- Runtime host projection data is lost on daemon restart (acceptable for P6).
 
-The browser never launches terminals. The daemon does.
+### 4.4 `ci.rs`
+- Reads CI status from `gh`/`az`.
+- Produces runtime snapshot list per project (PRs + run statuses).
+- No persistent writes from CI polling.
 
-```
-1. User clicks "Jump" in dashboard
-2. Browser sends:  POST /sessions/ui-template/jump
-                   Body: { "terminal": "iterm2" }
-3. Daemon:
-   a. Looks up session → host (local or remote)
-   b. Constructs command:
-      Local:  tmux attach -t ui-template
-      Remote: ssh user@host tmux attach -t ui-template
-   c. Spawns iTerm2 with that command (via AppleScript or open)
-   d. Returns: { "ok": true, "message": "launched iTerm2" }
-4. Dashboard shows success/failure toast
-```
+### 4.5 `atm.rs`
+- Reads ATM socket runtime state per agent.
+- Maps per-pane state via canonical key (`pane.atm_team`, `pane.atm_agent`).
+- Permanent roster changes are editor-driven writes only.
 
-#### iTerm2 launch (macOS)
+### 4.6 `api.rs`
+- Read endpoints expose aggregated runtime + persisted definitions.
+- Action endpoints (`start/stop/jump`) control runtime only.
+- Persistent writes are only via definition-editor endpoints.
+- Discovery endpoint is explicit: `GET /discovery` for read-only raw tmux view.
 
-```bash
-# Local session
-osascript -e '
-  tell application "iTerm2"
-    create window with default profile
-    tell current session of current window
-      write text "tmux attach -t ui-template"
-    end tell
-  end tell
-'
+## 5. Session Lifecycle Model
 
-# Remote session
-osascript -e '
-  tell application "iTerm2"
-    create window with default profile
-    tell current session of current window
-      write text "ssh user@dgx-spark tmux attach -t rust-imgproc"
-    end tell
-  end tell
-'
-```
+State machine:
 
-This approach gives a clean new iTerm2 window with the session attached, no URI scheme required, no race conditions.
+`stopped -> starting -> running -> idle -> done`
 
-#### Future terminal support
+Additional explicit stop edges:
+- `running -> stopped` via `POST /sessions/:name/stop`.
+- `idle -> stopped` via `POST /sessions/:name/stop`.
 
-WezTerm and Warp support added later via the same `POST /sessions/:name/jump` endpoint — just different spawn logic in the daemon. The `terminal` field in the request selects the handler. Default terminal configured in `scmux.toml`.
+- `stopped`: entered when (1) project is defined but never started, or (2) session is stopped from `running`/`idle`.
+- `starting`: launch requested; tmux/agents being created.
+- `starting` failure edge: if tmux/session creation or pane launch fails, transition back to `stopped` with structured error details.
+- `running`: tmux exists and at least one pane agent is ATM-active.
+- `idle`: tmux exists; all pane agents idle/offline.
+- `done`: semantics and auto-teardown policy are intentionally unresolved; no transition-in path is required in P6 and behavior remains non-destructive by default.
 
-### 4.3 CI Integration
+## 6. Key Flows
 
-#### Providers
+### 6.1 Start
+`POST /sessions/:name/start`
+1. Read `config_json` definition from SQLite.
+2. Create tmux session/window/pane layout.
+3. Launch each pane command.
+4. Publish runtime transitions to API/dashboard.
 
-| Provider | CLI | Column | Status when missing |
-|----------|-----|--------|-------------------|
-| GitHub | `gh` | `github_repo` | "unavailable" + tooltip |
-| Azure DevOps | `az` | `azure_project` | "unavailable" + tooltip |
+### 6.2 Stop
+`POST /sessions/:name/stop`
+1. Send ATM shutdown signal/message to configured agents.
+2. Wait configurable grace period.
+3. If still running, apply scoped hard-stop to target session only (exact retries/timeouts are product-configurable and pending finalization).
+4. Never kill unrelated sessions.
 
-Both are optional. Sessions can have one, both, or neither.
+### 6.3 Jump
+`POST /sessions/:name/jump`
+- Opens iTerm (or selected terminal) as a viewer.
+- Attach/detach does not control lifecycle.
 
-#### Adaptive polling interval
+## 7. Views
 
-CI polling frequency adapts based on agent activity:
+### 7.1 Primary View
+- All defined projects from SQLite.
+- Includes stopped projects with Start affordance.
+- Running projects show per-pane ATM + CI runtime status.
 
-```
-if any pane in session has status = "active":
-    poll_interval = 1 minute   (agents working → PRs/pipelines changing)
-else:
-    poll_interval = 5 minutes  (idle → less frequent)
-```
+### 7.2 Secondary View
+- Raw tmux discovery tab backed by `GET /discovery`.
+- Informational only, no persistence side effects.
 
-Each session tracks its own next poll time in `session_ci.next_poll_at`.
-
-#### Data collected
-
-Per session, per provider:
-- Open PRs: number, title, URL, author, draft flag
-- Pipeline/action runs: status (passing/failing/running), branch, timestamp
-
-Stored in `session_ci` table as JSON blobs with `provider`, `polled_at`, `next_poll_at`.
-
-#### Missing tool handling
-
-On daemon startup, check for `gh` and `az` in PATH. Store availability in `AppState`. When a session has `github_repo` set but `gh` is unavailable, `session_ci` gets:
+## 8. Definition Schema (`config_json`)
 
 ```json
 {
-  "provider": "github",
-  "status": "tool_unavailable",
-  "message": "Install gh CLI: brew install gh"
-}
-```
-
-Dashboard renders this as a grayed badge with tooltip.
-
-### 4.4 Multi-Host Management
-
-#### Host discovery
-
-Hosts are defined in `scmux.toml` (version-controlled, seeded into SQLite on first run). Once in SQLite, the daemon monitors them actively.
-
-```toml
-[daemon]
-port = 7878
-default_terminal = "iterm2"
-
-[[hosts]]
-name = "mac-studio"
-address = "localhost"
-is_local = true
-
-[[hosts]]
-name = "dgx-spark"
-address = "192.168.1.50"
-ssh_user = "randlee"
-api_port = 7878
-```
-
-#### VPN-gated hosts
-
-Hosts that go offline (VPN disconnect, machine sleep, network change) are **normal operating conditions**, not errors. The daemon handles this as follows:
-
-```
-poll remote host /health:
-  success → update last_seen, show full color, merge fresh data
-  timeout/error → do NOT update last_seen, keep last known data
-                   mark host as "unreachable" in memory (not SQLite)
-
-dashboard receives:
-  host.reachable = false → render all sessions in monochrome
-  host.reachable = true  → render in full color
-  host.last_seen         → show "last seen 4m ago" in host header
-```
-
-No error dialogs. No red alerts. Monochrome = "we have stale data, host is away."
-
-When the host returns (VPN reconnects, machine wakes), the next poll cycle picks it up automatically and resumes full color.
-
-### 4.5 scmux CLI
-
-**Binary:** `scmux` (separate from `scmux-daemon`)
-**Talks to:** `scmux-daemon` HTTP API (same endpoints as web UI)
-
-The CLI is a thin HTTP client. All business logic lives in the daemon.
-
-```bash
-# Session management
-scmux list                          # all sessions + status
-scmux list --project radiant-p3     # filtered
-scmux show ui-template              # full detail + recent events
-scmux start ui-template
-scmux stop ui-template
-scmux jump ui-template              # daemon launches iTerm2
-
-# Session registration
-scmux add --name ui-template \
-        --project radiant-p3 \
-        --config ./ui-template.json \
-        --auto-start
-
-scmux edit ui-template --cron "0 9 * * 1-5"
-scmux disable ui-template
-scmux enable ui-template
-scmux remove ui-template
-
-# Host management
-scmux hosts                         # list hosts + reachability
-scmux host add --name dgx-spark \
-             --address 192.168.1.50 \
-             --ssh-user randlee
-
-# Daemon control
-scmux daemon status
-scmux daemon restart
-```
-
-CLI connects to daemon at `http://localhost:7878` by default. Override with `SCMUX_HOST` env var or `--host` flag for managing remote hosts directly.
-
-### 4.6 Dashboard
-
-**Served by:** `scmux-daemon` as static files at `/`
-**Framework:** React (single JSX file for dev; Vite build for production embedding)
-
-The dashboard is configuration-aware via `GET /dashboard-config.json`:
-
-```json
-{
-  "hosts": [
-    { "name": "mac-studio", "url": "http://localhost:7878",     "is_local": true },
-    { "name": "dgx-spark",  "url": "http://192.168.1.50:7878", "is_local": false }
+  "panes": [
+    {
+      "name": "team-lead",
+      "command": "claude --profile team-lead",
+      "atm_agent": "team-lead",
+      "atm_team": "scmux-dev"
+    },
+    {
+      "name": "arch-cmux",
+      "command": "codex --profile arch-cmux",
+      "atm_agent": "arch-cmux",
+      "atm_team": "scmux-dev"
+    }
   ],
-  "default_terminal": "iterm2",
-  "poll_interval_ms": 15000
+  "repo": "/Users/randlee/Documents/github/scmux",
+  "window_layout": "even-horizontal",
+  "atm_team": "scmux-dev"
 }
 ```
 
-Dashboard polls the local daemon only. The local daemon polls remote hosts, merges their latest cached session snapshots, and serves unified `/sessions` and `/hosts` responses. Unreachable hosts render in monochrome with last-known data and a "last seen N ago" indicator.
+## 9. Observability Direction
 
-## 5. SQLite Schema Summary
+Current logging should remain structured and stable with OpenTelemetry in mind.
 
-One database per machine at `~/.config/scmux/scmux.db`. Schema applied via migration on daemon startup.
+Required now:
+- Correlation identifiers on lifecycle/action events.
+- Consistent key/value fields for session/project/agent/host.
+- Log/event schema that can be mapped to OTel traces/spans without redesign.
 
-| Table | Purpose | Written by |
-|-------|---------|-----------|
-| `hosts` | Known machines | daemon (seeded from scmux.toml) |
-| `sessions` | Session definitions + configs | daemon (via CLI/API) |
-| `session_status` | Live tmux state | poll_loop only |
-| `session_events` | Immutable start/stop log | poll_loop + API handlers |
-| `session_ci` | CI/PR status per session | ci_loop only |
-| `daemon_health` | Heartbeat, 7-day retention | health_loop only |
+## 10. Prohibited Behaviors
 
-**Only the daemon writes to SQLite.** CLI and web UI read via HTTP.
+- Auto-writing project definitions from tmux discovery.
+- Reconstructing deleted definitions from live tmux.
+- Poller-based persistent writes (tmux/hosts/ci/atm loops).
+- Session-level-only ATM model as final representation.
+- Panic/error bulk-stop behavior.
 
-## 6. Configuration
+## 11. Refactor Scope (Code Conflicts to Remove)
 
-`~/.config/scmux/scmux.toml` — loaded at daemon startup, seeds SQLite if tables are empty.
+Conflicting current modules and expected direction:
 
-```toml
-[daemon]
-port = 7878
-db_path = "~/.config/scmux/scmux.db"
-default_terminal = "iterm2"
-log_level = "info"
+- `scheduler.rs`
+  - Remove discovery-to-definition persistence and reconstruction logic.
+  - Rename responsibility toward read-only runtime polling (`tmux_poller`).
 
-[polling]
-tmux_interval_secs = 15
-health_interval_secs = 60
-ci_active_interval_secs = 60
-ci_idle_interval_secs = 300
+- `hosts.rs`
+  - Remove remote discovery persistence paths.
+  - Keep health/runtime aggregation only.
 
-[[hosts]]
-name    = "mac-studio"
-address = "localhost"
-is_local = true
+- `ci.rs`
+  - Remove CI snapshot persistence writes.
+  - Keep runtime CI projection only.
 
-[[hosts]]
-name     = "dgx-spark"
-address  = "192.168.1.50"
-ssh_user = "randlee"
-api_port = 7878
-```
+- `atm.rs`
+  - Remove autonomous persistent runtime writes.
+  - Keep per-pane runtime mapping; route roster persistence through editor.
 
-## 7. Process Supervision
+- `api.rs`
+  - Ensure only definition-editor routes can persist data.
+  - Keep start/stop/jump as runtime control paths.
 
-The daemon is a long-running process. Supervision keeps it alive across reboots and crashes.
-
-### macOS (launchd)
-
-`~/Library/LaunchAgents/com.scmux.scmux-daemon.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.scmux.scmux-daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/scmux-daemon</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/scmux-daemon.log</string>
-  <key>StandardErrorPath</key><string>/tmp/scmux-daemon.err</string>
-</dict>
-</plist>
-```
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.scmux.scmux-daemon.plist
-```
-
-### Linux (systemd)
-
-```ini
-[Unit]
-Description=scmux-daemon
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/scmux-daemon
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-## 8. Build Layout
-
-```
-scmux/
-├── crates/
-│   ├── scmux-daemon/      # Cargo workspace member — HTTP daemon + SQLite
-│   └── scmux/             # Cargo workspace member — CLI client
-├── dashboard/           # React source (built output embedded in scmux-daemon)
-├── docs/
-│   ├── architecture.md
-│   ├── requirements.md
-│   ├── schema.sql
-│   └── example-session.json
-├── Cargo.toml           # workspace root
-└── scmux.toml.example     # reference config
-```
-
-```bash
-# Build everything
-cargo build --release --workspace
-
-# Install
-cp target/release/scmux-daemon /usr/local/bin/
-cp target/release/scmux       /usr/local/bin/
-
-# Run
-scmux-daemon
-```
-
-## 9. Future Work
-
-| Item | Notes |
-|------|-------|
-| WezTerm jump | AppleScript equivalent or `wezterm` CLI via daemon |
-| Warp jump | Monitor for URI scheme support |
-| Browser terminal | ttyd integration for remote sessions without local terminal |
-| Dashboard build pipeline | Embed built React into scmux-daemon binary via `include_str!` |
-| `scmux edit` TUI | Interactive session config editor |
-| Azure DevOps deep integration | PR links, pipeline status, work items |
-| Host auto-discovery | mDNS broadcast from daemon |
-| Session templates | Parameterized configs for spinning up new teams quickly |
+This architecture supersedes earlier discovery-first assumptions.

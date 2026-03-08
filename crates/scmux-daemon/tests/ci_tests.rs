@@ -1,7 +1,7 @@
 use chrono::DateTime;
 use scmux_daemon::ci::{self, ToolAvailability};
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
-use scmux_daemon::{db, AppState, SystemClock};
+use scmux_daemon::{db, definition_writer, tmux::PaneInfo, AppState, SystemClock};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -29,10 +29,13 @@ fn test_config() -> Config {
             ci_idle_interval_secs: None,
         },
         atm: AtmConfig {
+            enabled: false,
+            teams: Vec::new(),
+            allow_shutdown: false,
             socket_path: None,
             stuck_minutes: Some(10),
+            stop_grace_secs: None,
         },
-        hosts: Vec::new(),
     }
 }
 
@@ -40,18 +43,20 @@ fn build_state(ci_tools: ToolAvailability) -> (Arc<AppState>, TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("ci-tests.db");
     let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-    let host_id = db::ensure_local_host(&conn).expect("local host");
+    let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
         db_path: db_path.to_string_lossy().to_string(),
         host_id,
         config: test_config(),
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
         ci_tools,
         clock: Arc::new(SystemClock),
         atm_available: std::sync::atomic::AtomicBool::new(false),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
+        health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
     });
     (state, tmp)
 }
@@ -64,13 +69,15 @@ fn insert_ci_session(
     panes_json: &str,
 ) -> i64 {
     let db_conn = state.db.lock().expect("db lock");
-    let session_id = db::create_session(
+    let session_id = definition_writer::create_session(
         &db_conn,
         &db::NewSession {
             name: name.to_string(),
             project: Some("ci".to_string()),
             host_id: state.host_id,
-            config_json: format!(r#"{{"session_name":"{name}"}}"#),
+            config_json: format!(
+                r#"{{"session_name":"{name}","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
+            ),
             cron_schedule: None,
             auto_start: false,
             github_repo: github_repo.map(ToString::to_string),
@@ -78,18 +85,62 @@ fn insert_ci_session(
         },
     )
     .expect("create session");
+    drop(db_conn);
 
-    db_conn
-        .execute(
-            "INSERT INTO session_status (session_id, status, panes_json, polled_at)
-             VALUES (?1, 'running', ?2, datetime('now'))
-             ON CONFLICT(session_id) DO UPDATE SET
-                status = excluded.status,
-                panes_json = excluded.panes_json,
-                polled_at = excluded.polled_at",
-            rusqlite::params![session_id, panes_json],
-        )
-        .expect("insert session status");
+    let panes = serde_json::from_str::<serde_json::Value>(panes_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, pane)| PaneInfo {
+            index: pane
+                .get("index")
+                .and_then(|raw| raw.as_u64())
+                .unwrap_or(idx as u64) as u32,
+            name: pane
+                .get("name")
+                .and_then(|raw| raw.as_str())
+                .unwrap_or("pane")
+                .to_string(),
+            status: pane
+                .get("status")
+                .and_then(|raw| raw.as_str())
+                .unwrap_or("idle")
+                .to_string(),
+            last_activity: pane
+                .get("last_activity")
+                .and_then(|raw| raw.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            current_command: pane
+                .get("current_command")
+                .and_then(|raw| raw.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .collect::<Vec<_>>();
+    let defined_names = {
+        let db_conn = state.db.lock().expect("db lock");
+        db::list_sessions_for_host(&db_conn, state.host_id)
+            .expect("list sessions")
+            .into_iter()
+            .map(|session| session.name)
+            .collect::<Vec<_>>()
+    };
+    let mut runtime = state.runtime.lock().expect("runtime lock");
+    let mut live = runtime
+        .discovery_rows()
+        .into_iter()
+        .map(|row| (row.name, row.panes))
+        .collect::<std::collections::HashMap<_, _>>();
+    live.insert(name.to_string(), panes);
+    runtime.apply_tmux_snapshot(
+        &defined_names,
+        &live,
+        &std::collections::HashMap::new(),
+        &chrono::Utc::now().to_rfc3339(),
+    );
 
     session_id
 }
@@ -99,16 +150,29 @@ fn ci_row(
     session_id: i64,
     provider: &str,
 ) -> (String, Option<String>, String, String) {
-    let db_conn = state.db.lock().expect("db lock");
-    db_conn
-        .query_row(
-            "SELECT status, tool_message, polled_at, next_poll_at
-             FROM session_ci
-             WHERE session_id = ?1 AND provider = ?2",
-            rusqlite::params![session_id, provider],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .expect("ci row")
+    let session_name = {
+        let db_conn = state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT name FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get::<_, String>(0),
+            )
+            .expect("session name")
+    };
+
+    let runtime = state.runtime.lock().expect("runtime lock");
+    let row = runtime
+        .ci_for_session(&session_name)
+        .into_iter()
+        .find(|entry| entry.provider == provider)
+        .expect("ci row");
+    (
+        row.status,
+        row.tool_message,
+        row.polled_at.expect("polled_at"),
+        row.next_poll_at.expect("next_poll_at"),
+    )
 }
 
 fn write_script(contents: &str) -> tempfile::TempPath {

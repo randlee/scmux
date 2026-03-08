@@ -2,6 +2,8 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
+use scmux_daemon::definition_writer;
+use scmux_daemon::tmux::PaneInfo;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -31,7 +33,7 @@ impl ApiHarness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("scmux-test.db");
         let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-        let host_id = db::ensure_local_host(&conn).expect("local host");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
         conn.execute(
             "INSERT INTO hosts (name, address, ssh_user, api_port, is_local, last_seen)
              VALUES ('dgx-spark', '192.168.1.50', 'randlee', 7878, 0, datetime('now'))",
@@ -57,17 +59,22 @@ impl ApiHarness {
                     ci_idle_interval_secs: None,
                 },
                 atm: AtmConfig {
+                    enabled: true,
+                    teams: vec!["scmux-dev".to_string()],
+                    allow_shutdown: true,
                     socket_path: None,
                     stuck_minutes: Some(10),
+                    stop_grace_secs: Some(1),
                 },
-                hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+            runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
             ci_tools: ci::ToolAvailability::default(),
             clock: Arc::new(SystemClock),
             atm_available: std::sync::atomic::AtomicBool::new(false),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
+            health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
         });
 
         let router = api::router(Arc::clone(&state));
@@ -97,7 +104,12 @@ impl ApiHarness {
         let payload = json!({
             "name": name,
             "project": "demo",
-            "config_json": { "session_name": name },
+            "config_json": {
+                "session_name": name,
+                "panes": [
+                    { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
+                ]
+            },
             "auto_start": false
         });
         let response = self
@@ -108,19 +120,6 @@ impl ApiHarness {
             .await
             .expect("create session request");
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-    }
-
-    fn session_event_count(&self, name: &str) -> i64 {
-        let db = self.state.db.lock().expect("db lock");
-        db.query_row(
-            "SELECT COUNT(*)
-             FROM session_events se
-             INNER JOIN sessions s ON s.id = se.session_id
-             WHERE s.name = ?1",
-            [name],
-            |r| r.get(0),
-        )
-        .expect("event count")
     }
 }
 
@@ -202,21 +201,22 @@ async fn t_a_03_get_sessions_returns_sessions_with_correct_status_and_panes() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
     {
-        let db = h.state.db.lock().expect("db lock");
-        let session_id: i64 = db
-            .query_row("SELECT id FROM sessions WHERE name = 'alpha'", [], |r| {
-                r.get(0)
-            })
-            .expect("session id");
-        db.execute(
-            "INSERT INTO session_status (session_id, status, panes_json, polled_at)
-             VALUES (?1, 'running', ?2, datetime('now'))",
-            rusqlite::params![
-                session_id,
-                r#"[{"index":0,"name":"pane-0","status":"active","last_activity":"now","current_command":"bash"}]"#
-            ],
-        )
-        .expect("insert status");
+        let panes = vec![PaneInfo {
+            index: 0,
+            name: "pane-0".to_string(),
+            status: "active".to_string(),
+            last_activity: "now".to_string(),
+            current_command: "bash".to_string(),
+        }];
+        let mut live = std::collections::HashMap::new();
+        live.insert("alpha".to_string(), panes);
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.apply_tmux_snapshot(
+            &["alpha".to_string()],
+            &live,
+            &std::collections::HashMap::new(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
     }
 
     let response = h
@@ -235,7 +235,7 @@ async fn t_a_03_get_sessions_returns_sessions_with_correct_status_and_panes() {
 }
 
 #[tokio::test]
-async fn t_a_04_get_sessions_name_returns_200_with_config_and_events() {
+async fn t_a_04_get_sessions_name_returns_200_with_config() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -249,7 +249,7 @@ async fn t_a_04_get_sessions_name_returns_200_with_config_and_events() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["name"], "alpha");
     assert_eq!(body["config_json"]["session_name"], "alpha");
-    assert!(body["recent_events"].is_array());
+    assert!(body.get("recent_events").is_none());
 }
 
 #[tokio::test]
@@ -265,7 +265,7 @@ async fn t_a_05_get_sessions_name_returns_404_for_unknown_session() {
 }
 
 #[tokio::test]
-async fn t_a_06_post_sessions_name_start_returns_ok_true_and_logs_event() {
+async fn t_lc_01_post_sessions_name_start_launches_tmux_from_config() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -284,11 +284,10 @@ async fn t_a_06_post_sessions_name_start_returns_ok_true_and_logs_event() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], true);
-    assert!(h.session_event_count("alpha") >= 1);
 }
 
 #[tokio::test]
-async fn t_a_07_post_sessions_name_start_returns_ok_false_on_tmuxp_failure() {
+async fn t_lc_06_start_failure_returns_500_and_keeps_session_stopped() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -304,30 +303,63 @@ async fn t_a_07_post_sessions_name_start_returns_ok_false_on_tmuxp_failure() {
         .expect("start request");
     restore_env_var("SCMUX_TMUXP_BIN", prev);
 
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], false);
+    assert_eq!(body["code"], "start_failed");
     assert!(body["message"]
         .as_str()
         .unwrap_or_default()
         .contains("tmuxp"));
+
+    let sessions = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    assert_eq!(sessions.status(), reqwest::StatusCode::OK);
+    let rows: Vec<Value> = sessions.json().await.expect("json");
+    assert_eq!(rows[0]["status"], "stopped");
 }
 
 #[tokio::test]
-async fn t_a_08_post_sessions_name_stop_returns_ok_true_and_logs_event() {
+async fn t_lc_03_stop_sends_atm_then_grace_then_hard_stop() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
     let _guard = env_lock().lock().await;
-    let script = write_script(
+    let marker = tempfile::NamedTempFile::new().expect("marker file");
+    let marker_path = marker.path().to_string_lossy().to_string();
+
+    let script = write_script(&format!(
         r#"#!/bin/sh
 if [ "$1" = "kill-session" ]; then
+  echo "kill" >> "{marker_path}"
+  exit 0
+fi
+if [ "$1" = "list-sessions" ]; then
+  echo "alpha"
   exit 0
 fi
 exit 1
 "#,
-    );
-    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+    ));
+    let atm_script = write_script(&format!(
+        r#"#!/bin/sh
+if [ "$1" = "send" ]; then
+  echo "send" >> "{marker_path}"
+  exit 0
+fi
+exit 1
+"#
+    ));
+    let prev_tmux = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+    let prev_atm = set_env_var("SCMUX_ATM_BIN", atm_script.to_string_lossy().as_ref());
+    let started = Instant::now();
 
     let response = h
         .client
@@ -335,12 +367,26 @@ exit 1
         .send()
         .await
         .expect("stop request");
-    restore_env_var("SCMUX_TMUX_BIN", prev);
+    restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
+    restore_env_var("SCMUX_ATM_BIN", prev_atm);
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], true);
-    assert!(h.session_event_count("alpha") >= 1);
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("after graceful timeout"));
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "stop path should include grace sleep before hard-stop"
+    );
+
+    let marker_log = std::fs::read_to_string(marker.path()).expect("read marker");
+    assert!(
+        marker_log.contains("send\nkill\n"),
+        "expected ATM send before tmux hard-stop, got: {marker_log:?}"
+    );
 }
 
 #[tokio::test]
@@ -366,7 +412,6 @@ async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], true);
     assert_eq!(body["message"], "launched iTerm2");
-    assert!(h.session_event_count("alpha") >= 1);
 }
 
 #[tokio::test]
@@ -414,7 +459,12 @@ async fn t_a_11_post_sessions_add_creates_session_in_sqlite() {
     let payload = json!({
         "name": "alpha",
         "project": "demo",
-        "config_json": { "session_name": "alpha" },
+        "config_json": {
+            "session_name": "alpha",
+            "panes": [
+                { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
+            ]
+        },
         "auto_start": false
     });
     let response = h
@@ -512,15 +562,26 @@ async fn t_a_15_get_sessions_includes_ci_summary_payload() {
                 r.get(0)
             })
             .expect("session id");
-        db.execute(
-            "INSERT INTO session_ci (session_id, provider, status, data_json, tool_message, polled_at, next_poll_at)
-             VALUES (?1, 'github', 'ok', ?2, NULL, datetime('now'), datetime('now', '+1 minute'))",
-            rusqlite::params![
-                session_id,
-                r#"{"prs":[{"number":123,"title":"feat: test"}],"runs":[{"status":"completed"}]}"#
-            ],
-        )
-        .expect("insert session ci");
+        drop(db);
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.upsert_ci(
+            "alpha",
+            session_id,
+            scmux_daemon::runtime::CiRuntimeSummary {
+                provider: "github".to_string(),
+                status: "ok".to_string(),
+                data_json: Some(serde_json::json!({
+                    "prs": [{"number": 123, "title": "feat: test"}],
+                    "runs": [{"status": "completed"}]
+                })),
+                tool_message: None,
+                polled_at: Some(chrono::Utc::now().to_rfc3339()),
+                next_poll_at: Some(
+                    (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+                ),
+            },
+            chrono::Utc::now() + chrono::Duration::minutes(1),
+        );
     }
 
     let response = h
@@ -552,12 +613,23 @@ async fn t_a_16_get_session_detail_includes_ci_summary_payload() {
                 r.get(0)
             })
             .expect("session id");
-        db.execute(
-            "INSERT INTO session_ci (session_id, provider, status, data_json, tool_message, polled_at, next_poll_at)
-             VALUES (?1, 'github', 'tool_unavailable', NULL, 'Install gh CLI: brew install gh', datetime('now'), datetime('now', '+5 minute'))",
-            rusqlite::params![session_id],
-        )
-        .expect("insert session ci");
+        drop(db);
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.upsert_ci(
+            "alpha",
+            session_id,
+            scmux_daemon::runtime::CiRuntimeSummary {
+                provider: "github".to_string(),
+                status: "tool_unavailable".to_string(),
+                data_json: None,
+                tool_message: Some("Install gh CLI: brew install gh".to_string()),
+                polled_at: Some(chrono::Utc::now().to_rfc3339()),
+                next_poll_at: Some(
+                    (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+                ),
+            },
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        );
     }
 
     let response = h
@@ -600,13 +672,40 @@ async fn t_atm_02_get_sessions_includes_atm_state_when_available() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
     {
-        let db = h.state.db.lock().expect("db lock");
-        db.execute(
-            "INSERT INTO session_atm (session_name, agent_id, team, state, last_transition, updated_at)
-             VALUES ('alpha', 'arch-cmux', 'scmux-dev', 'active', '2026-03-08T00:00:00Z', datetime('now'))",
-            [],
-        )
-        .expect("insert session atm");
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        let mut live = std::collections::HashMap::new();
+        live.insert(
+            "alpha".to_string(),
+            vec![PaneInfo {
+                index: 0,
+                name: "agent".to_string(),
+                status: "idle".to_string(),
+                last_activity: "now".to_string(),
+                current_command: "sleep 1".to_string(),
+            }],
+        );
+        let mut pane_configs = std::collections::HashMap::new();
+        pane_configs.insert(
+            "alpha".to_string(),
+            vec![scmux_daemon::runtime::ConfiguredPane {
+                name: Some("agent".to_string()),
+                command: Some("sleep 1".to_string()),
+                atm_team: Some("scmux-dev".to_string()),
+                atm_agent: Some("agent".to_string()),
+            }],
+        );
+        runtime.apply_tmux_snapshot(
+            &["alpha".to_string()],
+            &live,
+            &pane_configs,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        runtime.apply_atm_updates(vec![scmux_daemon::runtime::AtmRuntimeUpdate {
+            team: "scmux-dev".to_string(),
+            agent: "agent".to_string(),
+            state: "active".to_string(),
+            last_transition: Some("2026-03-08T00:00:00Z".to_string()),
+        }]);
     }
     h.state.atm_available.store(true, Ordering::Relaxed);
 
@@ -628,13 +727,40 @@ async fn t_atm_03_unreachable_atm_returns_null_without_error() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
     {
-        let db = h.state.db.lock().expect("db lock");
-        db.execute(
-            "INSERT INTO session_atm (session_name, agent_id, team, state, last_transition, updated_at)
-             VALUES ('alpha', 'arch-cmux', 'scmux-dev', 'stuck', '2026-03-08T00:00:00Z', datetime('now'))",
-            [],
-        )
-        .expect("insert session atm");
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        let mut live = std::collections::HashMap::new();
+        live.insert(
+            "alpha".to_string(),
+            vec![PaneInfo {
+                index: 0,
+                name: "agent".to_string(),
+                status: "idle".to_string(),
+                last_activity: "now".to_string(),
+                current_command: "sleep 1".to_string(),
+            }],
+        );
+        let mut pane_configs = std::collections::HashMap::new();
+        pane_configs.insert(
+            "alpha".to_string(),
+            vec![scmux_daemon::runtime::ConfiguredPane {
+                name: Some("agent".to_string()),
+                command: Some("sleep 1".to_string()),
+                atm_team: Some("scmux-dev".to_string()),
+                atm_agent: Some("agent".to_string()),
+            }],
+        );
+        runtime.apply_tmux_snapshot(
+            &["alpha".to_string()],
+            &live,
+            &pane_configs,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        runtime.apply_atm_updates(vec![scmux_daemon::runtime::AtmRuntimeUpdate {
+            team: "scmux-dev".to_string(),
+            agent: "agent".to_string(),
+            state: "stuck".to_string(),
+            last_transition: Some("2026-03-08T00:00:00Z".to_string()),
+        }]);
     }
     h.state.atm_available.store(false, Ordering::Relaxed);
 

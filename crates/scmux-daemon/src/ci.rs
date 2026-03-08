@@ -1,11 +1,9 @@
-use crate::{db, AppState};
+use crate::{db, runtime::CiRuntimeSummary, AppState};
 use chrono::Utc;
 use serde::Serialize;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-use tracing::warn;
 
 const GH_INSTALL_HINT: &str = "Install gh CLI: brew install gh";
 const AZ_INSTALL_HINT: &str = "Install az CLI: brew install azure-cli";
@@ -41,9 +39,9 @@ pub fn next_interval(has_active_pane: bool) -> Duration {
 pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     let sessions = {
         let state = Arc::clone(state);
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::CiSession>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<db::SessionDefinition>> {
             let db_conn = state.db.lock().expect("db lock");
-            db::list_ci_sessions(&db_conn)
+            db::list_sessions_for_host(&db_conn, state.host_id)
         })
         .await??
     };
@@ -164,51 +162,37 @@ pub async fn poll_azure(project: &str) -> ProviderResult {
 
 async fn poll_provider(
     state: Arc<AppState>,
-    session: &db::CiSession,
+    session: &db::SessionDefinition,
     provider: &str,
     tool_available: bool,
     tool_hint: &str,
     poll_result: impl std::future::Future<Output = ProviderResult>,
 ) {
-    let now = Utc::now();
-    let polled_at = now.to_rfc3339();
-    let next_poll_at = (now
-        + chrono::Duration::from_std(next_interval(session.has_active_pane))
-            .unwrap_or_else(|_| chrono::Duration::minutes(5)))
-    .to_rfc3339();
-
-    let due = {
-        let provider_for_db = provider.to_string();
-        let state = Arc::clone(&state);
-        let session_id = session.id;
-        let now_iso = polled_at.clone();
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let db_conn = state.db.lock().expect("db lock");
-            db::ci_provider_due(&db_conn, session_id, &provider_for_db, &now_iso)
-        })
-        .await
-        {
-            Ok(Ok(due)) => due,
-            Ok(Err(err)) => {
-                warn!(
-                    "ci provider due-check error session={} provider={provider}: {err}",
-                    session.name
-                );
-                false
-            }
-            Err(err) => {
-                warn!(
-                    "ci provider due-check task failed session={} provider={provider}: {err}",
-                    session.name
-                );
-                false
-            }
-        }
+    let has_active_pane = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime
+            .session(&session.name)
+            .map(|row| {
+                row.panes
+                    .iter()
+                    .any(|pane| pane.status.eq_ignore_ascii_case("active"))
+            })
+            .unwrap_or(false)
     };
 
+    let now = Utc::now();
+    let due = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime.ci_due(session.id, provider, now)
+    };
     if !due {
         return;
     }
+
+    let polled_at = now.to_rfc3339();
+    let next_due = now
+        + chrono::Duration::from_std(next_interval(has_active_pane))
+            .unwrap_or_else(|_| chrono::Duration::minutes(5));
 
     let result = if !tool_available {
         ProviderResult {
@@ -220,43 +204,21 @@ async fn poll_provider(
         poll_result.await
     };
 
-    let update = db::SessionCiUpdate {
-        session_id: session.id,
+    let summary = CiRuntimeSummary {
         provider: provider.to_string(),
         status: result.status,
-        data_json: result
-            .data
-            .and_then(|value| serde_json::to_string(&value).ok()),
+        data_json: result.data,
         tool_message: result.tool_message,
-        polled_at,
-        next_poll_at,
+        polled_at: Some(polled_at),
+        next_poll_at: Some(next_due.to_rfc3339()),
     };
 
-    let state = Arc::clone(&state);
-    match tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let db_conn = state.db.lock().expect("db lock");
-        db::upsert_session_ci(&db_conn, &update)
-    })
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            warn!(
-                "ci upsert error session={} provider={provider}: {err}",
-                session.name
-            );
-        }
-        Err(err) => {
-            warn!(
-                "ci upsert task failed session={} provider={provider}: {err}",
-                session.name
-            );
-        }
-    }
+    let mut runtime = state.runtime.lock().expect("runtime lock");
+    runtime.upsert_ci(&session.name, session.id, summary, next_due);
 }
 
 async fn run_json_command(bin: &str, args: &[&str]) -> anyhow::Result<serde_json::Value> {
-    let output = Command::new(bin)
+    let output = tokio::process::Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

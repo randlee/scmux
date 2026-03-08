@@ -1,15 +1,22 @@
-use crate::{db, AppState};
+use crate::{runtime::AtmRuntimeUpdate, AppState};
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tracing::warn;
 
 const SOCKET_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_STUCK_MINUTES: u64 = 10;
+
+#[derive(Debug, Clone)]
+pub struct ShutdownTarget {
+    pub team: String,
+    pub agent: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct SocketResponse<T> {
@@ -32,8 +39,6 @@ struct AgentEntry {
     agent: String,
     #[serde(default)]
     state: String,
-    #[serde(default)]
-    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,11 +50,20 @@ struct AgentStateEntry {
 }
 
 pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
+    if !state.config.atm.enabled {
+        state.atm_available.store(false, Ordering::Relaxed);
+        let mut runtime = state.runtime.lock().expect("runtime lock");
+        runtime.clear_atm();
+        return Ok(());
+    }
+
     let socket_path = resolve_socket_path(state);
-    let teams = discover_teams();
+    let teams = configured_teams(state);
 
     if teams.is_empty() {
         state.atm_available.store(false, Ordering::Relaxed);
+        let mut runtime = state.runtime.lock().expect("runtime lock");
+        runtime.clear_atm();
         return Ok(());
     }
 
@@ -59,7 +73,7 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         .stuck_minutes
         .unwrap_or(DEFAULT_STUCK_MINUTES) as i64;
     let now = state.clock.now_utc();
-    let updated_at = now.to_rfc3339();
+
     let mut updates = Vec::new();
     let mut successful_teams = 0usize;
     let mut first_error: Option<anyhow::Error> = None;
@@ -71,7 +85,7 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 agents
             }
             Err(err) => {
-                warn!("atm list-agents failed for team '{team}': {err}");
+                tracing::warn!("atm list-agents failed for team '{}': {}", team, err);
                 if first_error.is_none() {
                     first_error = Some(err);
                 }
@@ -80,16 +94,14 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         };
 
         for agent in agents {
-            let Some(session_name) = extract_session_name(agent.session_id.as_deref()) else {
-                continue;
-            };
-
             let state_entry = match query_agent_state(&socket_path, &team, &agent.agent).await {
                 Ok(entry) => Some(entry),
                 Err(err) => {
-                    warn!(
+                    tracing::warn!(
                         "atm agent-state failed for team='{}' agent='{}': {}",
-                        team, agent.agent, err
+                        team,
+                        agent.agent,
+                        err
                     );
                     None
                 }
@@ -112,34 +124,99 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 derived_state = "stuck".to_string();
             }
 
-            updates.push(db::SessionAtmUpdate {
-                session_name,
-                agent_id: agent.agent.clone(),
+            updates.push(AtmRuntimeUpdate {
                 team: team.clone(),
+                agent: agent.agent.clone(),
                 state: derived_state,
                 last_transition,
-                updated_at: updated_at.clone(),
             });
         }
     }
 
     if successful_teams == 0 {
         state.atm_available.store(false, Ordering::Relaxed);
+        let mut runtime = state.runtime.lock().expect("runtime lock");
+        runtime.clear_atm();
         return Err(first_error.unwrap_or_else(|| anyhow!("ATM query failed for all teams")));
     }
 
     {
-        let state = Arc::clone(state);
-        let updates_for_db = updates;
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let db_conn = state.db.lock().expect("db lock");
-            db::replace_session_atm(&db_conn, &updates_for_db)
-        })
-        .await??;
+        let mut runtime = state.runtime.lock().expect("runtime lock");
+        runtime.apply_atm_updates(updates);
     }
 
     state.atm_available.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+pub async fn send_shutdown_messages(
+    state: &AppState,
+    targets: &[ShutdownTarget],
+) -> anyhow::Result<usize> {
+    if !state.config.atm.enabled || !state.config.atm.allow_shutdown {
+        tracing::warn!("ATM send not implemented");
+        return Ok(0);
+    }
+
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    let allowed_teams = configured_teams(state).into_iter().collect::<HashSet<_>>();
+    if allowed_teams.is_empty() {
+        tracing::warn!("ATM shutdown skipped: atm.teams allowlist is empty");
+        return Ok(0);
+    }
+
+    let unique = targets
+        .iter()
+        .filter(|target| allowed_teams.contains(&target.team))
+        .map(|target| (target.team.clone(), target.agent.clone()))
+        .collect::<HashSet<_>>();
+
+    let mut sent = 0usize;
+    for (team, agent) in unique {
+        let output = tokio::process::Command::new(atm_bin())
+            .arg("send")
+            .arg(&agent)
+            .arg("--team")
+            .arg(&team)
+            .arg("scmux: graceful shutdown requested; please stop current work and exit")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
+        match output {
+            Ok(result) if result.status.success() => {
+                sent += 1;
+            }
+            Ok(result) => {
+                let message = String::from_utf8_lossy(&result.stderr).trim().to_string();
+                tracing::warn!(
+                    "atm shutdown message failed team='{}' agent='{}': {}",
+                    team,
+                    agent,
+                    if message.is_empty() {
+                        format!("exit {}", result.status)
+                    } else {
+                        message
+                    }
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "atm shutdown message execution failed team='{}' agent='{}': {}",
+                    team,
+                    agent,
+                    err
+                );
+            }
+        }
+    }
+
+    Ok(sent)
 }
 
 fn resolve_socket_path(state: &AppState) -> PathBuf {
@@ -158,28 +235,19 @@ fn resolve_socket_path(state: &AppState) -> PathBuf {
 fn atm_home_dir() -> PathBuf {
     std::env::var_os("ATM_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from)) // QA-046+P5S3: macOS-only daemon, HOME always set
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn discover_teams() -> Vec<String> {
-    let teams_dir = atm_home_dir().join(".claude/teams");
-    let Ok(entries) = std::fs::read_dir(teams_dir) else {
-        return Vec::new();
-    };
-
-    let mut teams = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || !path.join("config.json").exists() {
-            continue;
-        }
-        if let Some(name) = entry.file_name().to_str() {
-            teams.push(name.to_string());
-        }
-    }
-    teams.sort();
-    teams
+fn configured_teams(state: &AppState) -> Vec<String> {
+    state
+        .config
+        .atm
+        .teams
+        .iter()
+        .map(|team| team.trim().to_string())
+        .filter(|team| !team.is_empty())
+        .collect::<Vec<_>>()
 }
 
 fn normalize_state(state: &str) -> &'static str {
@@ -190,19 +258,6 @@ fn normalize_state(state: &str) -> &'static str {
         "unknown" => "unknown",
         "stuck" => "stuck",
         _ => "unknown",
-    }
-}
-
-fn extract_session_name(session_id: Option<&str>) -> Option<String> {
-    let value = session_id?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let session = value.split(':').next().unwrap_or_default().trim();
-    if session.is_empty() {
-        None
-    } else {
-        Some(session.to_string())
     }
 }
 
@@ -279,6 +334,10 @@ fn request_id() -> String {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+fn atm_bin() -> String {
+    std::env::var("SCMUX_ATM_BIN").unwrap_or_else(|_| "atm".to_string())
 }
 
 #[cfg(unix)]

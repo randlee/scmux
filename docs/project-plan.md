@@ -2,7 +2,7 @@
 
 ## Overview
 
-scmux is delivered in four phases with explicit integration branches and version targets.
+scmux is delivered in six phases with explicit integration branches and version targets.
 
 | Phase | Theme | Target Version | Integration Branch |
 |-------|-------|----------------|--------------------|
@@ -10,6 +10,8 @@ scmux is delivered in four phases with explicit integration branches and version
 | 2 | Multi-host + Dashboard | 0.2.0 | `integrate/phase-2` |
 | 3 | CI + CLI | 0.3.0 | `integrate/phase-3` |
 | 4 | Supervision + Release | 0.3.0 | `integrate/phase-4` |
+| 5 | Dashboard Embed + Release Automation + ATM Activity | 0.4.x | `integrate/phase-5` |
+| 6 | Definition-First Architecture Realignment | 0.5.0 | `integrate/phase-6` (planned) |
 
 ## Execution Model
 
@@ -38,14 +40,23 @@ scmux is delivered in four phases with explicit integration branches and version
 | Sprint | Status |
 |--------|--------|
 | S0 | Complete (foundation: cargo build, workspace scaffold, env var rename) |
-| S1.1 | Pending |
-| S1.2 | Pending |
-| S2.1 | Pending |
-| S2.2 | Pending |
-| S3.1 | Pending |
-| S3.2 | Pending |
-| S4.1 | Pending |
-| S4.2 | Pending |
+| S1.1 | Complete |
+| S1.2 | Complete |
+| S2.1 | Complete |
+| S2.2 | Complete |
+| S3.1 | Complete |
+| S3.2 | Complete |
+| S4.1 | Complete |
+| S4.2 | Complete |
+| S5.1 | Complete |
+| S5.2 | Complete |
+| S5.3 | Complete |
+| S6.0 | Complete — PR #27 |
+| S6.1 | Complete — PR #28 |
+| S6.2 | Complete — PR #29 |
+| S6.3 | Complete — PR #38 |
+| S6.fix | Complete — PR #40 |
+| S6.cli | Complete — PR #41 |
 
 ## Sprint S0 — Foundation (Complete)
 
@@ -235,6 +246,114 @@ scmux is delivered in four phases with explicit integration branches and version
 - Requirement IDs: `T-E-01..T-E-11`, `AC-1..AC-10`.
 - Detailed spec: [docs/sprint-specs/p4-s2-release.md](./sprint-specs/p4-s2-release.md)
 
+## Phase 5 — Dashboard Embed + Release Automation + ATM Activity (Complete)
+
+**Goal:** make dashboard self-contained for packaging, automate Homebrew updates, and add ATM activity visibility.
+**Version:** `0.4.x`
+**Integration branch:** `integrate/phase-5`
+
+### Sprint 5.1 — Dashboard Embed + crates.io
+- Status: Complete
+- Primary outcomes: embedded dashboard assets, release publish order fixes, CI dashboard drift checks.
+
+### Sprint 5.2 — Homebrew Release Automation
+- Status: Complete
+- Primary outcomes: `update-homebrew` workflow, formula patch automation and docs alignment.
+
+### Sprint 5.3 — ATM Integration
+- Status: Complete
+- Primary outcomes: ATM daemon polling, API/CLI/dashboard activity display, follow-up artifact sync fixes.
+
+## Phase 6 — Definition-First Architecture Realignment (Current)
+
+**Goal:** replace discovery-first assumptions with definition-first architecture and writer-subsystem constraints.
+**Version:** `0.5.0` (planned)
+**Integration branch:** `integrate/phase-6` (planned; current docs work targets `develop`)
+
+### Sprint 6.0 — Requirements + Architecture Rewrite
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-requirements-revision`
+- Base branch: `develop`
+- PR target: `develop`
+- Status: In Progress
+- Scope:
+  - hard-replace `docs/requirements.md` and `docs/architecture.md` to definition-first model
+  - define writer subsystem boundaries and prohibited poller writes
+  - define in-memory runtime projection approach and discovery endpoint contract
+  - capture refactor scope for conflicting runtime-write paths
+- Acceptance criteria:
+  - requirements + architecture reflect the definition-first model with no conflicting discovery-first language
+  - writer subsystem boundary is specified (including compile-boundary enforcement notes)
+  - in-memory runtime projection is explicitly defined for runtime API views
+  - discovery endpoint contract (`GET /discovery`) is defined
+  - refactor-scope document includes Must Remove, Must Constrain, and Must Implement sections
+  - QA re-review reports no blocking findings for Sprint 6.0 docs
+- Related PR: `#27`
+
+### Sprint 6.1 — Writer Gate + Runtime Projection
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s1-writer-gate`
+- Base branch: `integrate/phase-6`
+- PR target: `integrate/phase-6`
+- Status: Complete — merged PR #28 (6ddcdfb)
+- Scope:
+  - `definition_writer` module — sole persistent writer; `pub(crate)` visibility boundary on `db.rs` write functions
+  - In-memory runtime projection replacing poller writes to `session_status`, `session_ci`, `session_atm`
+  - `scheduler.rs` → `tmux_poller.rs` rename; cron logic in separate module
+  - Graceful stop: ATM shutdown → grace period → scoped hard-stop
+  - API host CRUD (POST/PATCH/DELETE /hosts) via definition_writer
+  - GET /discovery endpoint (read-only raw tmux discovery)
+- Acceptance criteria: all met — cargo clippy clean, 78 tests pass, writer-gate T-WG-01..T-WG-04 verified
+- Related PR: #28
+- Deferred findings (tracked as GH issues): #30, #31, #32, #33, #34
+
+### Sprint 6.2 — Dashboard Wiring + Per-Pane ATM + CI View
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s2-runtime-projection`
+- Base branch: `feature/p6-s1-writer-gate`
+- PR target: `integrate/phase-6`
+- Status: Complete — merged PR #29 (d13d1dc)
+- Scope:
+  - Dashboard primary view: all defined projects (running + stopped)
+  - Per-pane ATM state on project cards (active/idle/stuck/offline/unknown)
+  - CI run color indicators (green/yellow/red) per project card
+  - Secondary discovery tab wired to GET /discovery
+  - Start/Stop buttons wired to POST /sessions/:name/start and /stop
+  - New Project + card Edit flows via POST/PATCH /sessions
+  - dashboard.js recompiled
+- Related PR: #29
+
+### Sprint 6.3 — Cleanup + Lifecycle Tests + Deferred Findings
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s3-cleanup-tests`
+- Base branch: `feature/p6-s2-runtime-projection`
+- PR target: `integrate/phase-6`
+- Status: Complete — merged PR #38 (956a389 + 155ee50)
+- Scope:
+  - #30 SCMUX-QA-P6S1-004: Remove deprecated table DDL (session_status, session_ci, session_atm) from db::migrate()
+  - #31 SCMUX-QA-P6S1-006: Explicit per-pane ATM field in API response (ATM-03)
+  - #32 SCMUX-QA-P6S1-007: Add approval policy comment to validate_approved_project
+  - #33 SCMUX-QA-P6S1-008: Tag/name T-LC-01..T-LC-06 lifecycle tests; add T-LC-03
+  - #34 SCMUX-QA-P6S1-009: Populate or remove recent_events field in GET /sessions/:name
+  - Any deferred findings from S6.2 QA
+- Acceptance criteria:
+  - cargo clippy clean, cargo test passes
+  - No deprecated table DDL in migrate()
+  - T-LC-01..T-LC-06 named and passing
+  - recent_events populated or removed
+  - GH issues #30–34 closed
+
+### Critical Review Fix Pass
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-critical-review-fixes`
+- Base branch: `integrate/phase-6`
+- PR target: `integrate/phase-6`
+- Status: In Progress — assigned to arch-cmux
+- Sprint spec: `docs/sprint-specs/p6-critical-review-fixes.md`
+- Scope: B-01..B-10 + `scmux doctor` CLI command (see sprint spec for full details)
+- Design decisions: ATM auto-discovery removed; daemon_health moved to in-memory; ATM opt-in config
+- Pending: B-11 (CLI write commands) — owner decision required
+
 ## Dependencies Across Sprints
 
 - `1.1` must merge before `1.2`.
@@ -244,9 +363,12 @@ scmux is delivered in four phases with explicit integration branches and version
 - `3.1` must merge before `3.2`.
 - `3.2` must merge before any phase 4 sprint.
 - `4.1` must merge before `4.2`.
+- `4.2` must merge before phase 5 implementation sprints.
+- phase 5 completion is a prerequisite for phase 6 realignment implementation.
 
 ## Current Phase Entry Point
 
-- Active planning baseline: `Phase 1`.
-- Next implementation sprint: `1.1`.
-- First QA gate: after `1.1` PR opens on `integrate/phase-1`.
+- Active planning baseline: `Phase 6`.
+- All sprints 6.0–6.3 complete and merged to `integrate/phase-6`.
+- Fix pass in progress (`feature/p6-critical-review-fixes`).
+- After fix pass merges: final PR `integrate/phase-6 → develop` for v0.5.0.
