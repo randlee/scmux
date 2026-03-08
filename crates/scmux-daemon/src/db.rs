@@ -494,13 +494,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE (name, host_id)
         );
 
-        CREATE TABLE IF NOT EXISTS session_status (
-            session_id  INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-            status      TEXT    NOT NULL DEFAULT 'stopped',
-            panes_json  TEXT,
-            polled_at   DATETIME NOT NULL DEFAULT (datetime('now'))
-        );
-
         CREATE TABLE IF NOT EXISTS session_events (
             id         INTEGER PRIMARY KEY,
             session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -519,32 +512,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             recorded_at      DATETIME NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS session_ci (
-            id            INTEGER PRIMARY KEY,
-            session_id    INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            provider      TEXT    NOT NULL,
-            status        TEXT    NOT NULL,
-            data_json     TEXT,
-            tool_message  TEXT,
-            polled_at     DATETIME,
-            next_poll_at  DATETIME,
-            UNIQUE (session_id, provider)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_session_ci_session  ON session_ci (session_id);
-        CREATE INDEX IF NOT EXISTS idx_session_ci_next_poll ON session_ci (next_poll_at);
-
-        CREATE TABLE IF NOT EXISTS session_atm (
-            session_name    TEXT PRIMARY KEY,
-            agent_id        TEXT,
-            team            TEXT,
-            state           TEXT NOT NULL DEFAULT 'unknown',
-            last_transition TEXT,
-            updated_at      TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_session_atm_session_name ON session_atm (session_name);
-
         CREATE INDEX IF NOT EXISTS idx_sessions_host    ON sessions (host_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions (project);
         CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events (session_id, occurred_at);
@@ -556,6 +523,14 @@ fn migrate(conn: &Connection) -> Result<()> {
           BEGIN
             UPDATE sessions SET updated_at = datetime('now') WHERE id = OLD.id;
           END;
+
+        DROP TABLE IF EXISTS session_status;
+        DROP TABLE IF EXISTS session_ci;
+        DROP TABLE IF EXISTS session_atm;
+
+        DROP INDEX IF EXISTS idx_session_ci_session;
+        DROP INDEX IF EXISTS idx_session_ci_next_poll;
+        DROP INDEX IF EXISTS idx_session_atm_session_name;
     "#,
     )?;
     ensure_hosts_last_seen_column(conn)?;
