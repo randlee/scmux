@@ -67,6 +67,9 @@ impl E2eHarness {
                     ci_idle_interval_secs: None,
                 },
                 atm: AtmConfig {
+                    enabled: false,
+                    teams: Vec::new(),
+                    allow_shutdown: false,
                     socket_path: None,
                     stuck_minutes: Some(10),
                     stop_grace_secs: None,
@@ -80,6 +83,7 @@ impl E2eHarness {
             atm_available: std::sync::atomic::AtomicBool::new(false),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
+            health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
         });
 
         let router = api::router(Arc::clone(&state));

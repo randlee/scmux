@@ -91,6 +91,8 @@ pub enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Comprehensive runtime diagnostics
+    Doctor,
 }
 
 #[derive(Debug, Subcommand)]

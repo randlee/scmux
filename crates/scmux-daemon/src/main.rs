@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         atm_available: std::sync::atomic::AtomicBool::new(false),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
+        health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
     });
 
     // Poll loop — every 15 seconds
@@ -108,19 +109,9 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             if let Err(e) = tmux_poller::poll_cycle(&poll_state).await {
                 tracing::error!("poll cycle error: {e}");
-            }
-        }
-    });
-
-    // Health loop — every 60 seconds
-    let health_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(health_interval_secs));
-        loop {
-            interval.tick().await;
-            if let Err(e) = definition_writer::write_health(&health_state).await {
-                tracing::error!("health write error: {}", e.message());
+                poll_state.mark_poller_error("tmux", e.to_string());
+            } else {
+                poll_state.mark_poller_ok("tmux");
             }
         }
     });
@@ -131,6 +122,9 @@ async fn main() -> anyhow::Result<()> {
         loop {
             if let Err(e) = hosts::poll_hosts(Arc::clone(&host_poll_state)).await {
                 tracing::warn!("host poll error: {e}");
+                host_poll_state.mark_poller_error("hosts", e.to_string());
+            } else {
+                host_poll_state.mark_poller_ok("hosts");
             }
 
             let active = hosts::should_use_active_interval(&host_poll_state)
@@ -154,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             if let Err(e) = ci::poll_once(&ci_state).await {
                 tracing::warn!("ci poll loop error: {e}");
+                ci_state.mark_poller_error("ci", e.to_string());
+            } else {
+                ci_state.mark_poller_ok("ci");
             }
         }
     });
@@ -168,6 +165,9 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             if let Err(e) = atm::poll_once(&atm_state).await {
                 tracing::warn!("atm poll loop error: {e}");
+                atm_state.mark_poller_error("atm", e.to_string());
+            } else {
+                atm_state.mark_poller_ok("atm");
             }
         }
     });

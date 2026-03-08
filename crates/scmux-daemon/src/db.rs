@@ -1,10 +1,8 @@
 // DG-02: SQLite is a definition store. Runtime pollers are read-only and update in-memory projection.
-use crate::AppState;
 use anyhow::{anyhow, bail};
 use cron::Schedule;
 use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension, Result};
-use std::sync::Arc;
-use std::{fmt::Write as _, str::FromStr};
+use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct NewSession {
@@ -135,8 +133,7 @@ pub fn list_sessions_for_host(
                 azure_project: r.get(9)?,
             })
         })?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -190,8 +187,7 @@ pub fn list_hosts(conn: &Connection) -> anyhow::Result<Vec<HostDefinition>> {
                 last_seen: r.get(6)?,
             })
         })?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -327,7 +323,7 @@ pub(crate) fn update_session(
         }
         sql.push_str(part);
     }
-    let _ = write!(&mut sql, " WHERE name = ? AND host_id = ? AND enabled = 1");
+    sql.push_str(" WHERE name = ? AND host_id = ? AND enabled = 1");
     values.push(SqlValue::Text(name.to_string()));
     values.push(SqlValue::Integer(host_id));
 
@@ -373,13 +369,11 @@ pub(crate) fn update_host(
     host_id: i64,
     patch: &HostPatch,
 ) -> anyhow::Result<bool> {
-    let row_exists = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM hosts WHERE id = ?1 AND enabled = 1",
-            params![host_id],
-            |r| r.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
+    let row_exists = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM hosts WHERE id = ?1 AND enabled = 1",
+        params![host_id],
+        |r| r.get::<_, bool>(0),
+    )?;
     if !row_exists {
         return Ok(false);
     }
@@ -437,32 +431,6 @@ pub(crate) fn soft_delete_host(
     Ok(changed > 0)
 }
 
-pub(crate) async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
-    let state = Arc::clone(state);
-    tokio::task::spawn_blocking(move || {
-        let running = {
-            let runtime = state.runtime.lock().expect("runtime lock");
-            runtime.live_session_count()
-        };
-
-        let db = state.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO daemon_health (host_id, status, sessions_running) VALUES (?1, 'ok', ?2)",
-            params![state.host_id, running],
-        )?;
-
-        db.execute(
-            "DELETE FROM daemon_health WHERE recorded_at < datetime('now', '-7 days')",
-            [],
-        )?;
-
-        Ok::<_, anyhow::Error>(())
-    })
-    .await??;
-
-    Ok(())
-}
-
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -503,19 +471,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             occurred_at DATETIME NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS daemon_health (
-            id               INTEGER PRIMARY KEY,
-            host_id          INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
-            status           TEXT    NOT NULL,
-            sessions_running INTEGER,
-            note             TEXT,
-            recorded_at      DATETIME NOT NULL DEFAULT (datetime('now'))
-        );
-
         CREATE INDEX IF NOT EXISTS idx_sessions_host    ON sessions (host_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions (project);
         CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events (session_id, occurred_at);
-        CREATE INDEX IF NOT EXISTS idx_daemon_health_recorded ON daemon_health (recorded_at);
 
         CREATE TRIGGER IF NOT EXISTS sessions_updated_at
           AFTER UPDATE ON sessions
@@ -527,6 +485,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS session_status;
         DROP TABLE IF EXISTS session_ci;
         DROP TABLE IF EXISTS session_atm;
+        DROP TABLE IF EXISTS daemon_health;
 
         DROP INDEX IF EXISTS idx_session_ci_session;
         DROP INDEX IF EXISTS idx_session_ci_next_poll;

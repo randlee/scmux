@@ -170,6 +170,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 output::print_health(&health);
             }
         },
+        Command::Doctor => {
+            let health = client.health().await.map_err(map_client_error)?;
+            output::print_doctor(&health);
+        }
     }
 
     Ok(())

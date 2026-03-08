@@ -28,6 +28,9 @@ fn test_config() -> Config {
             ci_idle_interval_secs: None,
         },
         atm: AtmConfig {
+            enabled: false,
+            teams: Vec::new(),
+            allow_shutdown: false,
             socket_path: None,
             stuck_minutes: Some(10),
             stop_grace_secs: None,
@@ -53,6 +56,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
         atm_available: std::sync::atomic::AtomicBool::new(false),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
+        health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
     });
     (state, tmp)
 }
@@ -144,7 +148,7 @@ fn insert_remote_host(state: &Arc<AppState>, name: &str, address: &str, api_port
 }
 
 #[tokio::test]
-async fn t_i_01_poll_cycle_writes_session_status_rows() {
+async fn t_i_01_poll_cycle_does_not_create_session_status_table() {
     let (state, _tmp) = build_state();
     let name = unique_name("ti01");
     let _session_id = insert_session(&state, &name, false, None);
@@ -315,47 +319,31 @@ async fn t_i_07_single_cycle_does_not_retry_failed_start() {
 }
 
 #[tokio::test]
-async fn t_i_08_write_health_inserts_row() {
+async fn t_i_08_migrate_does_not_create_daemon_health_table() {
     let (state, _tmp) = build_state();
-
-    definition_writer::write_health(&state)
-        .await
-        .expect("write health");
-
     let db_conn = state.db.lock().expect("db lock");
     let count: i64 = db_conn
-        .query_row("SELECT COUNT(*) FROM daemon_health", [], |r| r.get(0))
-        .expect("health count");
-    assert_eq!(count, 1);
-}
-
-#[tokio::test]
-async fn t_i_09_write_health_prunes_older_than_seven_days() {
-    let (state, _tmp) = build_state();
-    {
-        let db_conn = state.db.lock().expect("db lock");
-        db_conn
-            .execute(
-                "INSERT INTO daemon_health (host_id, status, sessions_running, recorded_at)
-                 VALUES (?1, 'ok', 0, datetime('now', '-8 days'))",
-                [state.host_id],
-            )
-            .expect("seed old health row");
-    }
-
-    definition_writer::write_health(&state)
-        .await
-        .expect("write health");
-
-    let db_conn = state.db.lock().expect("db lock");
-    let old_count: i64 = db_conn
         .query_row(
-            "SELECT COUNT(*) FROM daemon_health WHERE recorded_at < datetime('now', '-7 days')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_health'",
             [],
             |r| r.get(0),
         )
-        .expect("old row count");
-    assert_eq!(old_count, 0);
+        .expect("daemon_health table count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn t_i_09_health_endpoint_visibility_does_not_require_daemon_health_table() {
+    let (state, _tmp) = build_state();
+    let db_conn = state.db.lock().expect("db lock");
+    let count: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_health'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("daemon_health table count");
+    assert_eq!(count, 0);
 }
 
 #[tokio::test]
@@ -464,7 +452,7 @@ async fn td_22_poll_cycle_latency_under_500ms_for_50_sessions() {
 }
 
 #[tokio::test]
-async fn t_i_20_reconstructs_registry_from_live_tmux_after_db_loss() {
+async fn t_i_20_does_not_reconstruct_registry_from_live_tmux_after_db_loss() {
     let (state, _tmp) = build_state();
 
     let _guard = env_lock().lock().await;
@@ -740,6 +728,7 @@ async fn t_wg_04_delete_db_and_restart_does_not_reconstruct_from_tmux() {
         atm_available: std::sync::atomic::AtomicBool::new(false),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
+        health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
     });
 
     let _guard = env_lock().lock().await;

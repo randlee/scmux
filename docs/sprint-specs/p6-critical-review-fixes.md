@@ -13,7 +13,9 @@ Worktree: `feature/p6-critical-review-fixes` (off `integrate/phase-6`)
 |----------|-----------|
 | ATM auto-discovery | **Removed entirely.** `discover_teams()` filesystem scan of `~/.claude/teams/` is out-of-policy. ATM team list must come from explicit config (`atm.teams`). |
 | ATM defaults | `atm.enabled = false`, `atm.allow_shutdown = false` — opt-in only |
+| ATM stop hook (current scope) | No shutdown messaging implementation in this sprint. Stop path logs `"ATM send not implemented"` and continues scoped tmux stop behavior. |
 | `daemon_health` SQLite | **Removed.** No runtime telemetry to SQLite without explicit design approval. Health tracking moves to AppState in-memory. |
+| SQLite persistence scope | Team/project/host configuration definitions only. Any additional persistence requires explicit design approval first. |
 | `scmux doctor` | New CLI subcommand added to expose daemon/runtime health signals (replaces daemon_health table visibility) |
 | CLI write commands | **PENDING** owner decision — `add/edit/remove` subcommands not touched in this pass |
 
@@ -33,13 +35,28 @@ Worktree: `feature/p6-critical-review-fixes` (off `integrate/phase-6`)
 | B-10 | `db.rs:440,506` | ARCHITECTURE | Remove `daemon_health` table from `migrate()` and `write_health()` DB writes; move to in-memory AppState |
 | NEW | `cli/main.rs` | FEATURE | Add `scmux doctor` subcommand — queries `GET /health`, prints runtime signals |
 
+## Explicit Delete/Removal Targets
+
+- `crates/scmux-daemon/src/atm.rs`
+- delete `discover_teams()` and all filesystem team-scan call paths.
+
+- `crates/scmux-daemon/src/db.rs`
+- delete `daemon_health` table DDL from `migrate()`.
+- delete `write_health()` SQLite insert/prune implementation.
+
+- `crates/scmux-daemon/src/definition_writer.rs`
+- delete `write_health()` wrapper once DB health persistence is removed.
+
+- `crates/scmux-daemon/src/main.rs`
+- delete periodic DB health-write loop.
+
 ## Acceptance Criteria
 
 - `cargo clippy --workspace --all-targets -- -D warnings` PASS
 - `cargo test --workspace` PASS
 - No `daemon_health` table created after `migrate()`
 - `atm::poll_once` returns immediately when `atm.enabled = false`
-- `atm::send_shutdown_messages` is no-op when `atm.allow_shutdown = false`
+- stop path logs `"ATM send not implemented"` and does not send ATM messages in this sprint
 - `POST /sessions/:name/start` returns non-200 HTTP status on start failure
 - `scmux doctor` compiles and calls `GET /health`
 

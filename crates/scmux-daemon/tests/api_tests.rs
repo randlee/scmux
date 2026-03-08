@@ -59,6 +59,9 @@ impl ApiHarness {
                     ci_idle_interval_secs: None,
                 },
                 atm: AtmConfig {
+                    enabled: true,
+                    teams: vec!["scmux-dev".to_string()],
+                    allow_shutdown: true,
                     socket_path: None,
                     stuck_minutes: Some(10),
                     stop_grace_secs: Some(1),
@@ -72,6 +75,7 @@ impl ApiHarness {
             atm_available: std::sync::atomic::AtomicBool::new(false),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
+            health: std::sync::Mutex::new(scmux_daemon::RuntimeHealth::default()),
         });
 
         let router = api::router(Arc::clone(&state));
@@ -284,7 +288,7 @@ async fn t_lc_01_post_sessions_name_start_launches_tmux_from_config() {
 }
 
 #[tokio::test]
-async fn t_lc_06_start_failure_returns_ok_false_and_keeps_session_stopped() {
+async fn t_lc_06_start_failure_returns_500_and_keeps_session_stopped() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -300,9 +304,13 @@ async fn t_lc_06_start_failure_returns_ok_false_and_keeps_session_stopped() {
         .expect("start request");
     restore_env_var("SCMUX_TMUXP_BIN", prev);
 
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], false);
+    assert_eq!(body["code"], "start_failed");
     assert!(body["message"]
         .as_str()
         .unwrap_or_default()
