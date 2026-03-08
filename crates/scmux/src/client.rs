@@ -99,15 +99,6 @@ pub struct SessionSummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EventRow {
-    pub event: String,
-    pub trigger: String,
-    #[serde(default)]
-    pub note: Option<String>,
-    pub occurred_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionDetail {
     pub id: i64,
     pub name: String,
@@ -126,8 +117,6 @@ pub struct SessionDetail {
     #[serde(default)]
     pub atm: Option<SessionAtmSummary>,
     pub config_json: serde_json::Value,
-    #[serde(default)]
-    pub recent_events: Vec<EventRow>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
