@@ -68,63 +68,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Host { command } => {
             handle_host_command(&client, command).await?;
         }
-        Command::Add {
-            name,
-            project,
-            config,
-            cron,
-            auto_start,
-            host_id,
-            github_repo,
-            azure_project,
-        } => {
-            handle_session_command(
-                &client,
-                SessionCommand::Add {
-                    name,
-                    project,
-                    config,
-                    cron,
-                    auto_start,
-                    host_id,
-                    github_repo,
-                    azure_project,
-                },
-            )
-            .await?;
-        }
-        Command::Edit {
-            name,
-            project,
-            config,
-            cron,
-            auto_start,
-            github_repo,
-            azure_project,
-        } => {
-            handle_session_command(
-                &client,
-                SessionCommand::Edit {
-                    name,
-                    project,
-                    config,
-                    cron,
-                    auto_start,
-                    github_repo,
-                    azure_project,
-                },
-            )
-            .await?;
-        }
-        Command::Disable { name } => {
-            handle_session_command(&client, SessionCommand::Disable { name }).await?;
-        }
-        Command::Enable { name } => {
-            handle_session_command(&client, SessionCommand::Enable { name }).await?;
-        }
-        Command::Remove { name } => {
-            handle_session_command(&client, SessionCommand::Remove { name }).await?;
-        }
         Command::Hosts => {
             let hosts = client.list_hosts().await.map_err(map_client_error)?;
             output::print_hosts(&hosts);

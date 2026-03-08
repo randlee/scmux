@@ -36,7 +36,6 @@ fn test_config() -> Config {
             stuck_minutes: Some(10),
             stop_grace_secs: None,
         },
-        hosts: Vec::new(),
     }
 }
 
@@ -121,11 +120,23 @@ fn insert_ci_session(
                 .to_string(),
         })
         .collect::<Vec<_>>();
-    let mut live = std::collections::HashMap::new();
-    live.insert(name.to_string(), panes);
+    let defined_names = {
+        let db_conn = state.db.lock().expect("db lock");
+        db::list_sessions_for_host(&db_conn, state.host_id)
+            .expect("list sessions")
+            .into_iter()
+            .map(|session| session.name)
+            .collect::<Vec<_>>()
+    };
     let mut runtime = state.runtime.lock().expect("runtime lock");
+    let mut live = runtime
+        .discovery_rows()
+        .into_iter()
+        .map(|row| (row.name, row.panes))
+        .collect::<std::collections::HashMap<_, _>>();
+    live.insert(name.to_string(), panes);
     runtime.apply_tmux_snapshot(
-        &[name.to_string()],
+        &defined_names,
         &live,
         &std::collections::HashMap::new(),
         &chrono::Utc::now().to_rfc3339(),

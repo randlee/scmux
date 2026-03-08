@@ -35,7 +35,6 @@ fn test_config() -> Config {
             stuck_minutes: Some(10),
             stop_grace_secs: None,
         },
-        hosts: Vec::new(),
     }
 }
 

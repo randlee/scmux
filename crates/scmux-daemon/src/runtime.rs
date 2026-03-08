@@ -1,6 +1,6 @@
 use crate::tmux::PaneInfo;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct SessionRuntime {
@@ -104,6 +104,14 @@ impl RuntimeProjection {
         polled_at: &str,
     ) {
         self.discovery = live_sessions.clone();
+        let defined = defined_sessions
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>();
+        self.sessions.retain(|name, _| defined.contains(name));
+        self.pane_keys_by_session
+            .retain(|name, _| defined.contains(name));
+        self.ci_by_session.retain(|name, _| defined.contains(name));
 
         for session_name in defined_sessions {
             let live = live_sessions.get(session_name);
