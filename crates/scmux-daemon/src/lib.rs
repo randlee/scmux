@@ -1,4 +1,5 @@
 pub mod api;
+pub mod atm;
 pub mod ci;
 pub mod config;
 pub mod db;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub reachability: std::sync::Mutex<std::collections::HashMap<i64, hosts::HostReachability>>,
     pub ci_tools: ci::ToolAvailability,
     pub clock: std::sync::Arc<dyn Clock>,
+    pub atm_available: std::sync::atomic::AtomicBool,
     pub last_api_access: std::sync::atomic::AtomicU64,
     pub started_at: std::time::Instant,
 }

@@ -1,5 +1,5 @@
 use chrono::{Datelike, Duration, Timelike, Utc};
-use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
+use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::{ci, db, hosts, scheduler, AppState, SystemClock};
 use std::io::Write;
 use std::sync::Arc;
@@ -27,6 +27,10 @@ fn test_config() -> Config {
             ci_active_interval_secs: None,
             ci_idle_interval_secs: None,
         },
+        atm: AtmConfig {
+            socket_path: None,
+            stuck_minutes: Some(10),
+        },
         hosts: Vec::new(),
     }
 }
@@ -44,6 +48,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
         ci_tools: ci::ToolAvailability::default(),
         clock: Arc::new(SystemClock),
+        atm_available: std::sync::atomic::AtomicBool::new(false),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });

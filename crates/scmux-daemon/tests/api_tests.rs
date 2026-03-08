@@ -1,10 +1,11 @@
 use scmux_daemon::api;
 use scmux_daemon::ci;
-use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
+use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::{json, Value};
 use std::io::Write;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -55,11 +56,16 @@ impl ApiHarness {
                     ci_active_interval_secs: None,
                     ci_idle_interval_secs: None,
                 },
+                atm: AtmConfig {
+                    socket_path: None,
+                    stuck_minutes: Some(10),
+                },
                 hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
             ci_tools: ci::ToolAvailability::default(),
             clock: Arc::new(SystemClock),
+            atm_available: std::sync::atomic::AtomicBool::new(false),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
         });
@@ -569,6 +575,79 @@ async fn t_a_16_get_session_detail_includes_ci_summary_payload() {
         .as_str()
         .unwrap_or_default()
         .contains("brew install gh"));
+}
+
+#[tokio::test]
+async fn t_atm_01_get_sessions_includes_atm_null_for_non_atm_sessions() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    h.state.atm_available.store(true, Ordering::Relaxed);
+
+    let response = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Vec<Value> = response.json().await.expect("json");
+    assert_eq!(body.len(), 1);
+    assert!(body[0]["atm"].is_null());
+}
+
+#[tokio::test]
+async fn t_atm_02_get_sessions_includes_atm_state_when_available() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    {
+        let db = h.state.db.lock().expect("db lock");
+        db.execute(
+            "INSERT INTO session_atm (session_name, agent_id, team, state, last_transition, updated_at)
+             VALUES ('alpha', 'arch-cmux', 'scmux-dev', 'active', '2026-03-08T00:00:00Z', datetime('now'))",
+            [],
+        )
+        .expect("insert session atm");
+    }
+    h.state.atm_available.store(true, Ordering::Relaxed);
+
+    let response = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Vec<Value> = response.json().await.expect("json");
+    assert_eq!(body.len(), 1);
+    assert_eq!(body[0]["atm"]["state"], "active");
+    assert_eq!(body[0]["atm"]["last_transition"], "2026-03-08T00:00:00Z");
+}
+
+#[tokio::test]
+async fn t_atm_03_unreachable_atm_returns_null_without_error() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    {
+        let db = h.state.db.lock().expect("db lock");
+        db.execute(
+            "INSERT INTO session_atm (session_name, agent_id, team, state, last_transition, updated_at)
+             VALUES ('alpha', 'arch-cmux', 'scmux-dev', 'stuck', '2026-03-08T00:00:00Z', datetime('now'))",
+            [],
+        )
+        .expect("insert session atm");
+    }
+    h.state.atm_available.store(false, Ordering::Relaxed);
+
+    let response = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Vec<Value> = response.json().await.expect("json");
+    assert_eq!(body.len(), 1);
+    assert!(body[0]["atm"].is_null());
 }
 
 #[tokio::test]
