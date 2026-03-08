@@ -27,6 +27,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Dashboard artifact drift check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dashboard
+          npm install --no-package-lock --no-save @babel/core @babel/plugin-transform-react-jsx
+          node <<'NODE'
+          const babel = require('@babel/core');
+          const fs = require('fs');
+          const srcRaw = fs.readFileSync('team-dashboard.jsx', 'utf8');
+          const importMatch = srcRaw.match(/^import\s+\{([^}]+)\}\s+from\s+["']react["'];?\s*\n/m);
+          const reactImports = importMatch ? importMatch[1].trim().replace(/\s*,\s*/g, ', ') : 'useState';
+          const src = srcRaw
+            .replace(/^import\s+\{[^}]+\}\s+from\s+["']react["'];?\s*\n/m, '')
+            .replace(/^export default function\s+/m, 'function ');
+          const result = babel.transformSync(src, {
+            plugins: ['@babel/plugin-transform-react-jsx'],
+            filename: 'dashboard.jsx'
+          });
+          fs.writeFileSync(
+            'dashboard.generated.js',
+            `const { ${reactImports} } = React;\n\n` +
+              result.code +
+              '\n\nReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Dashboard));\n'
+          );
+          NODE
+          diff --unified dashboard.js dashboard.generated.js
+          diff --unified dashboard.js ../crates/scmux-daemon/assets/dashboard.js
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
