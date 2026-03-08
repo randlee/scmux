@@ -48,7 +48,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DG-10 | Logging paths shall be structured and OpenTelemetry-ready (trace context propagation and consistent event attributes) for near-term OTel integration | 6.0 |
 | DG-11 | On panic or partial failure, the daemon shall isolate failures and shall not mass-stop unrelated sessions/agents | 6.0 |
 | DG-12 | Runtime state is live/ephemeral and shall not be treated as persistent source-of-truth data in SQLite | 6.0 |
-| DG-13 | Legacy runtime cache tables (`session_status`, `session_ci`, `session_atm`) are deprecated in P6 and replaced by in-memory projection for API responses | 6.0 |
+| DG-13 | Legacy runtime cache tables (`session_status`, `session_ci`, `session_atm`, `daemon_health`) are deprecated in P6 and replaced by in-memory projection for API responses | 6.0 |
 
 ### 4.2 Daemon — Session Lifecycle
 
@@ -209,12 +209,13 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | CLI-06 | `scmux start <name>` — start session | 3.2 |
 | CLI-07 | `scmux stop <name>` — stop session | 3.2 |
 | CLI-08 | `scmux jump <name>` — launch terminal via daemon | 3.2 |
-| CLI-09 | Project-definition create/edit/delete shall be dashboard editor-only in the current release (CLI write commands deferred) | 6.0 |
+| CLI-09 | `scmux session add/edit/disable/enable/remove` shall mutate session definitions via daemon write endpoints | 6.cli |
 | CLI-10 | `scmux hosts` — list hosts with reachability | 3.2 |
 | CLI-11 | `scmux daemon status` — show daemon health | 3.2 |
 | CLI-12 | Reserved for future non-editor write flows (requires explicit approval model) | 6.0 |
-| CLI-13 | `scmux host add` — deferred; host persistence remains editor-only in current release | 6.0 |
+| CLI-13 | `scmux host add/edit/remove` shall mutate host definitions via daemon write endpoints | 6.cli |
 | CLI-14 | `scmux daemon restart` — deferred to v2. Not implemented in current release | — |
+| CLI-15 | `scmux doctor` — comprehensive runtime diagnostic output: daemon health endpoint, poller states, ATM socket availability, sessions running count, and recent error signals; replaces `daemon_health` table visibility | 6.fix |
 
 ### 4.13 Session Registry
 
@@ -254,13 +255,15 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| ATM-01 | The daemon shall query the local ATM daemon via Unix socket IPC (`${ATM_HOME}/.claude/daemon/atm-daemon.sock`, overridable via `scmux.toml atm.socket_path`) for per-agent state | P5.3 |
+| ATM-01 | When `atm.enabled = true`, the daemon shall query the local ATM daemon via Unix socket IPC (`${ATM_HOME}/.claude/daemon/atm-daemon.sock`, overridable via `scmux.toml atm.socket_path`) for per-agent state; default is `atm.enabled = false` (opt-in) | 6.fix |
 | ATM-02 | ATM state shall be mapped per configured pane (`atm_agent`, `atm_team`) and exposed in session/project responses | 6.0 |
 | ATM-03 | Dashboard and CLI shall render per-pane ATM state (`active|idle|stuck|offline|unknown`) rather than only a session-level badge | 6.0 |
 | ATM-04 | `stuck` shall be derived from prolonged active state over configurable threshold (`atm.stuck_minutes`) | P5.3 |
 | ATM-05 | ATM unavailability shall degrade gracefully: project remains visible, ATM fields marked unavailable/unknown, no daemon crash | P5.3 |
 | ATM-06 | Runtime ATM observations shall not be auto-persisted as project-definition writes | 6.0 |
 | ATM-07 | Canonical per-pane ATM lookup key shall be (`pane.atm_team`, `pane.atm_agent`); pane index/name are display metadata only | 6.0 |
+| ATM-08 | ATM team membership shall be sourced exclusively from explicit configuration (`atm.teams: Vec<String>`); filesystem scanning of `~/.claude/teams/` is prohibited | 6.fix |
+| ATM-09 | ATM shutdown messaging during session stop shall be gated on `atm.allow_shutdown = true`; default is `false` (no shutdown messages sent without explicit opt-in) | 6.fix |
 
 ---
 

@@ -11,6 +11,9 @@ ci_active_interval_secs = 60
 ci_idle_interval_secs = 300
 
 [atm]
+enabled = false
+teams = []
+allow_shutdown = false
 socket_path = ""
 stuck_minutes = 10
 

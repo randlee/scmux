@@ -42,7 +42,36 @@ pub enum Command {
         #[arg(long)]
         host_id: Option<i64>,
     },
-    /// Register a new session
+    /// Session definition write commands (enabled in Sprint 6.cli)
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Host definition write commands (enabled in Sprint 6.cli)
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
+    /// List hosts
+    Hosts,
+    /// Daemon subcommands
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+    /// Comprehensive runtime diagnostics
+    Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Show daemon health status
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// Create a session definition
     Add {
         #[arg(long)]
         name: String,
@@ -61,7 +90,7 @@ pub enum Command {
         #[arg(long)]
         azure_project: Option<String>,
     },
-    /// Edit a session
+    /// Update a session definition
     Edit {
         name: String,
         #[arg(long)]
@@ -78,23 +107,43 @@ pub enum Command {
         #[arg(long)]
         azure_project: Option<String>,
     },
-    /// Disable a session
+    /// Disable a session definition
     Disable { name: String },
-    /// Enable a session
+    /// Enable a session definition
     Enable { name: String },
-    /// Remove a session
+    /// Remove a session definition
     Remove { name: String },
-    /// List hosts
-    Hosts,
-    /// Daemon subcommands
-    Daemon {
-        #[command(subcommand)]
-        command: DaemonCommand,
-    },
 }
 
 #[derive(Debug, Subcommand)]
-pub enum DaemonCommand {
-    /// Show daemon health status
-    Status,
+pub enum HostCommand {
+    /// Create a host definition
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        address: String,
+        #[arg(long)]
+        ssh_user: Option<String>,
+        #[arg(long)]
+        api_port: Option<u16>,
+        #[arg(long)]
+        is_local: Option<bool>,
+    },
+    /// Update a host definition
+    Edit {
+        id: i64,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long)]
+        ssh_user: Option<String>,
+        #[arg(long)]
+        clear_ssh_user: bool,
+        #[arg(long)]
+        api_port: Option<u16>,
+    },
+    /// Remove a host definition
+    Remove { id: i64 },
 }

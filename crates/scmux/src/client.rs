@@ -99,15 +99,6 @@ pub struct SessionSummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EventRow {
-    pub event: String,
-    pub trigger: String,
-    #[serde(default)]
-    pub note: Option<String>,
-    pub occurred_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionDetail {
     pub id: i64,
     pub name: String,
@@ -126,8 +117,6 @@ pub struct SessionDetail {
     #[serde(default)]
     pub atm: Option<SessionAtmSummary>,
     pub config_json: serde_json::Value,
-    #[serde(default)]
-    pub recent_events: Vec<EventRow>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -151,13 +140,81 @@ pub struct HostSummary {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateHostRequest {
+    pub name: String,
+    pub address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_local: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PatchHostRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_port: Option<u16>,
+}
+
+impl PatchHostRequest {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.address.is_none()
+            && self.ssh_user.is_none()
+            && self.api_port.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub uptime_secs: u64,
     pub session_count: i64,
+    #[serde(default)]
+    pub sessions_running: i64,
+    #[serde(default)]
+    pub host_id: i64,
+    #[serde(default)]
+    pub atm_available: bool,
+    #[serde(default)]
+    pub ci_available: Option<CiAvailability>,
+    #[serde(default)]
+    pub pollers: Option<PollerStates>,
+    #[serde(default)]
+    pub recent_errors: Vec<String>,
     pub db_path: String,
     pub version: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CiAvailability {
+    pub gh: bool,
+    pub az: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PollerHealth {
+    pub status: String,
+    #[serde(default)]
+    pub last_ok: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PollerStates {
+    pub tmux: PollerHealth,
+    pub hosts: PollerHealth,
+    pub ci: PollerHealth,
+    pub atm: PollerHealth,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,6 +338,27 @@ impl ApiClient {
 
     pub async fn list_hosts(&self) -> Result<Vec<HostSummary>, ClientError> {
         self.request_json(Method::GET, "/hosts", None::<&()>).await
+    }
+
+    pub async fn create_host(
+        &self,
+        req: &CreateHostRequest,
+    ) -> Result<ActionResponse, ClientError> {
+        self.request_json(Method::POST, "/hosts", Some(req)).await
+    }
+
+    pub async fn patch_host(
+        &self,
+        id: i64,
+        req: &PatchHostRequest,
+    ) -> Result<ActionResponse, ClientError> {
+        self.request_json(Method::PATCH, &format!("/hosts/{id}"), Some(req))
+            .await
+    }
+
+    pub async fn delete_host(&self, id: i64) -> Result<ActionResponse, ClientError> {
+        self.request_json(Method::DELETE, &format!("/hosts/{id}"), None::<&()>)
+            .await
     }
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {

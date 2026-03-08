@@ -1,4 +1,5 @@
-use scmux_daemon::db::{ensure_local_host, open};
+use scmux_daemon::db::open;
+use scmux_daemon::definition_writer;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,14 +46,7 @@ fn td_02_open_is_idempotent_on_existing_db() {
     let _ = open(path.to_str().expect("utf8 path")).expect("first open");
     let conn = open(path.to_str().expect("utf8 path")).expect("second open");
 
-    for table in &[
-        "hosts",
-        "sessions",
-        "session_status",
-        "session_events",
-        "daemon_health",
-        "session_ci",
-    ] {
+    for table in &["hosts", "sessions"] {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -88,7 +82,7 @@ fn td_02_open_is_idempotent_on_existing_db() {
 fn td_03_ensure_local_host_uses_system_hostname() {
     let path = temp_db_path("td03");
     let conn = open(path.to_str().expect("utf8 path")).expect("open");
-    let id = ensure_local_host(&conn).expect("ensure host");
+    let id = definition_writer::ensure_local_host(&conn).expect("ensure host");
     let name: String = conn
         .query_row(
             "SELECT name FROM hosts WHERE id = ?1",
@@ -104,8 +98,8 @@ fn td_03_ensure_local_host_uses_system_hostname() {
 fn td_04_ensure_local_host_returns_same_id_on_repeated_calls() {
     let path = temp_db_path("td04");
     let conn = open(path.to_str().expect("utf8 path")).expect("open");
-    let id1 = ensure_local_host(&conn).expect("first ensure");
-    let id2 = ensure_local_host(&conn).expect("second ensure");
+    let id1 = definition_writer::ensure_local_host(&conn).expect("first ensure");
+    let id2 = definition_writer::ensure_local_host(&conn).expect("second ensure");
     assert_eq!(id1, id2);
     let _ = std::fs::remove_file(path);
 }
