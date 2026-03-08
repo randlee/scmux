@@ -17,9 +17,10 @@ const STATUS_DOT = {
   stuck: { color: "#ef4444", pulse: true },
   offline: { color: "#64748b", pulse: false },
   unknown: { color: "#334155", pulse: false },
-  blocked: { color: "#ef4444", pulse: true },
   stopped: { color: "#1e2535", pulse: false },
   running: { color: "#10b981", pulse: true },
+  starting: { color: "#60a5fa", pulse: true },
+  done: { color: "#a78bfa", pulse: false },
 };
 
 const DEFAULT_BASE_URL = "http://localhost:7878";
@@ -37,7 +38,7 @@ function daemonBaseUrl() {
 }
 
 function Dot({ status, size = 7 }) {
-  const s = STATUS_DOT[status] || STATUS_DOT.stopped;
+  const s = STATUS_DOT[status] || STATUS_DOT.unknown;
   return (
     <span
       style={{
@@ -75,164 +76,6 @@ function Dot({ status, size = 7 }) {
   );
 }
 
-function normalizePanes(session) {
-  const panes = Array.isArray(session.panes) ? session.panes : [];
-  return panes.map((pane, index) => ({
-    name: pane.name || `pane-${index}`,
-    status: pane.status || "idle",
-    lastActivity: pane.last_activity || pane.lastActivity || "unknown",
-    currentCommand: pane.current_command || pane.currentCommand || "",
-  }));
-}
-
-function parseCiPayload(raw) {
-  if (!raw) {
-    return null;
-  }
-  if (typeof raw === "object") {
-    return raw;
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeCi(session) {
-  const source = Array.isArray(session.session_ci)
-    ? session.session_ci
-    : Array.isArray(session.ci)
-      ? session.ci
-      : [];
-
-  return source
-    .map((entry) => {
-      const payload = parseCiPayload(entry.data_json || entry.data || entry.payload);
-      return {
-        provider: entry.provider || "unknown",
-        status: entry.status || "unknown",
-        payload,
-        toolMessage: entry.tool_message || entry.message || null,
-      };
-    })
-    .filter((entry) => entry.provider !== "unknown");
-}
-
-function extractPrs(session, ciEntries) {
-  if (Array.isArray(session.prs)) {
-    return session.prs.map((pr) => ({
-      num: pr.num ?? pr.number ?? pr.id ?? "?",
-      title: pr.title || "Untitled PR",
-      url: pr.url || pr.web_url || null,
-    }));
-  }
-
-  const github = ciEntries.find((entry) => entry.provider === "github");
-  if (!github || !github.payload) {
-    return [];
-  }
-
-  if (Array.isArray(github.payload.prs)) {
-    return github.payload.prs.map((pr) => ({
-      num: pr.num ?? pr.number ?? pr.id ?? "?",
-      title: pr.title || "Untitled PR",
-      url: pr.url || pr.web_url || null,
-    }));
-  }
-
-  return [];
-}
-
-function extractOpenPrCount(session, ciEntries) {
-  const direct = Array.isArray(session.prs) ? session.prs.length : null;
-  if (direct !== null) {
-    return direct;
-  }
-
-  const github = ciEntries.find((entry) => entry.provider === "github");
-  if (!github) {
-    return 0;
-  }
-  if (github.payload && Array.isArray(github.payload.prs)) {
-    return github.payload.prs.length;
-  }
-  const numericCandidates = [
-    github.payload?.open_pr_count,
-    github.payload?.open_prs,
-    github.payload?.pr_count,
-  ];
-  const numeric = numericCandidates.find((value) => Number.isFinite(value));
-  return Number.isFinite(numeric) ? Number(numeric) : 0;
-}
-
-function extractRuns(ciEntries) {
-  const rows = [];
-
-  ciEntries.forEach((entry) => {
-    if (!entry.payload || !Array.isArray(entry.payload.runs)) {
-      return;
-    }
-    entry.payload.runs.forEach((run, index) => {
-      rows.push({
-        provider: entry.provider,
-        title:
-          run.displayTitle ||
-          run.name ||
-          run.pipeline?.name ||
-          run.definition?.name ||
-          `run-${index + 1}`,
-        status: run.status || run.state || run.result || run.conclusion || "unknown",
-        conclusion: run.conclusion || run.result || null,
-        branch: run.headBranch || run.sourceBranch || run.branch || null,
-        createdAt: run.createdAt || run.creationDate || run.queueTime || run.finishTime || null,
-        url: run.url || run.webUrl || run._links?.web?.href || null,
-      });
-    });
-  });
-
-  return rows;
-}
-
-function normalizeAtm(session) {
-  if (!session || typeof session.atm !== "object" || session.atm === null) {
-    return null;
-  }
-  const state = String(session.atm.state || "unknown").toLowerCase();
-  const normalizedState = ["active", "idle", "stuck", "offline", "unknown"].includes(state)
-    ? state
-    : "unknown";
-  return {
-    state: normalizedState,
-    lastTransition: session.atm.last_transition || session.atm.lastTransition || null,
-  };
-}
-
-function normalizeSessions(sessionRows, hostRows) {
-  const hostMap = new Map((Array.isArray(hostRows) ? hostRows : []).map((host) => [host.id, host]));
-  return (Array.isArray(sessionRows) ? sessionRows : []).map((row) => {
-    const ciEntries = normalizeCi(row);
-    const prs = extractPrs(row, ciEntries);
-    const ciRuns = extractRuns(ciEntries);
-    const status = row.status || "stopped";
-    const openPrCount = prs.length > 0 ? prs.length : extractOpenPrCount(row, ciEntries);
-
-    return {
-      ...row,
-      status,
-      sessionStatus: status,
-      project: row.project || "unassigned",
-      panes: normalizePanes(row),
-      atm: normalizeAtm(row),
-      ciEntries,
-      ciRuns,
-      prs,
-      openPrCount,
-      host: hostMap.get(row.host_id) || null,
-    };
-  });
-}
-
 function relativeTime(iso) {
   if (!iso) {
     return "unknown";
@@ -254,26 +97,6 @@ function relativeTime(iso) {
   return `${Math.floor(elapsedSec / 86400)}d ago`;
 }
 
-function buildJumpCommand(session, host) {
-  if (!host || host.is_local) {
-    return `tmux attach -t ${session.name}`;
-  }
-  const sshUser = host.ssh_user || "<ssh_user>";
-  return `ssh ${sshUser}@${host.address} tmux attach -t ${session.name}`;
-}
-
-function sessionStyle(session) {
-  const baseOpacity = session.status === "stopped" ? 0.55 : 1;
-  if (!session.host || session.host.reachable) {
-    return { opacity: baseOpacity };
-  }
-
-  return {
-    opacity: baseOpacity * 0.75,
-    filter: "grayscale(1)",
-  };
-}
-
 function hostLabel(host) {
   if (!host) {
     return "unknown-host";
@@ -291,479 +114,296 @@ function hostBadge(host) {
   return `last seen ${relativeTime(host.last_seen)}`;
 }
 
-function AtmBadge({ atm }) {
-  if (!atm) {
+function parseCiPayload(raw) {
+  if (!raw) {
     return null;
   }
+  if (typeof raw === "object") {
+    return raw;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePanes(session) {
+  const panes = Array.isArray(session.panes) ? session.panes : [];
+  return panes.map((pane, index) => {
+    const status = String(pane.status || "unknown").toLowerCase();
+    return {
+      name: pane.name || `pane-${index}`,
+      status,
+      lastActivity: pane.last_activity || pane.lastActivity || "unknown",
+      currentCommand: pane.current_command || pane.currentCommand || "",
+    };
+  });
+}
+
+function normalizeCi(session) {
+  const source = Array.isArray(session.session_ci)
+    ? session.session_ci
+    : Array.isArray(session.ci)
+      ? session.ci
+      : [];
+
+  return source
+    .map((entry) => {
+      const payload = parseCiPayload(entry.data_json || entry.data || entry.payload);
+      return {
+        provider: entry.provider || "unknown",
+        status: String(entry.status || "unknown").toLowerCase(),
+        payload,
+        toolMessage: entry.tool_message || entry.message || null,
+      };
+    })
+    .filter((entry) => entry.provider !== "unknown");
+}
+
+function extractPrs(session, ciEntries) {
+  if (Array.isArray(session.prs)) {
+    return session.prs.map((pr) => ({
+      num: pr.num ?? pr.number ?? pr.id ?? "?",
+      title: pr.title || "Untitled PR",
+      url: pr.url || pr.web_url || null,
+    }));
+  }
+
+  const github = ciEntries.find((entry) => entry.provider === "github");
+  if (github?.payload && Array.isArray(github.payload.prs)) {
+    return github.payload.prs.map((pr) => ({
+      num: pr.num ?? pr.number ?? pr.id ?? "?",
+      title: pr.title || "Untitled PR",
+      url: pr.url || pr.web_url || null,
+    }));
+  }
+
+  return [];
+}
+
+function extractRuns(ciEntries) {
+  const rows = [];
+
+  ciEntries.forEach((entry) => {
+    if (!entry.payload || !Array.isArray(entry.payload.runs)) {
+      return;
+    }
+
+    entry.payload.runs.forEach((run, index) => {
+      rows.push({
+        provider: entry.provider,
+        title:
+          run.displayTitle ||
+          run.name ||
+          run.pipeline?.name ||
+          run.definition?.name ||
+          `run-${index + 1}`,
+        status: String(
+          run.status || run.state || run.result || run.conclusion || "unknown",
+        ).toLowerCase(),
+        conclusion: run.conclusion || run.result || null,
+        branch: run.headBranch || run.sourceBranch || run.branch || null,
+        createdAt: run.createdAt || run.creationDate || run.queueTime || run.finishTime || null,
+        url: run.url || run.webUrl || run._links?.web?.href || null,
+      });
+    });
+  });
+
+  return rows;
+}
+
+function normalizeAtm(session) {
+  if (!session || typeof session.atm !== "object" || session.atm === null) {
+    return null;
+  }
+  const state = String(session.atm.state || "unknown").toLowerCase();
+  return {
+    state: ["active", "idle", "stuck", "offline", "unknown"].includes(state)
+      ? state
+      : "unknown",
+    lastTransition: session.atm.last_transition || session.atm.lastTransition || null,
+  };
+}
+
+function normalizeSessions(sessionRows, hostRows) {
+  const hostMap = new Map((Array.isArray(hostRows) ? hostRows : []).map((host) => [host.id, host]));
+
+  return (Array.isArray(sessionRows) ? sessionRows : []).map((row) => {
+    const ciEntries = normalizeCi(row);
+    const prs = extractPrs(row, ciEntries);
+    const ciRuns = extractRuns(ciEntries);
+    const status = String(row.status || "stopped").toLowerCase();
+
+    return {
+      ...row,
+      status,
+      project: row.project || "unassigned",
+      panes: normalizePanes(row),
+      atm: normalizeAtm(row),
+      ciEntries,
+      ciRuns,
+      prs,
+      openPrCount: prs.length,
+      host: hostMap.get(row.host_id) || null,
+    };
+  });
+}
+
+function normalizeDiscovery(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row) => ({
+    name: row.name || "unknown",
+    panes: normalizePanes(row),
+  }));
+}
+
+function ciRunTone(run) {
+  const status = String(run?.status || "unknown").toLowerCase();
+  const conclusion = String(run?.conclusion || "").toLowerCase();
+  const value = `${status} ${conclusion}`;
+
+  if (value.includes("in_progress") || value.includes("queued") || value.includes("running")) {
+    return { color: "#f59e0b", text: "running" };
+  }
+  if (value.includes("success") || value.includes("pass") || value.includes("succeeded") || value.includes("completed")) {
+    return { color: "#10b981", text: "pass" };
+  }
+  if (value.includes("fail") || value.includes("error") || value.includes("cancel")) {
+    return { color: "#ef4444", text: "fail" };
+  }
+  return { color: "#64748b", text: "unknown" };
+}
+
+function buildJumpCommand(session, host) {
+  if (!host || host.is_local) {
+    return `tmux attach -t ${session.name}`;
+  }
+  const sshUser = host.ssh_user || "<ssh_user>";
+  return `ssh ${sshUser}@${host.address} tmux attach -t ${session.name}`;
+}
+
+function sessionStyle(session) {
+  const baseOpacity = session.status === "stopped" ? 0.55 : 1;
+  if (!session.host || session.host.reachable) {
+    return { opacity: baseOpacity };
+  }
+  return {
+    opacity: baseOpacity * 0.75,
+    filter: "grayscale(1)",
+  };
+}
+
+function SessionActionButtons({ session, busy, onStartStop, onEdit }) {
+  const canStart = session.status === "stopped";
+  const actionLabel = canStart ? "Start" : "Stop";
 
   return (
-    <span
-      title={atm.lastTransition ? `last transition ${atm.lastTransition}` : undefined}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "2px 6px",
-        borderRadius: 4,
-        border: "1px solid #1e2535",
-        fontSize: 9,
-        color: "#94a3b8",
-        textTransform: "uppercase",
-        letterSpacing: "0.04em",
-      }}
-    >
-      <Dot status={atm.state} size={6} />
-      {atm.state}
-    </span>
+    <div style={{ display: "flex", gap: 6 }}>
+      <button
+        onClick={(event) => {
+          event.stopPropagation();
+          onStartStop(session);
+        }}
+        disabled={busy}
+        style={{
+          border: "1px solid #1e2535",
+          borderRadius: 4,
+          fontSize: 10,
+          padding: "2px 8px",
+          background: canStart ? "#102b1f" : "#2b1212",
+          color: canStart ? "#34d399" : "#fca5a5",
+          cursor: busy ? "default" : "pointer",
+        }}
+      >
+        {busy ? "..." : actionLabel}
+      </button>
+      <button
+        onClick={(event) => {
+          event.stopPropagation();
+          onEdit(session);
+        }}
+        style={{
+          border: "1px solid #1e2535",
+          borderRadius: 4,
+          fontSize: 10,
+          padding: "2px 8px",
+          background: "#0f172a",
+          color: "#93c5fd",
+          cursor: "pointer",
+        }}
+      >
+        Edit
+      </button>
+    </div>
   );
 }
 
-function CiBadges({ session }) {
-  const [showGithubPrs, setShowGithubPrs] = useState(false);
-
+function CiSummary({ session }) {
   if (!session.ciEntries.length) {
     return null;
   }
 
+  const runs = session.ciRuns.slice(0, 4);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {session.ciEntries.map((entry, index) => {
-          if (entry.status === "tool_unavailable") {
-            const installHint =
-              entry.provider === "github"
-                ? "Install gh CLI: brew install gh"
-                : entry.provider === "azure"
-                  ? "Install az CLI: brew install azure-cli"
-                  : "Install required CLI tool";
-            return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+        {session.ciEntries.map((entry, index) => (
+          <span
+            key={`${entry.provider}-${index}`}
+            title={entry.toolMessage || undefined}
+            style={{
+              fontSize: 9,
+              color: entry.provider === "github" ? "#60a5fa" : "#38bdf8",
+              background: entry.provider === "github" ? "#172554" : "#082f49",
+              borderRadius: 3,
+              padding: "1px 6px",
+              textTransform: "uppercase",
+            }}
+          >
+            {entry.provider}
+          </span>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+        {runs.map((run, index) => {
+          const tone = ciRunTone(run);
+          return (
+            <span
+              key={`${run.provider}-${run.title}-${index}`}
+              title={run.title}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 9,
+                color: "#94a3b8",
+                border: "1px solid #1e2535",
+                borderRadius: 3,
+                padding: "1px 5px",
+              }}
+            >
               <span
-                key={`${entry.provider}-${index}`}
-                title={entry.toolMessage || installHint}
                 style={{
-                  fontSize: 9,
-                  color: "#94a3b8",
-                  background: "#1e293b",
-                  borderRadius: 3,
-                  padding: "1px 6px",
+                  display: "inline-block",
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: tone.color,
                 }}
-              >
-                {entry.provider}: unavailable
-              </span>
-            );
-          }
-
-          if (entry.provider === "github") {
-            return (
-              <button
-                key={`${entry.provider}-${index}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setShowGithubPrs((prev) => !prev);
-                }}
-                title={`GitHub Actions: ${session.ciRuns.filter((run) => run.provider === "github").length} runs`}
-                style={{
-                  fontSize: 9,
-                  color: "#60a5fa",
-                  background: "#172554",
-                  borderRadius: 3,
-                  padding: "1px 6px",
-                  border: "none",
-                  cursor: "pointer",
-                  fontFamily: "inherit",
-                }}
-              >
-                GH PRs: {session.openPrCount}
-              </button>
-            );
-          }
-
-          if (entry.provider === "azure") {
-            return (
-              <span
-                key={`${entry.provider}-${index}`}
-                title={`Azure Pipelines: ${session.ciRuns.filter((run) => run.provider === "azure").length} runs`}
-                style={{
-                  fontSize: 9,
-                  color: "#38bdf8",
-                  background: "#082f49",
-                  borderRadius: 3,
-                  padding: "1px 6px",
-                }}
-              >
-                Azure: {entry.status}
-              </span>
-            );
-          }
-
-          return null;
+              />
+              {tone.text}
+            </span>
+          );
         })}
       </div>
-
-      {showGithubPrs && (
-        <div
-          onClick={(event) => event.stopPropagation()}
-          style={{
-            background: "#0a0e14",
-            border: "1px solid #131820",
-            borderRadius: 4,
-            padding: "6px 8px",
-            minWidth: 180,
-          }}
-        >
-          {session.prs.length === 0 && (
-            <div style={{ fontSize: 10, color: "#64748b" }}>No open PRs.</div>
-          )}
-          {session.prs.map((pr, index) => (
-            <a
-              key={`${pr.url || "pr"}-${index}`}
-              href={pr.url || "#"}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(event) => event.stopPropagation()}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                textDecoration: "none",
-                padding: "3px 0",
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 9,
-                  color: "#60a5fa",
-                  background: "#172554",
-                  borderRadius: 3,
-                  padding: "1px 5px",
-                  flexShrink: 0,
-                }}
-              >
-                #{pr.num || "?"}
-              </span>
-              <span
-                style={{
-                  fontSize: 10,
-                  color: "#94a3b8",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {pr.title || "Untitled PR"}
-              </span>
-            </a>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
-function JumpModal({ baseUrl, defaultTerminal, session, onClose }) {
-  const [submitting, setSubmitting] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-
-  useEffect(() => {
-    if (!session) {
-      return undefined;
-    }
-
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [session, onClose]);
-
-  useEffect(() => {
-    setFeedback(null);
-    setSubmitting(false);
-  }, [session]);
-
-  if (!session) {
-    return null;
-  }
-
-  const pc = PROJECT_COLORS[session.project] || "#3b82f6";
-  const cmd = buildJumpCommand(session, session.host);
-  const ciEntries = Array.isArray(session.ciEntries) ? session.ciEntries : [];
-  const ciRuns = Array.isArray(session.ciRuns) ? session.ciRuns : [];
-
-  const handleJump = async () => {
-    setSubmitting(true);
-    try {
-      const response = await fetch(
-        `${baseUrl}/sessions/${encodeURIComponent(session.name)}/jump`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            terminal: defaultTerminal,
-            host_id: session.host_id,
-          }),
-        },
-      );
-      const body = await response.json();
-      if (!response.ok) {
-        setFeedback({ ok: false, message: body.message || `HTTP ${response.status}` });
-      } else {
-        setFeedback({ ok: body.ok, message: body.message || "No message" });
-      }
-    } catch (error) {
-      setFeedback({ ok: false, message: String(error) });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.8)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 200,
-        backdropFilter: "blur(6px)",
-      }}
-      onClick={onClose}
-    >
-      <div
-        style={{
-          background: "#0d1117",
-          border: `1px solid ${pc}50`,
-          borderRadius: 12,
-          padding: 24,
-          minWidth: 360,
-          maxWidth: 680,
-          width: "92vw",
-          fontFamily: "inherit",
-        }}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.12em", marginBottom: 6 }}>
-          JUMP TO SESSION
-        </div>
-        <div style={{ fontSize: 20, color: "#f1f5f9", fontWeight: 700, marginBottom: 3 }}>
-          {session.name}
-        </div>
-        <div style={{ fontSize: 11, color: pc, marginBottom: 6 }}>
-          {session.project || "unassigned"} on {hostLabel(session.host)}
-        </div>
-        <div style={{ fontSize: 10, color: "#64748b", marginBottom: 16 }}>
-          {session.host?.reachable ? "host reachable" : `host unreachable (${hostBadge(session.host)})`}
-        </div>
-
-        <div
-          style={{
-            background: "#060810",
-            borderRadius: 6,
-            padding: "10px 14px",
-            marginBottom: 18,
-            fontSize: 11,
-            color: "#94a3b8",
-            overflowX: "auto",
-            whiteSpace: "nowrap",
-          }}
-        >
-          <span style={{ color: "#334155" }}>$ </span>
-          {cmd}
-        </div>
-
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.1em", marginBottom: 8 }}>
-            PANES
-          </div>
-          {session.panes.length === 0 && (
-            <div style={{ fontSize: 11, color: "#475569" }}>No panes reported.</div>
-          )}
-          {session.panes.map((pane, index) => (
-            <div
-              key={`${pane.name}-${index}`}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 0",
-                borderBottom: index < session.panes.length - 1 ? "1px solid #0f172a" : "none",
-              }}
-            >
-              <Dot status={pane.status} size={6} />
-              <span style={{ fontSize: 12, color: "#94a3b8", flex: 1 }}>{pane.name}</span>
-              <span style={{ fontSize: 10, color: "#475569" }}>{pane.lastActivity}</span>
-            </div>
-          ))}
-        </div>
-
-        {session.prs.length > 0 && (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.1em", marginBottom: 8 }}>
-              OPEN PRS
-            </div>
-            {session.prs.map((pr, index) => (
-              <a
-                key={`${pr.url || "pr"}-${index}`}
-                href={pr.url || "#"}
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "5px 0",
-                  textDecoration: "none",
-                  borderBottom: index < session.prs.length - 1 ? "1px solid #0f172a" : "none",
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 10,
-                    color: pc,
-                    background: `${pc}18`,
-                    borderRadius: 3,
-                    padding: "2px 6px",
-                    flexShrink: 0,
-                  }}
-                >
-                  #{pr.num || "?"}
-                </span>
-                <span style={{ fontSize: 11, color: "#94a3b8", flex: 1 }}>
-                  {pr.title || "Untitled PR"}
-                </span>
-                <span style={{ fontSize: 11, color: "#334155" }}>↗</span>
-              </a>
-            ))}
-          </div>
-        )}
-
-        {ciEntries.length > 0 && (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.1em", marginBottom: 8 }}>
-              CI RUN STATUS
-            </div>
-            {ciRuns.length === 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {ciEntries.map((entry, index) => (
-                  <div
-                    key={`${entry.provider}-${index}`}
-                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 9,
-                        color: entry.provider === "github" ? "#60a5fa" : "#38bdf8",
-                        background: entry.provider === "github" ? "#172554" : "#082f49",
-                        borderRadius: 3,
-                        padding: "1px 5px",
-                        flexShrink: 0,
-                        textTransform: "uppercase",
-                      }}
-                    >
-                      {entry.provider}
-                    </span>
-                    <span style={{ fontSize: 10, color: "#64748b" }}>{entry.status}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            {ciRuns.slice(0, 8).map((run, index) => (
-              <div
-                key={`${run.provider}-${run.title}-${index}`}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "5px 0",
-                  borderBottom: index < Math.min(ciRuns.length, 8) - 1 ? "1px solid #0f172a" : "none",
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 9,
-                    color: run.provider === "github" ? "#60a5fa" : "#38bdf8",
-                    background: run.provider === "github" ? "#172554" : "#082f49",
-                    borderRadius: 3,
-                    padding: "1px 5px",
-                    flexShrink: 0,
-                    textTransform: "uppercase",
-                  }}
-                >
-                  {run.provider}
-                </span>
-                <span style={{ fontSize: 11, color: "#94a3b8", flex: 1 }}>
-                  {run.title}
-                </span>
-                <span style={{ fontSize: 10, color: "#64748b" }}>
-                  {run.conclusion || run.status}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {feedback && (
-          <div
-            style={{
-              fontSize: 11,
-              marginBottom: 14,
-              color: feedback.ok ? "#34d399" : "#f87171",
-            }}
-          >
-            {feedback.message}
-          </div>
-        )}
-
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={handleJump}
-            disabled={submitting}
-            style={{
-              flex: 1,
-              padding: "10px 0",
-              background: pc,
-              border: "none",
-              borderRadius: 6,
-              color: "#fff",
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: submitting ? "default" : "pointer",
-              fontFamily: "inherit",
-              letterSpacing: "0.05em",
-              opacity: submitting ? 0.7 : 1,
-            }}
-          >
-            {submitting ? "Launching..." : "Open in iTerm2 ->"}
-          </button>
-          <button
-            style={{
-              padding: "10px 16px",
-              background: "transparent",
-              border: "1px solid #1e2535",
-              borderRadius: 6,
-              color: "#475569",
-              fontSize: 12,
-              cursor: "pointer",
-              fontFamily: "inherit",
-            }}
-            onClick={onClose}
-          >
-            esc
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GridCard({ session, onJump }) {
+function GridCard({ session, busy, onJump, onStartStop, onEdit }) {
   const pc = PROJECT_COLORS[session.project] || "#6b7280";
   const activePanes = session.panes.filter((pane) => pane.status === "active").length;
+
   return (
     <div
       onClick={() => onJump(session)}
@@ -820,34 +460,43 @@ function GridCard({ session, onJump }) {
         </div>
       </div>
 
-      <div style={{ padding: "6px 12px 10px" }}>
+      <div style={{ padding: "6px 12px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
         {session.panes.slice(0, 4).map((pane, index) => (
-          <div key={`${pane.name}-${index}`} style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 0" }}>
+          <div
+            key={`${pane.name}-${index}`}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 0" }}
+          >
             <Dot status={pane.status} size={5} />
             <span style={{ fontSize: 10, color: "#94a3b8", flex: 1 }}>{pane.name}</span>
-            <span style={{ fontSize: 9, color: "#334155" }}>{pane.lastActivity}</span>
+            <span style={{ fontSize: 9, color: "#64748b", textTransform: "uppercase" }}>
+              {pane.status}
+            </span>
           </div>
         ))}
 
-        <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
-            <AtmBadge atm={session.atm} />
-            <CiBadges session={session} />
-          </div>
+        <CiSummary session={session} />
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 9, color: "#475569" }}>{hostBadge(session.host)}</span>
+          <SessionActionButtons
+            session={session}
+            busy={busy}
+            onStartStop={onStartStop}
+            onEdit={onEdit}
+          />
         </div>
       </div>
     </div>
   );
 }
 
-function ListView({ sessions, onJump }) {
+function ListView({ sessions, busyBySession, onJump, onStartStop, onEdit }) {
   return (
     <div style={{ padding: "0 24px 24px", overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 780 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 960 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid #131820" }}>
-            {["", "Session", "Project", "Host", "Status", "Activity", "Panes", "Active", "Open PRs", "Last Activity"].map(
+            {["", "Session", "Project", "Host", "Status", "Pane States", "Open PRs", "Actions"].map(
               (header) => (
                 <th
                   key={header}
@@ -869,7 +518,6 @@ function ListView({ sessions, onJump }) {
         <tbody>
           {sessions.map((session, index) => {
             const pc = PROJECT_COLORS[session.project] || "#6b7280";
-            const activePanes = session.panes.filter((pane) => pane.status === "active").length;
             return (
               <tr
                 key={`${session.name}-${index}`}
@@ -894,26 +542,39 @@ function ListView({ sessions, onJump }) {
                 <td style={{ padding: "7px 12px", color: pc, fontSize: 11 }}>{session.project || "unassigned"}</td>
                 <td style={{ padding: "7px 12px", color: "#94a3b8", fontSize: 11 }}>{hostLabel(session.host)}</td>
                 <td style={{ padding: "7px 12px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <Dot status={session.status} size={6} />
                     <span style={{ color: "#64748b", fontSize: 11 }}>{session.status}</span>
+                  </span>
+                </td>
+                <td style={{ padding: "7px 12px", color: "#94a3b8", fontSize: 10 }}>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {session.panes.slice(0, 4).map((pane, paneIndex) => (
+                      <span
+                        key={`${pane.name}-${paneIndex}`}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          border: "1px solid #1e2535",
+                          borderRadius: 3,
+                          padding: "1px 5px",
+                        }}
+                      >
+                        <Dot status={pane.status} size={5} />
+                        {pane.name}:{pane.status}
+                      </span>
+                    ))}
                   </div>
                 </td>
-                <td style={{ padding: "7px 12px", color: "#94a3b8", fontSize: 11 }}>
-                  {session.atm ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                      <Dot status={session.atm.state} size={6} />
-                      {session.atm.state}
-                    </span>
-                  ) : (
-                    ""
-                  )}
-                </td>
-                <td style={{ padding: "7px 12px", color: "#334155" }}>{session.panes.length}</td>
-                <td style={{ padding: "7px 12px", color: activePanes > 0 ? "#10b981" : "#1e2535" }}>{activePanes}</td>
                 <td style={{ padding: "7px 12px", color: "#60a5fa" }}>{session.openPrCount || "-"}</td>
-                <td style={{ padding: "7px 12px", color: "#475569", fontSize: 11 }}>
-                  {session.panes[0]?.lastActivity || relativeTime(session.polled_at)}
+                <td style={{ padding: "7px 12px" }}>
+                  <SessionActionButtons
+                    session={session}
+                    busy={Boolean(busyBySession[session.name])}
+                    onStartStop={onStartStop}
+                    onEdit={onEdit}
+                  />
                 </td>
               </tr>
             );
@@ -924,7 +585,7 @@ function ListView({ sessions, onJump }) {
   );
 }
 
-function GroupedView({ sessions, onJump }) {
+function GroupedView({ sessions, busyBySession, onJump, onStartStop, onEdit }) {
   const byProject = useMemo(() => {
     const grouped = new Map();
     sessions.forEach((session) => {
@@ -999,12 +660,19 @@ function GroupedView({ sessions, onJump }) {
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                      gap: 8,
+                      gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
+                      gap: 10,
                     }}
                   >
                     {hostSessions.map((session, index) => (
-                      <GridCard key={`${session.name}-${index}`} session={session} onJump={onJump} />
+                      <GridCard
+                        key={`${session.name}-${index}`}
+                        session={session}
+                        busy={Boolean(busyBySession[session.name])}
+                        onJump={onJump}
+                        onStartStop={onStartStop}
+                        onEdit={onEdit}
+                      />
                     ))}
                   </div>
                 </div>
@@ -1017,6 +685,573 @@ function GroupedView({ sessions, onJump }) {
   );
 }
 
+function DiscoveryView({ rows }) {
+  return (
+    <div style={{ padding: "16px 24px 24px" }}>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
+        Raw tmux discovery (informational only; no definition writes)
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 800 }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid #131820" }}>
+              {["Session", "Pane", "State", "Command", "Last Activity"].map((header) => (
+                <th
+                  key={header}
+                  style={{
+                    textAlign: "left",
+                    fontSize: 10,
+                    color: "#334155",
+                    letterSpacing: "0.1em",
+                    padding: "7px 10px",
+                  }}
+                >
+                  {header}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} style={{ padding: "16px 10px", color: "#64748b", fontSize: 11 }}>
+                  No discovered tmux sessions.
+                </td>
+              </tr>
+            )}
+            {rows.map((row, rowIndex) =>
+              row.panes.length ? (
+                row.panes.map((pane, paneIndex) => (
+                  <tr key={`${row.name}-${pane.name}-${paneIndex}`} style={{ borderBottom: "1px solid #0a0e14" }}>
+                    <td style={{ padding: "7px 10px", color: "#cbd5e1", fontSize: 11 }}>
+                      {paneIndex === 0 ? row.name : ""}
+                    </td>
+                    <td style={{ padding: "7px 10px", color: "#94a3b8", fontSize: 11 }}>{pane.name}</td>
+                    <td style={{ padding: "7px 10px", color: "#94a3b8", fontSize: 11 }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <Dot status={pane.status} size={6} />
+                        {pane.status}
+                      </span>
+                    </td>
+                    <td style={{ padding: "7px 10px", color: "#475569", fontSize: 11 }}>{pane.currentCommand || "-"}</td>
+                    <td style={{ padding: "7px 10px", color: "#475569", fontSize: 11 }}>{pane.lastActivity}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr key={`${row.name}-${rowIndex}`} style={{ borderBottom: "1px solid #0a0e14" }}>
+                  <td style={{ padding: "7px 10px", color: "#cbd5e1", fontSize: 11 }}>{row.name}</td>
+                  <td style={{ padding: "7px 10px", color: "#64748b", fontSize: 11 }} colSpan={4}>
+                    no panes reported
+                  </td>
+                </tr>
+              ),
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function JumpModal({ baseUrl, defaultTerminal, session, onClose }) {
+  const [submitting, setSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+
+  useEffect(() => {
+    if (!session) {
+      return undefined;
+    }
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [session, onClose]);
+
+  useEffect(() => {
+    setFeedback(null);
+    setSubmitting(false);
+  }, [session]);
+
+  if (!session) {
+    return null;
+  }
+
+  const pc = PROJECT_COLORS[session.project] || "#3b82f6";
+  const cmd = buildJumpCommand(session, session.host);
+
+  const handleJump = async () => {
+    setSubmitting(true);
+    try {
+      const response = await fetch(`${baseUrl}/sessions/${encodeURIComponent(session.name)}/jump`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          terminal: defaultTerminal,
+          host_id: session.host_id,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        setFeedback({ ok: false, message: body.message || `HTTP ${response.status}` });
+      } else {
+        setFeedback({ ok: body.ok, message: body.message || "No message" });
+      }
+    } catch (error) {
+      setFeedback({ ok: false, message: String(error) });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.8)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 200,
+        backdropFilter: "blur(6px)",
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#0d1117",
+          border: `1px solid ${pc}50`,
+          borderRadius: 12,
+          padding: 24,
+          minWidth: 360,
+          maxWidth: 680,
+          width: "92vw",
+          fontFamily: "inherit",
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.12em", marginBottom: 6 }}>
+          JUMP TO SESSION
+        </div>
+        <div style={{ fontSize: 20, color: "#f1f5f9", fontWeight: 700, marginBottom: 3 }}>{session.name}</div>
+        <div style={{ fontSize: 11, color: pc, marginBottom: 6 }}>
+          {session.project || "unassigned"} on {hostLabel(session.host)}
+        </div>
+
+        <div
+          style={{
+            background: "#060810",
+            borderRadius: 6,
+            padding: "10px 14px",
+            marginBottom: 18,
+            fontSize: 11,
+            color: "#94a3b8",
+            overflowX: "auto",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <span style={{ color: "#334155" }}>$ </span>
+          {cmd}
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.1em", marginBottom: 8 }}>PANES</div>
+          {session.panes.length === 0 && <div style={{ fontSize: 11, color: "#475569" }}>No panes reported.</div>}
+          {session.panes.map((pane, index) => (
+            <div
+              key={`${pane.name}-${index}`}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "auto 1fr auto",
+                alignItems: "center",
+                gap: 8,
+                padding: "4px 0",
+                borderBottom: index < session.panes.length - 1 ? "1px solid #0f172a" : "none",
+              }}
+            >
+              <Dot status={pane.status} size={6} />
+              <span style={{ fontSize: 12, color: "#94a3b8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {pane.name} ({pane.currentCommand || "-"})
+              </span>
+              <span style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase" }}>{pane.status}</span>
+            </div>
+          ))}
+        </div>
+
+        {feedback && (
+          <div style={{ fontSize: 11, marginBottom: 14, color: feedback.ok ? "#34d399" : "#f87171" }}>
+            {feedback.message}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={handleJump}
+            disabled={submitting}
+            style={{
+              flex: 1,
+              padding: "10px 0",
+              background: pc,
+              border: "none",
+              borderRadius: 6,
+              color: "#fff",
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: submitting ? "default" : "pointer",
+              fontFamily: "inherit",
+              letterSpacing: "0.05em",
+              opacity: submitting ? 0.7 : 1,
+            }}
+          >
+            {submitting ? "Launching..." : "Open in iTerm2 ->"}
+          </button>
+          <button
+            style={{
+              padding: "10px 16px",
+              background: "transparent",
+              border: "1px solid #1e2535",
+              borderRadius: 6,
+              color: "#475569",
+              fontSize: 12,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+            onClick={onClose}
+          >
+            esc
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function defaultConfigFor(name) {
+  return {
+    session_name: name || "new-session",
+    panes: [
+      {
+        name: "agent",
+        command: "sleep 1",
+        atm_agent: "agent",
+        atm_team: "scmux-dev",
+      },
+    ],
+  };
+}
+
+function ProjectEditorModal({ baseUrl, defaultHostId, target, onClose, onSaved }) {
+  const isEdit = target?.mode === "edit";
+  const [loading, setLoading] = useState(Boolean(isEdit));
+  const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [name, setName] = useState(target?.session?.name || "");
+  const [project, setProject] = useState(target?.session?.project || "");
+  const [autoStart, setAutoStart] = useState(Boolean(target?.session?.auto_start));
+  const [cronSchedule, setCronSchedule] = useState(target?.session?.cron_schedule || "");
+  const [githubRepo, setGithubRepo] = useState(target?.session?.github_repo || "");
+  const [azureProject, setAzureProject] = useState(target?.session?.azure_project || "");
+  const [configText, setConfigText] = useState(
+    JSON.stringify(defaultConfigFor(target?.session?.name || "new-session"), null, 2),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadEditDetail() {
+      if (!isEdit || !target?.session?.name) {
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      try {
+        const response = await fetch(`${baseUrl}/sessions/${encodeURIComponent(target.session.name)}`);
+        const body = await response.json();
+        if (!response.ok) {
+          throw new Error(body.message || `HTTP ${response.status}`);
+        }
+        if (cancelled) {
+          return;
+        }
+        setName(body.name || target.session.name);
+        setProject(body.project || "");
+        setAutoStart(Boolean(body.auto_start));
+        setCronSchedule(body.cron_schedule || "");
+        setGithubRepo(body.github_repo || "");
+        setAzureProject(body.azure_project || "");
+        setConfigText(JSON.stringify(body.config_json || defaultConfigFor(target.session.name), null, 2));
+      } catch (error) {
+        if (!cancelled) {
+          setErrorMessage(`Failed to load session detail: ${String(error)}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadEditDetail();
+    return () => {
+      cancelled = true;
+    };
+  }, [isEdit, target, baseUrl]);
+
+  if (!target) {
+    return null;
+  }
+
+  const submit = async () => {
+    setSaving(true);
+    setErrorMessage(null);
+
+    let configJson;
+    try {
+      configJson = JSON.parse(configText);
+    } catch {
+      setSaving(false);
+      setErrorMessage("config_json must be valid JSON");
+      return;
+    }
+
+    try {
+      if (isEdit) {
+        const response = await fetch(`${baseUrl}/sessions/${encodeURIComponent(name)}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            project: project.trim() === "" ? null : project.trim(),
+            config_json: configJson,
+            cron_schedule: cronSchedule.trim() === "" ? null : cronSchedule.trim(),
+            auto_start: autoStart,
+            github_repo: githubRepo.trim() === "" ? null : githubRepo.trim(),
+            azure_project: azureProject.trim() === "" ? null : azureProject.trim(),
+          }),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          throw new Error(body.message || `HTTP ${response.status}`);
+        }
+      } else {
+        const response = await fetch(`${baseUrl}/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: name.trim(),
+            project: project.trim() === "" ? null : project.trim(),
+            host_id: defaultHostId,
+            config_json: configJson,
+            cron_schedule: cronSchedule.trim() === "" ? null : cronSchedule.trim(),
+            auto_start: autoStart,
+            github_repo: githubRepo.trim() === "" ? null : githubRepo.trim(),
+            azure_project: azureProject.trim() === "" ? null : azureProject.trim(),
+          }),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          throw new Error(body.message || `HTTP ${response.status}`);
+        }
+      }
+
+      onSaved(isEdit ? `Updated ${name}` : `Created ${name}`);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.75)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 220,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          width: "min(860px, 95vw)",
+          maxHeight: "90vh",
+          overflowY: "auto",
+          background: "#0d1117",
+          border: "1px solid #1e2535",
+          borderRadius: 10,
+          padding: 18,
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 12 }}>
+          {isEdit ? "Project Editor" : "New Project"}
+        </div>
+
+        {loading ? (
+          <div style={{ color: "#64748b", fontSize: 12, padding: "12px 0" }}>Loading project definition...</div>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            <label style={{ display: "grid", gap: 5 }}>
+              <span style={{ fontSize: 10, color: "#475569" }}>Session Name</span>
+              <input
+                value={name}
+                disabled={isEdit}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setName(value);
+                  if (!isEdit) {
+                    try {
+                      const parsed = JSON.parse(configText);
+                      parsed.session_name = value;
+                      setConfigText(JSON.stringify(parsed, null, 2));
+                    } catch {
+                      setConfigText(JSON.stringify(defaultConfigFor(value), null, 2));
+                    }
+                  }
+                }}
+                style={{
+                  background: "#0a0e14",
+                  border: "1px solid #1e2535",
+                  borderRadius: 5,
+                  color: "#cbd5e1",
+                  padding: "7px 10px",
+                }}
+              />
+            </label>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <label style={{ display: "grid", gap: 5 }}>
+                <span style={{ fontSize: 10, color: "#475569" }}>Project</span>
+                <input
+                  value={project}
+                  onChange={(event) => setProject(event.target.value)}
+                  style={{
+                    background: "#0a0e14",
+                    border: "1px solid #1e2535",
+                    borderRadius: 5,
+                    color: "#cbd5e1",
+                    padding: "7px 10px",
+                  }}
+                />
+              </label>
+              <label style={{ display: "grid", gap: 5 }}>
+                <span style={{ fontSize: 10, color: "#475569" }}>Cron Schedule</span>
+                <input
+                  value={cronSchedule}
+                  onChange={(event) => setCronSchedule(event.target.value)}
+                  placeholder="optional"
+                  style={{
+                    background: "#0a0e14",
+                    border: "1px solid #1e2535",
+                    borderRadius: 5,
+                    color: "#cbd5e1",
+                    padding: "7px 10px",
+                  }}
+                />
+              </label>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <label style={{ display: "grid", gap: 5 }}>
+                <span style={{ fontSize: 10, color: "#475569" }}>GitHub Repo</span>
+                <input
+                  value={githubRepo}
+                  onChange={(event) => setGithubRepo(event.target.value)}
+                  placeholder="owner/repo"
+                  style={{
+                    background: "#0a0e14",
+                    border: "1px solid #1e2535",
+                    borderRadius: 5,
+                    color: "#cbd5e1",
+                    padding: "7px 10px",
+                  }}
+                />
+              </label>
+              <label style={{ display: "grid", gap: 5 }}>
+                <span style={{ fontSize: 10, color: "#475569" }}>Azure Project</span>
+                <input
+                  value={azureProject}
+                  onChange={(event) => setAzureProject(event.target.value)}
+                  style={{
+                    background: "#0a0e14",
+                    border: "1px solid #1e2535",
+                    borderRadius: 5,
+                    color: "#cbd5e1",
+                    padding: "7px 10px",
+                  }}
+                />
+              </label>
+            </div>
+
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 11, color: "#94a3b8" }}>
+              <input type="checkbox" checked={autoStart} onChange={(event) => setAutoStart(event.target.checked)} />
+              auto_start
+            </label>
+
+            <label style={{ display: "grid", gap: 5 }}>
+              <span style={{ fontSize: 10, color: "#475569" }}>config_json</span>
+              <textarea
+                value={configText}
+                onChange={(event) => setConfigText(event.target.value)}
+                rows={12}
+                style={{
+                  background: "#060810",
+                  border: "1px solid #1e2535",
+                  borderRadius: 5,
+                  color: "#cbd5e1",
+                  padding: "8px 10px",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                }}
+              />
+            </label>
+
+            {errorMessage && <div style={{ color: "#f87171", fontSize: 11 }}>{errorMessage}</div>}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button
+                onClick={onClose}
+                style={{
+                  border: "1px solid #1e2535",
+                  background: "transparent",
+                  color: "#94a3b8",
+                  borderRadius: 5,
+                  padding: "7px 10px",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submit}
+                disabled={saving || !name.trim()}
+                style={{
+                  border: "none",
+                  background: "#2563eb",
+                  color: "#fff",
+                  borderRadius: 5,
+                  padding: "7px 10px",
+                  cursor: saving ? "default" : "pointer",
+                  opacity: saving ? 0.7 : 1,
+                }}
+              >
+                {saving ? "Saving..." : isEdit ? "Save Project" : "Create Project"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const baseUrl = useMemo(() => daemonBaseUrl(), []);
   const [view, setView] = useState("grouped");
@@ -1024,13 +1259,17 @@ export default function Dashboard() {
   const [projectFilter, setProjectFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [jumpTarget, setJumpTarget] = useState(null);
+  const [editorTarget, setEditorTarget] = useState(null);
   const [hosts, setHosts] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [discoveryRows, setDiscoveryRows] = useState([]);
   const [defaultTerminal, setDefaultTerminal] = useState("iterm2");
   const [pollIntervalMs, setPollIntervalMs] = useState(DEFAULT_POLL_MS);
   const [errorMessage, setErrorMessage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [busyBySession, setBusyBySession] = useState({});
+  const [actionMessage, setActionMessage] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1067,55 +1306,87 @@ export default function Dashboard() {
     };
   }, [baseUrl]);
 
+  const refresh = async () => {
+    const [sessionsResponse, hostsResponse, discoveryResponse] = await Promise.all([
+      fetch(`${baseUrl}/sessions`),
+      fetch(`${baseUrl}/hosts`),
+      fetch(`${baseUrl}/discovery`),
+    ]);
+
+    if (!sessionsResponse.ok) {
+      throw new Error(`/sessions HTTP ${sessionsResponse.status}`);
+    }
+    if (!hostsResponse.ok) {
+      throw new Error(`/hosts HTTP ${hostsResponse.status}`);
+    }
+    if (!discoveryResponse.ok) {
+      throw new Error(`/discovery HTTP ${discoveryResponse.status}`);
+    }
+
+    const [sessionsBody, hostsBody, discoveryBody] = await Promise.all([
+      sessionsResponse.json(),
+      hostsResponse.json(),
+      discoveryResponse.json(),
+    ]);
+
+    const hostRows = Array.isArray(hostsBody) ? hostsBody : [];
+    const normalizedSessions = normalizeSessions(sessionsBody, hostRows);
+
+    setHosts(hostRows);
+    setSessions(normalizedSessions);
+    setDiscoveryRows(normalizeDiscovery(discoveryBody));
+    setLastUpdated(new Date());
+    setErrorMessage(null);
+    setLoading(false);
+  };
+
   useEffect(() => {
     let cancelled = false;
 
-    async function refresh() {
+    async function run() {
       try {
-        const [sessionsResponse, hostsResponse] = await Promise.all([
-          fetch(`${baseUrl}/sessions`),
-          fetch(`${baseUrl}/hosts`),
-        ]);
-        if (!sessionsResponse.ok) {
-          throw new Error(`/sessions HTTP ${sessionsResponse.status}`);
-        }
-        if (!hostsResponse.ok) {
-          throw new Error(`/hosts HTTP ${hostsResponse.status}`);
-        }
-
-        const [sessionsBody, hostsBody] = await Promise.all([
-          sessionsResponse.json(),
-          hostsResponse.json(),
-        ]);
-        if (cancelled) {
-          return;
-        }
-
-        const hostRows = Array.isArray(hostsBody) ? hostsBody : [];
-        const normalizedSessions = normalizeSessions(sessionsBody, hostRows);
-
-        setHosts(hostRows);
-        setSessions(normalizedSessions);
-        setErrorMessage(null);
-        setLastUpdated(new Date());
+        await refresh();
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(`Refresh failed: ${String(error)}`);
-        }
-      } finally {
-        if (!cancelled) {
           setLoading(false);
         }
       }
     }
 
-    refresh();
-    const timer = window.setInterval(refresh, pollIntervalMs);
+    run();
+    const timer = window.setInterval(run, pollIntervalMs);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
   }, [baseUrl, pollIntervalMs]);
+
+  const runStartStop = async (session) => {
+    const action = session.status === "stopped" ? "start" : "stop";
+    setBusyBySession((prev) => ({ ...prev, [session.name]: true }));
+    setActionMessage(null);
+
+    try {
+      const response = await fetch(`${baseUrl}/sessions/${encodeURIComponent(session.name)}/${action}`, {
+        method: "POST",
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.message || `HTTP ${response.status}`);
+      }
+      setActionMessage(body.message || `${action} ${session.name}`);
+      await refresh();
+    } catch (error) {
+      setErrorMessage(`${action} failed for ${session.name}: ${String(error)}`);
+    } finally {
+      setBusyBySession((prev) => {
+        const next = { ...prev };
+        delete next[session.name];
+        return next;
+      });
+    }
+  };
 
   const projects = useMemo(
     () => [...new Set(sessions.map((session) => session.project).filter(Boolean))],
@@ -1145,6 +1416,7 @@ export default function Dashboard() {
     .flatMap((session) => session.panes)
     .filter((pane) => pane.status === "active").length;
   const openPrs = sessions.reduce((sum, session) => sum + session.openPrCount, 0);
+  const defaultHostId = hosts.find((host) => host.is_local)?.id || sessions[0]?.host_id || 1;
 
   return (
     <div
@@ -1158,7 +1430,7 @@ export default function Dashboard() {
       <style>{`
         @keyframes ping { 75%, 100% { transform: scale(2.2); opacity: 0; } }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        input::placeholder { color: #1a2030; }
+        input::placeholder, textarea::placeholder { color: #1a2030; }
         button { font-family: inherit; }
       `}</style>
 
@@ -1206,6 +1478,21 @@ export default function Dashboard() {
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button
+            onClick={() => setEditorTarget({ mode: "create" })}
+            style={{
+              border: "1px solid #1e2535",
+              borderRadius: 5,
+              background: "#102b1f",
+              color: "#34d399",
+              padding: "5px 10px",
+              fontSize: 10,
+              cursor: "pointer",
+              letterSpacing: "0.05em",
+            }}
+          >
+            + New Project
+          </button>
           <span style={{ fontSize: 10, color: "#475569" }}>poll {pollIntervalMs}ms</span>
           {lastUpdated && (
             <span style={{ fontSize: 10, color: "#475569" }}>updated {relativeTime(lastUpdated.toISOString())}</span>
@@ -1235,9 +1522,10 @@ export default function Dashboard() {
             }}
           >
             {[
+              ["grouped", "Project"],
               ["grid", "Grid"],
               ["list", "List"],
-              ["grouped", "Project"],
+              ["discovery", "Discovery"],
             ].map(([value, label]) => (
               <button
                 key={value}
@@ -1260,83 +1548,75 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div
-        style={{
-          padding: "8px 24px",
-          borderBottom: "1px solid #0a0e14",
-          display: "flex",
-          gap: 5,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
-        {["all", "running", "idle", "stopped"].map((filterValue) => (
-          <button
-            key={filterValue}
-            onClick={() => setStatusFilter(filterValue)}
-            style={{
-              padding: "3px 8px",
-              borderRadius: 4,
-              fontSize: 10,
-              cursor: "pointer",
-              background: statusFilter === filterValue ? "#131820" : "transparent",
-              border:
-                statusFilter === filterValue
-                  ? "1px solid #1e2535"
-                  : "1px solid transparent",
-              color: statusFilter === filterValue ? "#94a3b8" : "#1e2535",
-              letterSpacing: "0.04em",
-            }}
-          >
-            {filterValue}
-          </button>
-        ))}
-        <div style={{ width: 1, height: 12, background: "#131820", margin: "0 4px" }} />
-        <button
-          onClick={() => setProjectFilter("all")}
+      {view !== "discovery" && (
+        <div
           style={{
-            padding: "3px 8px",
-            borderRadius: 4,
-            fontSize: 10,
-            cursor: "pointer",
-            background: projectFilter === "all" ? "#131820" : "transparent",
-            border:
-              projectFilter === "all"
-                ? "1px solid #1e2535"
-                : "1px solid transparent",
-            color: projectFilter === "all" ? "#94a3b8" : "#1e2535",
+            padding: "8px 24px",
+            borderBottom: "1px solid #0a0e14",
+            display: "flex",
+            gap: 5,
+            flexWrap: "wrap",
+            alignItems: "center",
           }}
         >
-          all projects
-        </button>
-        {projects.map((project) => {
-          const pc = PROJECT_COLORS[project] || "#6b7280";
-          return (
+          {["all", "running", "idle", "stopped"].map((filterValue) => (
             <button
-              key={project}
-              onClick={() => setProjectFilter(project)}
+              key={filterValue}
+              onClick={() => setStatusFilter(filterValue)}
               style={{
                 padding: "3px 8px",
                 borderRadius: 4,
                 fontSize: 10,
                 cursor: "pointer",
-                background: projectFilter === project ? `${pc}15` : "transparent",
-                border:
-                  projectFilter === project
-                    ? `1px solid ${pc}40`
-                    : "1px solid transparent",
-                color: projectFilter === project ? pc : "#1e2535",
+                background: statusFilter === filterValue ? "#131820" : "transparent",
+                border: statusFilter === filterValue ? "1px solid #1e2535" : "1px solid transparent",
+                color: statusFilter === filterValue ? "#94a3b8" : "#1e2535",
+                letterSpacing: "0.04em",
               }}
             >
-              {project}
+              {filterValue}
             </button>
-          );
-        })}
-      </div>
-
-      {errorMessage && (
-        <div style={{ padding: "10px 24px", color: "#f87171", fontSize: 12 }}>{errorMessage}</div>
+          ))}
+          <div style={{ width: 1, height: 12, background: "#131820", margin: "0 4px" }} />
+          <button
+            onClick={() => setProjectFilter("all")}
+            style={{
+              padding: "3px 8px",
+              borderRadius: 4,
+              fontSize: 10,
+              cursor: "pointer",
+              background: projectFilter === "all" ? "#131820" : "transparent",
+              border: projectFilter === "all" ? "1px solid #1e2535" : "1px solid transparent",
+              color: projectFilter === "all" ? "#94a3b8" : "#1e2535",
+            }}
+          >
+            all projects
+          </button>
+          {projects.map((project) => {
+            const pc = PROJECT_COLORS[project] || "#6b7280";
+            return (
+              <button
+                key={project}
+                onClick={() => setProjectFilter(project)}
+                style={{
+                  padding: "3px 8px",
+                  borderRadius: 4,
+                  fontSize: 10,
+                  cursor: "pointer",
+                  background: projectFilter === project ? `${pc}15` : "transparent",
+                  border: projectFilter === project ? `1px solid ${pc}40` : "1px solid transparent",
+                  color: projectFilter === project ? pc : "#1e2535",
+                }}
+              >
+                {project}
+              </button>
+            );
+          })}
+        </div>
       )}
+
+      {errorMessage && <div style={{ padding: "10px 24px", color: "#f87171", fontSize: 12 }}>{errorMessage}</div>}
+      {actionMessage && <div style={{ padding: "10px 24px", color: "#34d399", fontSize: 12 }}>{actionMessage}</div>}
 
       {loading ? (
         <div style={{ padding: "30px 24px", color: "#64748b", fontSize: 12 }}>Loading dashboard data...</div>
@@ -1347,17 +1627,41 @@ export default function Dashboard() {
               style={{
                 padding: "0 24px 24px",
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
                 gap: 10,
               }}
             >
               {filtered.map((session, index) => (
-                <GridCard key={`${session.name}-${index}`} session={session} onJump={setJumpTarget} />
+                <GridCard
+                  key={`${session.name}-${index}`}
+                  session={session}
+                  busy={Boolean(busyBySession[session.name])}
+                  onJump={setJumpTarget}
+                  onStartStop={runStartStop}
+                  onEdit={(item) => setEditorTarget({ mode: "edit", session: item })}
+                />
               ))}
             </div>
           )}
-          {view === "list" && <ListView sessions={filtered} onJump={setJumpTarget} />}
-          {view === "grouped" && <GroupedView sessions={filtered} onJump={setJumpTarget} />}
+          {view === "list" && (
+            <ListView
+              sessions={filtered}
+              busyBySession={busyBySession}
+              onJump={setJumpTarget}
+              onStartStop={runStartStop}
+              onEdit={(item) => setEditorTarget({ mode: "edit", session: item })}
+            />
+          )}
+          {view === "grouped" && (
+            <GroupedView
+              sessions={filtered}
+              busyBySession={busyBySession}
+              onJump={setJumpTarget}
+              onStartStop={runStartStop}
+              onEdit={(item) => setEditorTarget({ mode: "edit", session: item })}
+            />
+          )}
+          {view === "discovery" && <DiscoveryView rows={discoveryRows} />}
         </div>
       )}
 
@@ -1366,6 +1670,18 @@ export default function Dashboard() {
         defaultTerminal={defaultTerminal}
         session={jumpTarget}
         onClose={() => setJumpTarget(null)}
+      />
+
+      <ProjectEditorModal
+        baseUrl={baseUrl}
+        defaultHostId={defaultHostId}
+        target={editorTarget}
+        onClose={() => setEditorTarget(null)}
+        onSaved={async (message) => {
+          setEditorTarget(null);
+          setActionMessage(message);
+          await refresh();
+        }}
       />
 
       {hosts.length === 0 && !loading && (
