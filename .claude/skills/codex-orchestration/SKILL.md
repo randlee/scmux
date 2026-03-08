@@ -98,29 +98,32 @@ When complete: commit, push, create PR targeting integrate/phase-{P}, then notif
 ### Steady-State Flow
 
 ```
-Timeline:
-  arch-ctm:     [── S.1 ──]──fixes──[── S.2 ──]──fixes──[── S.3 ──]
-  quality-mgr:         [── QA S.1 ──]      [── QA S.2 ──]     [── QA S.3 ──]
-  team-lead:    assign S.1 → track → assign S.2 → track → assign S.3 → track
+arch-cmux:    implement → commit/push → notify → cargo test → idle (next task already in inbox)
+team-lead:                             ↓ on push notification (NOT after cargo test):
+                              create PR + next worktree + send S+1 assignment
+quality-mgr:                           [── QA S ──────────────────────]
 ```
 
-### When arch-ctm Completes Sprint S
+**Key principle: team-lead acts on push, not on test completion.** By the time arch-cmux finishes cargo test, the next assignment must already be in his inbox and the next worktree ready.
 
-1. **arch-ctm sends completion message** via ATM CLI with PR number
-2. **Team-lead creates worktree for S+1** based on sprint S branch:
+### When arch-cmux Pushes Sprint S
+
+On receiving arch-cmux's push notification (commit hash + branch), do ALL of the following immediately in parallel — do NOT wait for cargo test results:
+
+1. **Open PR** for sprint S targeting `integrate/phase-{P}`:
+   ```bash
+   gh pr create --title "..." --base integrate/phase-{P} --head feature/p{P}-s{N}-{slug}
+   ```
+2. **Create worktree for S+1** based on sprint S branch:
    ```
    /sc-git-worktree --create feature/p{P}-s{N+1}-{slug} feature/p{P}-s{N}-{slug}
    ```
    All worktrees chain: S+1 bases on S, so later sprints include earlier work.
-3. **Team-lead assigns QA to quality-mgr** via SendMessage:
-   ```
-   "Run QA on Sprint {P}.{S}. Worktree: {path}. Sprint deliverables: {summary}.
-    Design docs: {list}. PR: #{N}."
-   ```
-4. **Team-lead checks for outstanding findings** from earlier sprints:
-   - If findings exist for S-2 or S-1: send fix assignment to arch-ctm BEFORE S+1 assignment
-   - If no findings: send S+1 assignment immediately
-5. **arch-ctm addresses fixes first, then starts S+1**
+3. **Assign QA to quality-mgr** via SendMessage using rendered `qa-template.xml.j2`.
+4. **Check for outstanding findings** from earlier sprints:
+   - If findings exist for S-2 or S-1: send fix assignment to arch-cmux BEFORE S+1 assignment
+   - If no findings: send S+1 assignment immediately using rendered `dev-template.xml.j2`
+5. **arch-cmux addresses fixes first, then starts S+1**
 
 ### When arch-ctm Has Outstanding Findings
 
@@ -206,20 +209,9 @@ atm send arch-ctm "message"
 atm read
 ```
 
-### Nudging (if no reply in 2+ minutes)
-```bash
-# Find arch-ctm's pane
-tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_title} #{pane_current_command}'
-# Send nudge
-tmux send-keys -t <pane-id> -l "You have unread ATM messages. Run: atm read --team atm-dev" && sleep 0.5 && tmux send-keys -t <pane-id> Enter
-```
+### When arch-cmux goes idle
 
-### Advise arch-ctm to poll with timeout
-When arch-ctm is waiting for assignments, tell him:
-```
-"Standing by? Use: atm read --team atm-dev --timeout 60"
-```
-This keeps him responsive without busy-polling.
+Do NOT nudge via tmux send-keys — this interrupts active work. Instead, ensure the next task is already in his ATM inbox before he finishes the current sprint. If the inbox is populated and he goes idle, ATM delivery will surface the message when he polls. No intervention needed.
 
 ## Phase Completion
 
