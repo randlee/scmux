@@ -63,6 +63,23 @@ pub struct SessionCiUpdate {
     pub next_poll_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionAtmUpdate {
+    pub session_name: String,
+    pub agent_id: String,
+    pub team: String,
+    pub state: String,
+    pub last_transition: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionAtmRow {
+    pub session_name: String,
+    pub state: String,
+    pub last_transition: Option<String>,
+}
+
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
@@ -368,6 +385,47 @@ pub fn upsert_session_ci(conn: &Connection, update: &SessionCiUpdate) -> anyhow:
     Ok(())
 }
 
+pub fn replace_session_atm(conn: &Connection, updates: &[SessionAtmUpdate]) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM session_atm", [])?;
+
+    for update in updates {
+        conn.execute(
+            "INSERT INTO session_atm (
+                session_name, agent_id, team, state, last_transition, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                update.session_name,
+                update.agent_id,
+                update.team,
+                update.state,
+                update.last_transition,
+                update.updated_at
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn list_session_atm(conn: &Connection) -> anyhow::Result<Vec<SessionAtmRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_name, state, last_transition
+         FROM session_atm
+         ORDER BY session_name",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(SessionAtmRow {
+                session_name: r.get(0)?,
+                state: r.get(1)?,
+                last_transition: r.get(2)?,
+            })
+        })?
+        .filter_map(|row| row.ok())
+        .collect::<Vec<_>>();
+    Ok(rows)
+}
+
 pub fn log_session_event(
     conn: &Connection,
     session_id: i64,
@@ -483,6 +541,17 @@ fn migrate(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_session_ci_session  ON session_ci (session_id);
         CREATE INDEX IF NOT EXISTS idx_session_ci_next_poll ON session_ci (next_poll_at);
+
+        CREATE TABLE IF NOT EXISTS session_atm (
+            session_name    TEXT PRIMARY KEY,
+            agent_id        TEXT,
+            team            TEXT,
+            state           TEXT NOT NULL DEFAULT 'unknown',
+            last_transition TEXT,
+            updated_at      TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_atm_session_name ON session_atm (session_name);
 
         CREATE INDEX IF NOT EXISTS idx_sessions_host    ON sessions (host_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions (project);

@@ -22,18 +22,16 @@ Published packages and where to find them:
 
 **Trigger**: Push a tag matching `v*` (e.g., `v0.2.0`).
 
-**Workflow**: `.github/workflows/release.yml` — runs three jobs in sequence:
+**Workflow**: `.github/workflows/release.yml` — runs two jobs in sequence:
 
 1. **`build`** — Compiles release binaries in parallel across 3 platform runners:
    - `x86_64-unknown-linux-gnu` on `ubuntu-latest` → `.tar.gz`
-   - `x86_64-apple-darwin` on `macos-latest` → `.tar.gz`
    - `aarch64-apple-darwin` on `macos-latest` → `.tar.gz`
+   - `x86_64-pc-windows-msvc` on `windows-latest` → `.zip`
    - Each archive contains both `scmux` and `scmux-daemon` binaries
    - Archives are uploaded as build artifacts
 
-2. **`release`** — Collects all build artifacts, generates `checksums.txt` (SHA256), and creates a GitHub Release with auto-generated release notes via `softprops/action-gh-release@v2`.
-
-3. **`publish-crates`** — Publishes both crates to crates.io in dependency order (see [crates.io section](#3-cratesio-automated) below). Uses the `crates-io` GitHub environment for deployment protection.
+2. **`release`** — Collects all build artifacts, generates `checksums.txt` (SHA256), creates a GitHub Release with auto-generated release notes via `softprops/action-gh-release@v2`, then publishes crates to crates.io in dependency order (see [crates.io section](#3-cratesio-automated) below).
 
 **How to trigger**:
 ```bash
@@ -41,20 +39,25 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-### 2. Homebrew Tap (Manual)
+### 2. Homebrew Tap (Automated)
 
 **Repository**: [`randlee/homebrew-tap`](https://github.com/randlee/homebrew-tap)
 **Formula**: `Formula/scmux.rb`
 
-**Update process after a new GitHub Release**:
+Homebrew updates are handled by the `update-homebrew` job in
+`.github/workflows/release.yml` after the `release` job completes.
 
-1. Wait for the GitHub Release workflow to complete
-2. Download `checksums.txt` from the release assets
-3. Update `Formula/scmux.rb` in the homebrew-tap repo:
-   - Update `version` to match the new release
-   - Update SHA256 hashes for each platform from `checksums.txt`
-   - Update download URLs to point to the new release tag
-4. Commit and push to `randlee/homebrew-tap`
+The job:
+1. Downloads `checksums.txt` from the new GitHub release
+2. Parses SHA256 values for:
+   - `aarch64-apple-darwin`
+   - `x86_64-unknown-linux-gnu`
+3. Checks out `randlee/homebrew-tap` using `HOMEBREW_TAP_TOKEN`
+4. Patches `Formula/scmux.rb` (version, URLs, sha256 values) and pushes
+
+Note: Homebrew formula coverage intentionally includes only `aarch64-apple-darwin`
+and `x86_64-unknown-linux-gnu`. Intel macOS (`x86_64-apple-darwin`) is not part of
+the current release artifact matrix.
 
 **Verification**:
 ```bash
@@ -76,19 +79,14 @@ brew install scmux
 **Setup** (one-time):
 1. Create a crates.io account at https://crates.io (login with GitHub)
 2. Generate an API token at https://crates.io/settings/tokens with publish scope
-3. Add the token as a GitHub repository secret named `CARGO_REGISTRY_TOKEN`:
+3. Add the token as a GitHub repository secret named `CRATES_IO_TOKEN`:
    - Go to https://github.com/randlee/scmux/settings/secrets/actions
    - Click "New repository secret"
-   - Name: `CARGO_REGISTRY_TOKEN`, Value: your crates.io token
-4. Create a GitHub environment named `crates-io`:
-   - Go to https://github.com/randlee/scmux/settings/environments
-   - Click "New environment", name it `crates-io`
-   - Optionally add protection rules (e.g., required reviewers)
+   - Name: `CRATES_IO_TOKEN`, Value: your crates.io token
 
 **What happens**:
-- The `publish-crates` job in `.github/workflows/release.yml` runs after the GitHub Release is created
-- Publishes `scmux-daemon` first, waits 60s for crates.io indexing, then publishes `scmux`
-- Uses the `crates-io` environment for deployment protection
+- The `release` job in `.github/workflows/release.yml` publishes crates immediately after the GitHub Release is created
+- Publishes `scmux-daemon` first, waits 60 seconds for crates.io indexing, then publishes `scmux`
 
 **Cargo.toml metadata**: All required fields (`description`, `license`, `repository`, `keywords`, `categories`) are present in workspace and crate configs.
 
@@ -125,17 +123,17 @@ cargo publish -p scmux
 2. **Monitor GitHub Actions**: Watch the Release workflow at https://github.com/randlee/scmux/actions
 
 3. **Verify the release**: Check https://github.com/randlee/scmux/releases for:
-   - 3 platform archives (linux x86_64, macOS x86_64, macOS arm64)
+   - 3 platform archives (linux x86_64, macOS arm64, windows x86_64)
    - `checksums.txt`
    - Auto-generated release notes
 
 ### After Release
 
-4. **Verify crates.io publish**: The `publish-crates` job runs automatically after the GitHub Release is created. Check the Actions tab for status. If it fails, use the manual fallback commands in the crates.io section above.
+4. **Verify crates.io publish**: The `release` job publishes crates automatically after the GitHub Release is created. Check the Actions tab for status. If it fails, use the manual fallback commands in the crates.io section above.
 
-5. **Update Homebrew tap**:
-   - Get SHA256s from `checksums.txt`
-   - Update `Formula/scmux.rb` in `randlee/homebrew-tap`
+5. **Verify Homebrew auto-update**:
+   - Confirm `update-homebrew` job passed in the release workflow
+   - Confirm `randlee/homebrew-tap/Formula/scmux.rb` was updated
 
 6. **Announce**: Update any relevant documentation or channels
 
@@ -159,13 +157,8 @@ Version numbers follow semantic versioning. Each minor version corresponds to a 
 
 | Secret | Description |
 |--------|-------------|
-| `CARGO_REGISTRY_TOKEN` | crates.io API token with publish scope |
-
-### GitHub Environments
-
-| Environment | Purpose |
-|-------------|---------|
-| `crates-io` | Gate for crates.io publish job; add required reviewers if desired |
+| `CRATES_IO_TOKEN` | crates.io API token with publish scope |
+| `HOMEBREW_TAP_TOKEN` | fine-grained PAT with write access to `randlee/homebrew-tap` |
 
 ### Homebrew Tap
 
@@ -180,10 +173,6 @@ class Scmux < Formula
   on_macos do
     on_arm do
       url "https://github.com/randlee/scmux/releases/download/v#{version}/scmux-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "<sha256-from-checksums.txt>"
-    end
-    on_intel do
-      url "https://github.com/randlee/scmux/releases/download/v#{version}/scmux-v#{version}-x86_64-apple-darwin.tar.gz"
       sha256 "<sha256-from-checksums.txt>"
     end
   end
