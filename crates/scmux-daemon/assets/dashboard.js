@@ -19,6 +19,18 @@ const STATUS_DOT = {
     color: "#f59e0b",
     pulse: false
   },
+  stuck: {
+    color: "#ef4444",
+    pulse: true
+  },
+  offline: {
+    color: "#64748b",
+    pulse: false
+  },
+  unknown: {
+    color: "#334155",
+    pulse: false
+  },
   blocked: {
     color: "#ef4444",
     pulse: true
@@ -172,6 +184,17 @@ function extractRuns(ciEntries) {
   });
   return rows;
 }
+function normalizeAtm(session) {
+  if (!session || typeof session.atm !== "object" || session.atm === null) {
+    return null;
+  }
+  const state = String(session.atm.state || "unknown").toLowerCase();
+  const normalizedState = ["active", "idle", "stuck", "offline", "unknown"].includes(state) ? state : "unknown";
+  return {
+    state: normalizedState,
+    lastTransition: session.atm.last_transition || session.atm.lastTransition || null
+  };
+}
 function normalizeSessions(sessionRows, hostRows) {
   const hostMap = new Map((Array.isArray(hostRows) ? hostRows : []).map(host => [host.id, host]));
   return (Array.isArray(sessionRows) ? sessionRows : []).map(row => {
@@ -186,6 +209,7 @@ function normalizeSessions(sessionRows, hostRows) {
       sessionStatus: status,
       project: row.project || "unassigned",
       panes: normalizePanes(row),
+      atm: normalizeAtm(row),
       ciEntries,
       ciRuns,
       prs,
@@ -247,6 +271,31 @@ function hostBadge(host) {
     return host.is_local ? "local" : "reachable";
   }
   return `last seen ${relativeTime(host.last_seen)}`;
+}
+function AtmBadge({
+  atm
+}) {
+  if (!atm) {
+    return null;
+  }
+  return /*#__PURE__*/React.createElement("span", {
+    title: atm.lastTransition ? `last transition ${atm.lastTransition}` : undefined,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      padding: "2px 6px",
+      borderRadius: 4,
+      border: "1px solid #1e2535",
+      fontSize: 9,
+      color: "#94a3b8",
+      textTransform: "uppercase",
+      letterSpacing: "0.04em"
+    }
+  }, /*#__PURE__*/React.createElement(Dot, {
+    status: atm.state,
+    size: 6
+  }), atm.state);
 }
 function CiBadges({
   session
@@ -797,9 +846,18 @@ function GridCard({
       gap: 8,
       alignItems: "center"
     }
-  }, /*#__PURE__*/React.createElement(CiBadges, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 4,
+      alignItems: "flex-start"
+    }
+  }, /*#__PURE__*/React.createElement(AtmBadge, {
+    atm: session.atm
+  }), /*#__PURE__*/React.createElement(CiBadges, {
     session: session
-  }), /*#__PURE__*/React.createElement("span", {
+  })), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 9,
       color: "#475569"
@@ -826,7 +884,7 @@ function ListView({
     style: {
       borderBottom: "1px solid #131820"
     }
-  }, ["", "Session", "Project", "Host", "Status", "Panes", "Active", "Open PRs", "Last Activity"].map(header => /*#__PURE__*/React.createElement("th", {
+  }, ["", "Session", "Project", "Host", "Status", "Activity", "Panes", "Active", "Open PRs", "Last Activity"].map(header => /*#__PURE__*/React.createElement("th", {
     key: header,
     style: {
       padding: "8px 12px",
@@ -902,6 +960,21 @@ function ListView({
         fontSize: 11
       }
     }, session.status))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: "7px 12px",
+        color: "#94a3b8",
+        fontSize: 11
+      }
+    }, session.atm ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5
+      }
+    }, /*#__PURE__*/React.createElement(Dot, {
+      status: session.atm.state,
+      size: 6
+    }), session.atm.state) : ""), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: "7px 12px",
         color: "#334155"
