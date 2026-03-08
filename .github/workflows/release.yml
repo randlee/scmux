@@ -136,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          gh release download "${GITHUB_REF_NAME}" --pattern checksums.txt --dir release
+          gh release download "${GITHUB_REF_NAME}" --pattern checksums.txt --dir release --repo randlee/scmux
 
       - name: Parse SHAs and version
         shell: bash
