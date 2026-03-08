@@ -1,14 +1,16 @@
 use axum::{
     extract::{Path, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
-    response::{Html, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -20,6 +22,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     let middleware_state = Arc::clone(&state);
     Router::new()
         .route("/", get(dashboard_index))
+        .route("/dashboard.js", get(dashboard_js))
+        .route("/react.min.js", get(react_js))
+        .route("/react-dom.min.js", get(react_dom_js))
         .route("/health", get(health))
         .route("/hosts", get(list_hosts))
         .route("/dashboard-config.json", get(get_dashboard_config))
@@ -36,7 +41,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-const DASHBOARD_HTML: &str = include_str!("../../../dashboard/index.html");
+const DASHBOARD_HTML: &[u8] = include_bytes!("../assets/index.html");
+const DASHBOARD_JS: &[u8] = include_bytes!("../assets/dashboard.js");
+const REACT_JS: &[u8] = include_bytes!("../assets/react.min.js");
+const REACT_DOM_JS: &[u8] = include_bytes!("../assets/react-dom.min.js");
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 
 #[derive(Serialize)]
@@ -60,6 +68,7 @@ struct SessionSummary {
     panes: serde_json::Value,
     polled_at: Option<String>,
     session_ci: Vec<SessionCiSummary>,
+    atm: Option<SessionAtmSummary>,
 }
 
 #[derive(Serialize, Clone)]
@@ -70,6 +79,12 @@ struct SessionCiSummary {
     tool_message: Option<String>,
     polled_at: Option<String>,
     next_poll_at: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct SessionAtmSummary {
+    state: String,
+    last_transition: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -143,8 +158,51 @@ struct DashboardConfigResponse {
     poll_interval_ms: u64,
 }
 
-async fn dashboard_index() -> Html<&'static str> {
-    Html(DASHBOARD_HTML)
+async fn serve_dashboard_asset(
+    path: &str,
+    embedded_bytes: &'static [u8],
+    content_type: &'static str,
+) -> Response {
+    if let Ok(dir) = std::env::var("SCMUX_DASHBOARD_DIR") {
+        let file_path = PathBuf::from(dir).join(path);
+        return match tokio::fs::read(file_path).await {
+            Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
+            Err(_) => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
+
+    ([(header::CONTENT_TYPE, content_type)], embedded_bytes).into_response()
+}
+
+async fn dashboard_index() -> Response {
+    serve_dashboard_asset("index.html", DASHBOARD_HTML, "text/html; charset=utf-8").await
+}
+
+async fn dashboard_js() -> Response {
+    serve_dashboard_asset(
+        "dashboard.js",
+        DASHBOARD_JS,
+        "application/javascript; charset=utf-8",
+    )
+    .await
+}
+
+async fn react_js() -> Response {
+    serve_dashboard_asset(
+        "react.min.js",
+        REACT_JS,
+        "application/javascript; charset=utf-8",
+    )
+    .await
+}
+
+async fn react_dom_js() -> Response {
+    serve_dashboard_asset(
+        "react-dom.min.js",
+        REACT_DOM_JS,
+        "application/javascript; charset=utf-8",
+    )
+    .await
 }
 
 async fn touch_last_api_access(
@@ -182,6 +240,11 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
     let sessions = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SessionSummary>> {
         let db = state.db.lock().unwrap();
         let ci_by_session = load_ci_by_session(&db)?;
+        let atm_by_session = if state.atm_available.load(Ordering::Relaxed) {
+            load_atm_by_session_name(&db)?
+        } else {
+            HashMap::new()
+        };
         let mut stmt = db.prepare(
             "SELECT s.id, s.name, s.project, s.host_id, s.cron_schedule, s.auto_start,
                     COALESCE(ss.status, 'stopped') as status,
@@ -196,9 +259,10 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
         let rows = stmt.query_map([], |r| {
             let panes_str: String = r.get(7)?;
             let id: i64 = r.get(0)?;
+            let name: String = r.get(1)?;
             Ok(SessionSummary {
                 id,
-                name: r.get(1)?,
+                name: name.clone(),
                 project: r.get(2)?,
                 host_id: r.get(3)?,
                 cron_schedule: r.get(4)?,
@@ -207,6 +271,7 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at: r.get(8)?,
                 session_ci: ci_by_session.get(&id).cloned().unwrap_or_default(),
+                atm: atm_by_session.get(&name).cloned(),
             })
         })?;
 
@@ -271,6 +336,11 @@ async fn get_session(
         ) = row;
         let session_ci =
             load_ci_for_session(&db, id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let atm = if state.atm_available.load(Ordering::Relaxed) {
+            load_atm_for_session(&db, &name).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            None
+        };
 
         let mut estmt = db
             .prepare(
@@ -306,6 +376,7 @@ async fn get_session(
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at,
                 session_ci,
+                atm,
             },
             config_json: serde_json::from_str(&config_str).unwrap_or(serde_json::json!({})),
             recent_events: events,
@@ -689,6 +760,31 @@ fn load_ci_for_session(
         .filter_map(|row| row.ok())
         .collect::<Vec<_>>();
     Ok(rows)
+}
+
+fn load_atm_by_session_name(
+    db: &rusqlite::Connection,
+) -> anyhow::Result<HashMap<String, SessionAtmSummary>> {
+    let rows = db::list_session_atm(db)?;
+    let mut map = HashMap::new();
+    for row in rows {
+        map.insert(
+            row.session_name,
+            SessionAtmSummary {
+                state: row.state,
+                last_transition: row.last_transition,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn load_atm_for_session(
+    db: &rusqlite::Connection,
+    session_name: &str,
+) -> anyhow::Result<Option<SessionAtmSummary>> {
+    let map = load_atm_by_session_name(db)?;
+    Ok(map.get(session_name).cloned())
 }
 
 async fn log_action_result(

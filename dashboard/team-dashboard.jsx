@@ -14,6 +14,9 @@ const PROJECT_COLORS = {
 const STATUS_DOT = {
   active: { color: "#10b981", pulse: true },
   idle: { color: "#f59e0b", pulse: false },
+  stuck: { color: "#ef4444", pulse: true },
+  offline: { color: "#64748b", pulse: false },
+  unknown: { color: "#334155", pulse: false },
   blocked: { color: "#ef4444", pulse: true },
   stopped: { color: "#1e2535", pulse: false },
   running: { color: "#10b981", pulse: true },
@@ -118,7 +121,11 @@ function normalizeCi(session) {
 
 function extractPrs(session, ciEntries) {
   if (Array.isArray(session.prs)) {
-    return session.prs;
+    return session.prs.map((pr) => ({
+      num: pr.num ?? pr.number ?? pr.id ?? "?",
+      title: pr.title || "Untitled PR",
+      url: pr.url || pr.web_url || null,
+    }));
   }
 
   const github = ciEntries.find((entry) => entry.provider === "github");
@@ -127,7 +134,11 @@ function extractPrs(session, ciEntries) {
   }
 
   if (Array.isArray(github.payload.prs)) {
-    return github.payload.prs;
+    return github.payload.prs.map((pr) => ({
+      num: pr.num ?? pr.number ?? pr.id ?? "?",
+      title: pr.title || "Untitled PR",
+      url: pr.url || pr.web_url || null,
+    }));
   }
 
   return [];
@@ -181,6 +192,45 @@ function extractRuns(ciEntries) {
   });
 
   return rows;
+}
+
+function normalizeAtm(session) {
+  if (!session || typeof session.atm !== "object" || session.atm === null) {
+    return null;
+  }
+  const state = String(session.atm.state || "unknown").toLowerCase();
+  const normalizedState = ["active", "idle", "stuck", "offline", "unknown"].includes(state)
+    ? state
+    : "unknown";
+  return {
+    state: normalizedState,
+    lastTransition: session.atm.last_transition || session.atm.lastTransition || null,
+  };
+}
+
+function normalizeSessions(sessionRows, hostRows) {
+  const hostMap = new Map((Array.isArray(hostRows) ? hostRows : []).map((host) => [host.id, host]));
+  return (Array.isArray(sessionRows) ? sessionRows : []).map((row) => {
+    const ciEntries = normalizeCi(row);
+    const prs = extractPrs(row, ciEntries);
+    const ciRuns = extractRuns(ciEntries);
+    const status = row.status || "stopped";
+    const openPrCount = prs.length > 0 ? prs.length : extractOpenPrCount(row, ciEntries);
+
+    return {
+      ...row,
+      status,
+      sessionStatus: status,
+      project: row.project || "unassigned",
+      panes: normalizePanes(row),
+      atm: normalizeAtm(row),
+      ciEntries,
+      ciRuns,
+      prs,
+      openPrCount,
+      host: hostMap.get(row.host_id) || null,
+    };
+  });
 }
 
 function relativeTime(iso) {
@@ -239,6 +289,33 @@ function hostBadge(host) {
     return host.is_local ? "local" : "reachable";
   }
   return `last seen ${relativeTime(host.last_seen)}`;
+}
+
+function AtmBadge({ atm }) {
+  if (!atm) {
+    return null;
+  }
+
+  return (
+    <span
+      title={atm.lastTransition ? `last transition ${atm.lastTransition}` : undefined}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "2px 6px",
+        borderRadius: 4,
+        border: "1px solid #1e2535",
+        fontSize: 9,
+        color: "#94a3b8",
+        textTransform: "uppercase",
+        letterSpacing: "0.04em",
+      }}
+    >
+      <Dot status={atm.state} size={6} />
+      {atm.state}
+    </span>
+  );
 }
 
 function CiBadges({ session }) {
@@ -753,7 +830,10 @@ function GridCard({ session, onJump }) {
         ))}
 
         <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-          <CiBadges session={session} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+            <AtmBadge atm={session.atm} />
+            <CiBadges session={session} />
+          </div>
           <span style={{ fontSize: 9, color: "#475569" }}>{hostBadge(session.host)}</span>
         </div>
       </div>
@@ -767,7 +847,7 @@ function ListView({ sessions, onJump }) {
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 780 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid #131820" }}>
-            {["", "Session", "Project", "Host", "Status", "Panes", "Active", "Open PRs", "Last Activity"].map(
+            {["", "Session", "Project", "Host", "Status", "Activity", "Panes", "Active", "Open PRs", "Last Activity"].map(
               (header) => (
                 <th
                   key={header}
@@ -818,6 +898,16 @@ function ListView({ sessions, onJump }) {
                     <Dot status={session.status} size={6} />
                     <span style={{ color: "#64748b", fontSize: 11 }}>{session.status}</span>
                   </div>
+                </td>
+                <td style={{ padding: "7px 12px", color: "#94a3b8", fontSize: 11 }}>
+                  {session.atm ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      <Dot status={session.atm.state} size={6} />
+                      {session.atm.state}
+                    </span>
+                  ) : (
+                    ""
+                  )}
                 </td>
                 <td style={{ padding: "7px 12px", color: "#334155" }}>{session.panes.length}</td>
                 <td style={{ padding: "7px 12px", color: activePanes > 0 ? "#10b981" : "#1e2535" }}>{activePanes}</td>
@@ -1002,24 +1092,7 @@ export default function Dashboard() {
         }
 
         const hostRows = Array.isArray(hostsBody) ? hostsBody : [];
-        const hostMap = new Map(hostRows.map((host) => [host.id, host]));
-
-        const normalizedSessions = (Array.isArray(sessionsBody) ? sessionsBody : []).map((row) => {
-          const ciEntries = normalizeCi(row);
-          const prs = extractPrs(row, ciEntries);
-          const ciRuns = extractRuns(ciEntries);
-          return {
-            ...row,
-            status: row.status || "stopped",
-            project: row.project || "unassigned",
-            panes: normalizePanes(row),
-            ciEntries,
-            ciRuns,
-            prs,
-            openPrCount: extractOpenPrCount(row, ciEntries),
-            host: hostMap.get(row.host_id) || null,
-          };
-        });
+        const normalizedSessions = normalizeSessions(sessionsBody, hostRows);
 
         setHosts(hostRows);
         setSessions(normalizedSessions);

@@ -71,6 +71,13 @@ pub struct SessionCiSummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionAtmSummary {
+    pub state: String,
+    #[serde(default)]
+    pub last_transition: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionSummary {
     pub id: i64,
     pub name: String,
@@ -87,6 +94,8 @@ pub struct SessionSummary {
     pub polled_at: Option<String>,
     #[serde(default)]
     pub session_ci: Vec<SessionCiSummary>,
+    #[serde(default)]
+    pub atm: Option<SessionAtmSummary>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -114,6 +123,8 @@ pub struct SessionDetail {
     pub polled_at: Option<String>,
     #[serde(default)]
     pub session_ci: Vec<SessionCiSummary>,
+    #[serde(default)]
+    pub atm: Option<SessionAtmSummary>,
     pub config_json: serde_json::Value,
     #[serde(default)]
     pub recent_events: Vec<EventRow>,

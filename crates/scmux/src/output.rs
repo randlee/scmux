@@ -10,8 +10,8 @@ pub fn print_session_list(sessions: &[SessionSummary], hosts: &[HostSummary]) {
         .collect();
 
     println!(
-        "{:<15} {:<9} {:<10} {:<11} WINDOW",
-        "NAME", "STATUS", "HOST", "CRON/AUTO"
+        "{:<15} {:<9} {:<10} {:<10} {:<11} WINDOW",
+        "NAME", "STATUS", "ACTIVITY", "HOST", "CRON/AUTO"
     );
 
     for session in sessions {
@@ -32,10 +32,15 @@ pub fn print_session_list(sessions: &[SessionSummary], hosts: &[HostSummary]) {
                 }
             });
         let window = window_name(session);
+        let activity = session
+            .atm
+            .as_ref()
+            .map(|atm| atm.state.as_str())
+            .unwrap_or("");
 
         println!(
-            "{:<15} {:<9} {:<10} {:<11} {}",
-            session.name, session.status, host, cron_auto, window
+            "{:<15} {:<9} {:<10} {:<10} {:<11} {}",
+            session.name, session.status, activity, host, cron_auto, window
         );
     }
 }

@@ -1,7 +1,7 @@
 use scmux::client::{ApiClient, JumpRequest};
 use scmux_daemon::api;
 use scmux_daemon::ci;
-use scmux_daemon::config::{Config, DaemonConfig, PollingConfig};
+use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::json;
@@ -55,11 +55,16 @@ impl CliE2eHarness {
                     ci_active_interval_secs: None,
                     ci_idle_interval_secs: None,
                 },
+                atm: AtmConfig {
+                    socket_path: None,
+                    stuck_minutes: Some(10),
+                },
                 hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
             ci_tools: ci::ToolAvailability::default(),
             clock: Arc::new(SystemClock),
+            atm_available: std::sync::atomic::AtomicBool::new(false),
             last_api_access: std::sync::atomic::AtomicU64::new(0),
             started_at: std::time::Instant::now(),
         });

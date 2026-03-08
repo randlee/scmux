@@ -10,6 +10,10 @@ health_interval_secs = 60
 ci_active_interval_secs = 60
 ci_idle_interval_secs = 300
 
+[atm]
+socket_path = ""
+stuck_minutes = 10
+
 [[hosts]]
 name = "dgx-spark"
 address = "192.168.1.50"
