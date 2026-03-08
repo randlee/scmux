@@ -158,7 +158,7 @@ fn resolve_socket_path(state: &AppState) -> PathBuf {
 fn atm_home_dir() -> PathBuf {
     std::env::var_os("ATM_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from)) // QA-046+P5S3: macOS-only daemon, HOME always set
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
