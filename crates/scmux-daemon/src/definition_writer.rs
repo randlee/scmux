@@ -95,6 +95,10 @@ fn validate_approved_project(session_name: &str, config_json: &str) -> Result<()
     let value: serde_json::Value = serde_json::from_str(config_json)
         .map_err(|err| WriteError::Validation(format!("invalid config_json JSON: {err}")))?;
 
+    // DG-04 approval policy split:
+    // - `enabled = 1` is enforced by the session row lifecycle and editor route semantics.
+    // - This validator enforces structural approval requirements for writer-gate calls
+    //   (`config_json.session_name` match and non-empty `config_json.panes[]`).
     let json_session_name = value
         .get("session_name")
         .and_then(|raw| raw.as_str())
