@@ -121,7 +121,11 @@ function normalizeCi(session) {
 
 function extractPrs(session, ciEntries) {
   if (Array.isArray(session.prs)) {
-    return session.prs;
+    return session.prs.map((pr) => ({
+      num: pr.num ?? pr.number ?? pr.id ?? "?",
+      title: pr.title || "Untitled PR",
+      url: pr.url || pr.web_url || null,
+    }));
   }
 
   const github = ciEntries.find((entry) => entry.provider === "github");
@@ -130,7 +134,11 @@ function extractPrs(session, ciEntries) {
   }
 
   if (Array.isArray(github.payload.prs)) {
-    return github.payload.prs;
+    return github.payload.prs.map((pr) => ({
+      num: pr.num ?? pr.number ?? pr.id ?? "?",
+      title: pr.title || "Untitled PR",
+      url: pr.url || pr.web_url || null,
+    }));
   }
 
   return [];
@@ -198,6 +206,31 @@ function normalizeAtm(session) {
     state: normalizedState,
     lastTransition: session.atm.last_transition || session.atm.lastTransition || null,
   };
+}
+
+function normalizeSessions(sessionRows, hostRows) {
+  const hostMap = new Map((Array.isArray(hostRows) ? hostRows : []).map((host) => [host.id, host]));
+  return (Array.isArray(sessionRows) ? sessionRows : []).map((row) => {
+    const ciEntries = normalizeCi(row);
+    const prs = extractPrs(row, ciEntries);
+    const ciRuns = extractRuns(ciEntries);
+    const status = row.status || "stopped";
+    const openPrCount = prs.length > 0 ? prs.length : extractOpenPrCount(row, ciEntries);
+
+    return {
+      ...row,
+      status,
+      sessionStatus: status,
+      project: row.project || "unassigned",
+      panes: normalizePanes(row),
+      atm: normalizeAtm(row),
+      ciEntries,
+      ciRuns,
+      prs,
+      openPrCount,
+      host: hostMap.get(row.host_id) || null,
+    };
+  });
 }
 
 function relativeTime(iso) {
@@ -1059,25 +1092,7 @@ export default function Dashboard() {
         }
 
         const hostRows = Array.isArray(hostsBody) ? hostsBody : [];
-        const hostMap = new Map(hostRows.map((host) => [host.id, host]));
-
-        const normalizedSessions = (Array.isArray(sessionsBody) ? sessionsBody : []).map((row) => {
-          const ciEntries = normalizeCi(row);
-          const prs = extractPrs(row, ciEntries);
-          const ciRuns = extractRuns(ciEntries);
-          return {
-            ...row,
-            status: row.status || "stopped",
-            project: row.project || "unassigned",
-            panes: normalizePanes(row),
-            atm: normalizeAtm(row),
-            ciEntries,
-            ciRuns,
-            prs,
-            openPrCount: extractOpenPrCount(row, ciEntries),
-            host: hostMap.get(row.host_id) || null,
-          };
-        });
+        const normalizedSessions = normalizeSessions(sessionsBody, hostRows);
 
         setHosts(hostRows);
         setSessions(normalizedSessions);

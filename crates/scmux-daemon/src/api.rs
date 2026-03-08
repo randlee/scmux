@@ -1,14 +1,15 @@
 use axum::{
     extract::{Path, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
-    response::{Html, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -21,6 +22,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     let middleware_state = Arc::clone(&state);
     Router::new()
         .route("/", get(dashboard_index))
+        .route("/dashboard.js", get(dashboard_js))
+        .route("/react.min.js", get(react_js))
+        .route("/react-dom.min.js", get(react_dom_js))
         .route("/health", get(health))
         .route("/hosts", get(list_hosts))
         .route("/dashboard-config.json", get(get_dashboard_config))
@@ -37,7 +41,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-const DASHBOARD_HTML: &str = include_str!("../../../dashboard/index.html");
+const DASHBOARD_HTML: &[u8] = include_bytes!("../assets/index.html");
+const DASHBOARD_JS: &[u8] = include_bytes!("../assets/dashboard.js");
+const REACT_JS: &[u8] = include_bytes!("../assets/react.min.js");
+const REACT_DOM_JS: &[u8] = include_bytes!("../assets/react-dom.min.js");
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 
 #[derive(Serialize)]
@@ -151,8 +158,51 @@ struct DashboardConfigResponse {
     poll_interval_ms: u64,
 }
 
-async fn dashboard_index() -> Html<&'static str> {
-    Html(DASHBOARD_HTML)
+async fn serve_dashboard_asset(
+    path: &str,
+    embedded_bytes: &'static [u8],
+    content_type: &'static str,
+) -> Response {
+    if let Ok(dir) = std::env::var("SCMUX_DASHBOARD_DIR") {
+        let file_path = PathBuf::from(dir).join(path);
+        return match tokio::fs::read(file_path).await {
+            Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
+            Err(_) => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
+
+    ([(header::CONTENT_TYPE, content_type)], embedded_bytes).into_response()
+}
+
+async fn dashboard_index() -> Response {
+    serve_dashboard_asset("index.html", DASHBOARD_HTML, "text/html; charset=utf-8").await
+}
+
+async fn dashboard_js() -> Response {
+    serve_dashboard_asset(
+        "dashboard.js",
+        DASHBOARD_JS,
+        "application/javascript; charset=utf-8",
+    )
+    .await
+}
+
+async fn react_js() -> Response {
+    serve_dashboard_asset(
+        "react.min.js",
+        REACT_JS,
+        "application/javascript; charset=utf-8",
+    )
+    .await
+}
+
+async fn react_dom_js() -> Response {
+    serve_dashboard_asset(
+        "react-dom.min.js",
+        REACT_DOM_JS,
+        "application/javascript; charset=utf-8",
+    )
+    .await
 }
 
 async fn touch_last_api_access(
