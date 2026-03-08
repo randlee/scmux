@@ -211,7 +211,14 @@ atm read
 
 ### When arch-cmux goes idle
 
-Do NOT nudge via tmux send-keys — this interrupts active work. Instead, ensure the next task is already in his ATM inbox before he finishes the current sprint. If the inbox is populated and he goes idle, ATM delivery will surface the message when he polls. No intervention needed.
+The goal is to **prevent** idle gaps by pre-populating his inbox before he finishes each sprint. If the pipeline is running correctly, he will pick up the next task immediately after cargo test without any nudge.
+
+If arch-cmux does go idle with no tasks in flight (e.g. team-lead was slow, or he finished faster than expected), nudge via ATM:
+```bash
+atm send arch-cmux "You have a new task in your inbox. Run: atm read --team scmux-dev"
+```
+
+**Important**: If arch-cmux runs out of tasks and is not nudged, the entire project stalls until intervention. Monitor his pane and inbox — do not let the pipeline go cold.
 
 ## Phase Completion
 
