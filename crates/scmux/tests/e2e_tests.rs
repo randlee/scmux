@@ -64,7 +64,6 @@ impl CliE2eHarness {
                     stuck_minutes: Some(10),
                     stop_grace_secs: None,
                 },
-                hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
             runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),

@@ -49,38 +49,6 @@ fn td_c_02_parse_daemon_status_command() {
 }
 
 #[test]
-fn td_c_03_parse_add_command() {
-    let cli = Cli::try_parse_from([
-        "scmux",
-        "add",
-        "--name",
-        "alpha",
-        "--project",
-        "demo",
-        "--config",
-        "alpha.json",
-        "--auto-start",
-    ])
-    .expect("parse add command");
-
-    match cli.command {
-        Command::Add {
-            name,
-            project,
-            config,
-            auto_start,
-            ..
-        } => {
-            assert_eq!(name, "alpha");
-            assert_eq!(project.as_deref(), Some("demo"));
-            assert_eq!(config, "alpha.json");
-            assert!(auto_start);
-        }
-        other => panic!("expected add command, got {other:?}"),
-    }
-}
-
-#[test]
 fn td_c_04_host_resolution_uses_default_when_no_env_or_flag() {
     let _guard = env_lock().lock().expect("env lock");
     let prev = std::env::var("SCMUX_HOST").ok();
@@ -115,28 +83,6 @@ fn td_c_06_host_resolution_flag_overrides_env() {
 
     restore_env_var("SCMUX_HOST", prev);
     assert_eq!(resolved, "http://127.0.0.1:8800");
-}
-
-#[test]
-fn td_c_07_parse_edit_auto_start_false() {
-    let cli = Cli::try_parse_from(["scmux", "edit", "alpha", "--auto-start=false"])
-        .expect("parse edit auto-start false");
-
-    match cli.command {
-        Command::Edit { auto_start, .. } => assert_eq!(auto_start, Some(false)),
-        other => panic!("expected edit command, got {other:?}"),
-    }
-}
-
-#[test]
-fn td_c_08_parse_edit_auto_start_true_without_value() {
-    let cli = Cli::try_parse_from(["scmux", "edit", "alpha", "--auto-start"])
-        .expect("parse edit auto-start true");
-
-    match cli.command {
-        Command::Edit { auto_start, .. } => assert_eq!(auto_start, Some(true)),
-        other => panic!("expected edit command, got {other:?}"),
-    }
 }
 
 #[test]

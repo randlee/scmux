@@ -254,7 +254,9 @@ async fn touch_last_api_access(
     next.run(request).await
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Result<Json<HealthResponse>, StatusCode> {
+async fn health(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<HealthResponse>, (StatusCode, Json<ErrorResponse>)> {
     let uptime_secs = state.started_at.elapsed().as_secs();
     let db_path = state.db_path.clone();
     let host_id = state.host_id;
@@ -280,11 +282,13 @@ async fn health(State(state): State<Arc<AppState>>) -> Result<Json<HealthRespons
         Ok(Ok(value)) => value,
         Ok(Err(err)) => {
             tracing::warn!("health query failed: {err}");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(internal_error("failed to query session count".to_string()));
         }
         Err(err) => {
             tracing::warn!("health join error: {err}");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(internal_error(
+                "failed to join health query task".to_string(),
+            ));
         }
     };
 
@@ -310,7 +314,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Result<Json<HealthRespons
 
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<SessionSummary>>, StatusCode> {
+) -> Result<Json<Vec<SessionSummary>>, (StatusCode, Json<ErrorResponse>)> {
     let session_rows = {
         let state = Arc::clone(&state);
         let joined = tokio::task::spawn_blocking(move || {
@@ -323,11 +327,15 @@ async fn list_sessions(
             Ok(Ok(rows)) => rows,
             Ok(Err(err)) => {
                 tracing::warn!("list_sessions DB error: {err}");
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                return Err(internal_error(
+                    "failed to read session definitions".to_string(),
+                ));
             }
             Err(err) => {
                 tracing::warn!("list_sessions join error: {err}");
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                return Err(internal_error(
+                    "failed to join list_sessions task".to_string(),
+                ));
             }
         }
     };
@@ -373,7 +381,7 @@ async fn list_sessions(
 async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<SessionDetail>, StatusCode> {
+) -> Result<Json<SessionDetail>, (StatusCode, Json<ErrorResponse>)> {
     let row = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -382,10 +390,19 @@ async fn get_session(
             db::get_session_for_host(&db, state.host_id, &name)
         })
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| internal_error("failed to join get_session read task".to_string()))?;
+        result.map_err(|_| internal_error("failed to read session definition".to_string()))?
     }
-    .ok_or(StatusCode::NOT_FOUND)?;
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("session '{name}' not found"),
+            }),
+        )
+    })?;
 
     let config_json = serde_json::from_str(&row.config_json).unwrap_or(serde_json::json!({}));
     let atm_available = state.atm_available.load(Ordering::Relaxed);
@@ -602,7 +619,7 @@ async fn start_session(
 async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<ActionResponse>, StatusCode> {
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -611,10 +628,19 @@ async fn stop_session(
             db::get_session_for_host(&db_conn, state.host_id, &name)
         })
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| internal_error("failed to join stop_session read task".to_string()))?;
+        result.map_err(|_| internal_error("failed to read session definition".to_string()))?
     }
-    .ok_or(StatusCode::NOT_FOUND)?;
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("session '{name}' not found"),
+            }),
+        )
+    })?;
 
     let targets = extract_shutdown_targets(&definition.config_json);
     if let Err(err) = atm::send_shutdown_messages(state.as_ref(), &targets).await {
@@ -662,7 +688,7 @@ async fn jump_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(req): Json<JumpRequest>,
-) -> Result<Json<ActionResponse>, StatusCode> {
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let host_id = req.host_id.unwrap_or(state.host_id);
     let state2 = Arc::clone(&state);
     let name2 = name.clone();
@@ -673,11 +699,30 @@ async fn jump_session(
         Ok::<_, anyhow::Error>((session, host))
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| internal_error("failed to join jump_session read task".to_string()))?
+    .map_err(|_| internal_error("failed to read jump target definition".to_string()))?;
 
-    let (_session, host) = session_data;
-    let host = host.ok_or(StatusCode::NOT_FOUND)?;
+    let (session, host) = session_data;
+    if session.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("session '{name}' not found"),
+            }),
+        ));
+    }
+    let host = host.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("host '{host_id}' not found"),
+            }),
+        )
+    })?;
 
     let terminal = req
         .terminal
@@ -688,7 +733,12 @@ async fn jump_session(
         HostTarget::Local
     } else {
         HostTarget::Remote {
-            user: host.ssh_user.ok_or(StatusCode::BAD_REQUEST)?,
+            user: host.ssh_user.ok_or_else(|| {
+                bad_request(
+                    "invalid_host",
+                    format!("host '{}' is missing ssh_user", host.name),
+                )
+            })?,
             host: host.address,
         }
     };
@@ -802,10 +852,10 @@ async fn delete_host(
 
 async fn get_dashboard_config(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<DashboardConfigResponse>, StatusCode> {
+) -> Result<Json<DashboardConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
     let hosts = fetch_hosts(Arc::clone(&state))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| internal_error("failed to read hosts for dashboard config".to_string()))?;
     Ok(Json(DashboardConfigResponse {
         hosts,
         default_terminal: state

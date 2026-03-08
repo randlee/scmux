@@ -97,17 +97,6 @@ pub(crate) fn ensure_local_host(conn: &Connection) -> Result<i64> {
     )
 }
 
-pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<Option<i64>> {
-    let value = conn
-        .query_row(
-            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
-            params![name, host_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?;
-    Ok(value)
-}
-
 pub fn list_sessions_for_host(
     conn: &Connection,
     host_id: i64,
@@ -462,18 +451,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE (name, host_id)
         );
 
-        CREATE TABLE IF NOT EXISTS session_events (
-            id         INTEGER PRIMARY KEY,
-            session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            event      TEXT    NOT NULL,
-            trigger    TEXT    NOT NULL,
-            note       TEXT,
-            occurred_at DATETIME NOT NULL DEFAULT (datetime('now'))
-        );
-
         CREATE INDEX IF NOT EXISTS idx_sessions_host    ON sessions (host_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions (project);
-        CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events (session_id, occurred_at);
 
         CREATE TRIGGER IF NOT EXISTS sessions_updated_at
           AFTER UPDATE ON sessions
@@ -486,10 +465,12 @@ fn migrate(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS session_ci;
         DROP TABLE IF EXISTS session_atm;
         DROP TABLE IF EXISTS daemon_health;
+        DROP TABLE IF EXISTS session_events;
 
         DROP INDEX IF EXISTS idx_session_ci_session;
         DROP INDEX IF EXISTS idx_session_ci_next_poll;
         DROP INDEX IF EXISTS idx_session_atm_session_name;
+        DROP INDEX IF EXISTS idx_session_events_session;
     "#,
     )?;
     ensure_hosts_last_seen_column(conn)?;

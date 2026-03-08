@@ -52,48 +52,6 @@ pub enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
-    /// Register a new session
-    Add {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(long)]
-        config: String,
-        #[arg(long)]
-        cron: Option<String>,
-        #[arg(long)]
-        auto_start: bool,
-        #[arg(long)]
-        host_id: Option<i64>,
-        #[arg(long)]
-        github_repo: Option<String>,
-        #[arg(long)]
-        azure_project: Option<String>,
-    },
-    /// Edit a session
-    Edit {
-        name: String,
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(long)]
-        config: Option<String>,
-        #[arg(long)]
-        cron: Option<String>,
-        /// Set auto-start behavior. Supports `--auto-start` and `--auto-start=false`.
-        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-        auto_start: Option<bool>,
-        #[arg(long)]
-        github_repo: Option<String>,
-        #[arg(long)]
-        azure_project: Option<String>,
-    },
-    /// Disable a session
-    Disable { name: String },
-    /// Enable a session
-    Enable { name: String },
-    /// Remove a session
-    Remove { name: String },
     /// List hosts
     Hosts,
     /// Daemon subcommands

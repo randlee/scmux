@@ -66,7 +66,6 @@ impl ApiHarness {
                     stuck_minutes: Some(10),
                     stop_grace_secs: Some(1),
                 },
-                hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
             runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
