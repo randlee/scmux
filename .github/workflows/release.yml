@@ -121,5 +121,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           set -euo pipefail
-          cargo publish -p scmux --locked
           cargo publish -p scmux-daemon --locked
+          sleep 60
+          cargo publish -p scmux --locked
