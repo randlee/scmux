@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use scmux_daemon::scheduler::should_run_now;
+use scmux_daemon::tmux_poller::should_run_now;
 
 #[test]
 fn td_05_should_run_now_true_when_cron_fires_in_window() {

@@ -7,7 +7,7 @@ pub mod definition_writer;
 pub mod hosts;
 pub mod logging;
 pub mod runtime;
-pub mod scheduler;
+mod start_cycle;
 pub mod tmux;
 pub mod tmux_poller;
 

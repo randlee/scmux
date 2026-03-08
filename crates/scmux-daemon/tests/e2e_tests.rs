@@ -3,8 +3,9 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
-use scmux_daemon::scheduler;
+use scmux_daemon::definition_writer;
 use scmux_daemon::tmux::PaneInfo;
+use scmux_daemon::tmux_poller;
 use scmux_daemon::{AppState, Clock, SystemClock};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -46,7 +47,7 @@ impl E2eHarness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("scmux-e2e.db");
         let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-        let host_id = db::ensure_local_host(&conn).expect("local host");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
 
         let state = Arc::new(AppState {
             db: std::sync::Mutex::new(conn),
@@ -203,7 +204,7 @@ async fn t_e_02_add_session_auto_start_within_single_poll_cycle() {
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
     let prev_tmuxp = set_env_var("SCMUX_TMUXP_BIN", tmuxp_script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&h.state).await;
+    let poll_result = tmux_poller::poll_cycle(&h.state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
     restore_env_var("SCMUX_TMUXP_BIN", prev_tmuxp);
     poll_result.expect("poll cycle");
@@ -230,6 +231,7 @@ async fn t_e_03_kill_session_externally_detected_stopped_on_next_poll() {
         runtime.apply_tmux_snapshot(
             &["te03-stop".to_string()],
             &live,
+            &std::collections::HashMap::new(),
             &chrono::Utc::now().to_rfc3339(),
         );
     }
@@ -238,7 +240,7 @@ async fn t_e_03_kill_session_externally_detected_stopped_on_next_poll() {
     let tmux_script = write_script("#!/bin/sh\nexit 1\n");
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&h.state).await;
+    let poll_result = tmux_poller::poll_cycle(&h.state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
     poll_result.expect("poll cycle");
 
@@ -290,7 +292,7 @@ exit 1
     let body: Value = start_response.json().await.expect("json");
     assert_eq!(body["ok"], true);
 
-    scheduler::poll_cycle(&h.state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&h.state).await.expect("poll cycle");
     restore_env_var("SCMUX_TMUXP_BIN", prev_tmuxp);
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
 
@@ -329,7 +331,7 @@ exit 1
     ));
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
 
-    scheduler::poll_cycle(&h.state)
+    tmux_poller::poll_cycle(&h.state)
         .await
         .expect("poll cycle running");
     let stop_response = h
@@ -339,7 +341,7 @@ exit 1
         .await
         .expect("stop request");
     assert_eq!(stop_response.status(), reqwest::StatusCode::OK);
-    scheduler::poll_cycle(&h.state)
+    tmux_poller::poll_cycle(&h.state)
         .await
         .expect("poll cycle stopped");
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
@@ -371,7 +373,7 @@ async fn t_e_07_cron_session_starts_at_scheduled_time_with_injected_clock() {
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
     let prev_tmuxp = set_env_var("SCMUX_TMUXP_BIN", tmuxp_script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&h.state).await;
+    let poll_result = tmux_poller::poll_cycle(&h.state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
     restore_env_var("SCMUX_TMUXP_BIN", prev_tmuxp);
     poll_result.expect("poll cycle");

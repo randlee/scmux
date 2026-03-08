@@ -1,6 +1,8 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, atm, ci, db, hosts, logging, tmux_poller, AppState, SystemClock};
+use scmux_daemon::{
+    api, atm, ci, db, definition_writer, hosts, logging, tmux_poller, AppState, SystemClock,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -59,7 +61,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let conn = db::open(&db_path)?;
-    let host_id = db::ensure_local_host(&conn)?;
+    let host_id = definition_writer::ensure_local_host(&conn)
+        .map_err(|err| anyhow::anyhow!(err.message()))?;
     let ci_tools = ci::detect_tools();
 
     info!("scmux-daemon starting — db={db_path} host_id={host_id}");
@@ -116,8 +119,8 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::interval(tokio::time::Duration::from_secs(health_interval_secs));
         loop {
             interval.tick().await;
-            if let Err(e) = db::write_health(&health_state).await {
-                tracing::error!("health write error: {e}");
+            if let Err(e) = definition_writer::write_health(&health_state).await {
+                tracing::error!("health write error: {}", e.message());
             }
         }
     });

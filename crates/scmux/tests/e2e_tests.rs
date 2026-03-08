@@ -3,6 +3,7 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
+use scmux_daemon::definition_writer;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::json;
 use std::sync::Arc;
@@ -36,7 +37,7 @@ impl CliE2eHarness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("scmux-cli-e2e.db");
         let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-        let host_id = db::ensure_local_host(&conn).expect("local host");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
 
         let state = Arc::new(AppState {
             db: std::sync::Mutex::new(conn),

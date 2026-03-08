@@ -2,6 +2,7 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
+use scmux_daemon::definition_writer;
 use scmux_daemon::tmux::PaneInfo;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::{json, Value};
@@ -32,7 +33,7 @@ impl ApiHarness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("scmux-test.db");
         let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-        let host_id = db::ensure_local_host(&conn).expect("local host");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
         conn.execute(
             "INSERT INTO hosts (name, address, ssh_user, api_port, is_local, last_seen)
              VALUES ('dgx-spark', '192.168.1.50', 'randlee', 7878, 0, datetime('now'))",
@@ -210,6 +211,7 @@ async fn t_a_03_get_sessions_returns_sessions_with_correct_status_and_panes() {
         runtime.apply_tmux_snapshot(
             &["alpha".to_string()],
             &live,
+            &std::collections::HashMap::new(),
             &chrono::Utc::now().to_rfc3339(),
         );
     }
@@ -620,8 +622,36 @@ async fn t_atm_02_get_sessions_includes_atm_state_when_available() {
     h.create_session("alpha").await;
     {
         let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        let mut live = std::collections::HashMap::new();
+        live.insert(
+            "alpha".to_string(),
+            vec![PaneInfo {
+                index: 0,
+                name: "agent".to_string(),
+                status: "idle".to_string(),
+                last_activity: "now".to_string(),
+                current_command: "sleep 1".to_string(),
+            }],
+        );
+        let mut pane_configs = std::collections::HashMap::new();
+        pane_configs.insert(
+            "alpha".to_string(),
+            vec![scmux_daemon::runtime::ConfiguredPane {
+                name: Some("agent".to_string()),
+                command: Some("sleep 1".to_string()),
+                atm_team: Some("scmux-dev".to_string()),
+                atm_agent: Some("agent".to_string()),
+            }],
+        );
+        runtime.apply_tmux_snapshot(
+            &["alpha".to_string()],
+            &live,
+            &pane_configs,
+            &chrono::Utc::now().to_rfc3339(),
+        );
         runtime.apply_atm_updates(vec![scmux_daemon::runtime::AtmRuntimeUpdate {
-            session_name: "alpha".to_string(),
+            team: "scmux-dev".to_string(),
+            agent: "agent".to_string(),
             state: "active".to_string(),
             last_transition: Some("2026-03-08T00:00:00Z".to_string()),
         }]);
