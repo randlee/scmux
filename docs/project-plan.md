@@ -276,6 +276,13 @@ scmux is delivered in six phases with explicit integration branches and version 
   - define writer subsystem boundaries and prohibited poller writes
   - define in-memory runtime projection approach and discovery endpoint contract
   - capture refactor scope for conflicting runtime-write paths
+- Acceptance criteria:
+  - requirements + architecture reflect the definition-first model with no conflicting discovery-first language
+  - writer subsystem boundary is specified (including compile-boundary enforcement notes)
+  - in-memory runtime projection is explicitly defined for runtime API views
+  - discovery endpoint contract (`GET /discovery`) is defined
+  - refactor-scope document includes Must Remove, Must Constrain, and Must Implement sections
+  - QA re-review reports no blocking findings for Sprint 6.0 docs
 - Related PR: `#27`
 
 ## Dependencies Across Sprints

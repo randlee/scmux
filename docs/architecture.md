@@ -69,6 +69,9 @@ P6 decision: runtime cache tables (`session_status`, `session_ci`, `session_atm`
 - Reads remote daemon health/runtime snapshots.
 - Aggregates reachability and stale status for dashboard.
 - No persistent writes from discovery.
+- In-memory projection retains last-known remote session snapshots across consecutive failed poll cycles.
+- `last_seen` is updated on each successful poll in-memory for display.
+- Runtime host projection data is lost on daemon restart (acceptable for P6).
 
 ### 4.4 `ci.rs`
 - Reads CI status from `gh`/`az`.
@@ -92,7 +95,11 @@ State machine:
 
 `stopped -> starting -> running -> idle -> done`
 
-- `stopped`: project exists in definitions; runtime session absent.
+Additional explicit stop edges:
+- `running -> stopped` via `POST /sessions/:name/stop`.
+- `idle -> stopped` via `POST /sessions/:name/stop`.
+
+- `stopped`: entered when (1) project is defined but never started, or (2) session is stopped from `running`/`idle`.
 - `starting`: launch requested; tmux/agents being created.
 - `starting` failure edge: if tmux/session creation or pane launch fails, transition back to `stopped` with structured error details.
 - `running`: tmux exists and at least one pane agent is ATM-active.

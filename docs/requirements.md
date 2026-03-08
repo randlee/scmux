@@ -138,6 +138,9 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-15 | `GET /dashboard-config.json` — host list + dashboard settings for web UI | 1.2 |
 | API-16 | `GET /discovery` shall expose raw tmux discovery (including non-defined sessions) without mutating SQLite definitions | 6.0 |
 | API-17 | `POST /sessions/:name/start` shall reject missing/malformed `config_json` with a structured validation error payload | 6.0 |
+| API-18 | `POST /hosts` — create host definition (editor-only persistent write path via `definition_writer`) | 6.0 |
+| API-19 | `PATCH /hosts/:id` — update host definition (editor-only persistent write path via `definition_writer`) | 6.0 |
+| API-20 | `DELETE /hosts/:id` — remove/disable host definition (editor-only persistent write path via `definition_writer`) | 6.0 |
 
 ### 4.8 Multi-Host / VPN Handling
 
@@ -270,6 +273,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | NF-03 | Poll cycle shall complete in < 500ms for up to 50 projects | 4.1 |
 | NF-04 | HTTP read endpoints shall respond in < 100ms | 4.1 |
 | NF-05 | The system shall work on macOS (primary) and Linux (DGX Spark) | 4.1 |
+| NF-06 | Removed — consolidated into DG-06 (no reconstruction from tmux discovery) | 6.0 |
 | NF-07 | All CI/ATM/network errors shall be handled gracefully and logged with trace context | 6.0 |
 | NF-08 | Single-host or single-session failures shall not crash the daemon or stop unrelated sessions | 4.1 |
 | NF-09 | Stop behavior shall be graceful-first and must not perform bulk kill on panic/error paths | 6.0 |
