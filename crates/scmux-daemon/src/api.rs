@@ -97,15 +97,6 @@ struct SessionDetail {
     #[serde(flatten)]
     summary: SessionSummary,
     config_json: serde_json::Value,
-    recent_events: Vec<EventRow>,
-}
-
-#[derive(Serialize)]
-struct EventRow {
-    event: String,
-    trigger: String,
-    note: Option<String>,
-    occurred_at: String,
 }
 
 #[derive(Serialize)]
@@ -366,7 +357,6 @@ async fn get_session(
             atm,
         },
         config_json,
-        recent_events: Vec::new(),
     }))
 }
 
