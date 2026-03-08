@@ -61,7 +61,7 @@ impl ApiHarness {
                 atm: AtmConfig {
                     socket_path: None,
                     stuck_minutes: Some(10),
-                    stop_grace_secs: None,
+                    stop_grace_secs: Some(1),
                 },
                 hosts: Vec::new(),
             },
@@ -262,7 +262,7 @@ async fn t_a_05_get_sessions_name_returns_404_for_unknown_session() {
 }
 
 #[tokio::test]
-async fn t_a_06_post_sessions_name_start_returns_ok_true_and_logs_event() {
+async fn t_lc_01_post_sessions_name_start_launches_tmux_from_config() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -284,7 +284,7 @@ async fn t_a_06_post_sessions_name_start_returns_ok_true_and_logs_event() {
 }
 
 #[tokio::test]
-async fn t_a_07_post_sessions_name_start_returns_ok_false_on_tmuxp_failure() {
+async fn t_lc_06_start_failure_returns_ok_false_and_keeps_session_stopped() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -307,23 +307,52 @@ async fn t_a_07_post_sessions_name_start_returns_ok_false_on_tmuxp_failure() {
         .as_str()
         .unwrap_or_default()
         .contains("tmuxp"));
+
+    let sessions = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("sessions request");
+    assert_eq!(sessions.status(), reqwest::StatusCode::OK);
+    let rows: Vec<Value> = sessions.json().await.expect("json");
+    assert_eq!(rows[0]["status"], "stopped");
 }
 
 #[tokio::test]
-async fn t_a_08_post_sessions_name_stop_returns_ok_true_and_logs_event() {
+async fn t_lc_03_stop_sends_atm_then_grace_then_hard_stop() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
     let _guard = env_lock().lock().await;
-    let script = write_script(
+    let marker = tempfile::NamedTempFile::new().expect("marker file");
+    let marker_path = marker.path().to_string_lossy().to_string();
+
+    let script = write_script(&format!(
         r#"#!/bin/sh
 if [ "$1" = "kill-session" ]; then
+  echo "kill" >> "{marker_path}"
+  exit 0
+fi
+if [ "$1" = "list-sessions" ]; then
+  echo "alpha"
   exit 0
 fi
 exit 1
 "#,
-    );
-    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+    ));
+    let atm_script = write_script(&format!(
+        r#"#!/bin/sh
+if [ "$1" = "send" ]; then
+  echo "send" >> "{marker_path}"
+  exit 0
+fi
+exit 1
+"#
+    ));
+    let prev_tmux = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+    let prev_atm = set_env_var("SCMUX_ATM_BIN", atm_script.to_string_lossy().as_ref());
+    let started = Instant::now();
 
     let response = h
         .client
@@ -331,11 +360,26 @@ exit 1
         .send()
         .await
         .expect("stop request");
-    restore_env_var("SCMUX_TMUX_BIN", prev);
+    restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
+    restore_env_var("SCMUX_ATM_BIN", prev_atm);
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], true);
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("after graceful timeout"));
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "stop path should include grace sleep before hard-stop"
+    );
+
+    let marker_log = std::fs::read_to_string(marker.path()).expect("read marker");
+    assert!(
+        marker_log.contains("send\nkill\n"),
+        "expected ATM send before tmux hard-stop, got: {marker_log:?}"
+    );
 }
 
 #[tokio::test]
@@ -676,13 +720,40 @@ async fn t_atm_03_unreachable_atm_returns_null_without_error() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
     {
-        let db = h.state.db.lock().expect("db lock");
-        db.execute(
-            "INSERT INTO session_atm (session_name, agent_id, team, state, last_transition, updated_at)
-             VALUES ('alpha', 'arch-cmux', 'scmux-dev', 'stuck', '2026-03-08T00:00:00Z', datetime('now'))",
-            [],
-        )
-        .expect("insert session atm");
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        let mut live = std::collections::HashMap::new();
+        live.insert(
+            "alpha".to_string(),
+            vec![PaneInfo {
+                index: 0,
+                name: "agent".to_string(),
+                status: "idle".to_string(),
+                last_activity: "now".to_string(),
+                current_command: "sleep 1".to_string(),
+            }],
+        );
+        let mut pane_configs = std::collections::HashMap::new();
+        pane_configs.insert(
+            "alpha".to_string(),
+            vec![scmux_daemon::runtime::ConfiguredPane {
+                name: Some("agent".to_string()),
+                command: Some("sleep 1".to_string()),
+                atm_team: Some("scmux-dev".to_string()),
+                atm_agent: Some("agent".to_string()),
+            }],
+        );
+        runtime.apply_tmux_snapshot(
+            &["alpha".to_string()],
+            &live,
+            &pane_configs,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        runtime.apply_atm_updates(vec![scmux_daemon::runtime::AtmRuntimeUpdate {
+            team: "scmux-dev".to_string(),
+            agent: "agent".to_string(),
+            state: "stuck".to_string(),
+            last_transition: Some("2026-03-08T00:00:00Z".to_string()),
+        }]);
     }
     h.state.atm_available.store(false, Ordering::Relaxed);
 

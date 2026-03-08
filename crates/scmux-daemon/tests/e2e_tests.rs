@@ -214,7 +214,7 @@ async fn t_e_02_add_session_auto_start_within_single_poll_cycle() {
 }
 
 #[tokio::test]
-async fn t_e_03_kill_session_externally_detected_stopped_on_next_poll() {
+async fn t_lc_02_runtime_transition_running_to_stopped_when_tmux_disappears() {
     let h = E2eHarness::new().await;
     h.create_session("te03-stop", false, None).await;
     {
@@ -347,6 +347,44 @@ exit 1
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
 
     assert_eq!(h.status_for("te05-stop"), "stopped");
+}
+
+#[tokio::test]
+async fn t_lc_05_jump_is_viewer_only_and_does_not_stop_session() {
+    let h = E2eHarness::new().await;
+    h.create_session("tlc05-jump", false, None).await;
+
+    {
+        let panes = vec![PaneInfo {
+            index: 0,
+            name: "pane-0".to_string(),
+            status: "active".to_string(),
+            last_activity: "now".to_string(),
+            current_command: "bash".to_string(),
+        }];
+        let mut live = std::collections::HashMap::new();
+        live.insert("tlc05-jump".to_string(), panes);
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.apply_tmux_snapshot(
+            &["tlc05-jump".to_string()],
+            &live,
+            &std::collections::HashMap::new(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+
+    let jump_response = h
+        .client
+        .post(format!("{}/sessions/tlc05-jump/jump", h.base_url))
+        .json(&json!({ "terminal": "unsupported-terminal" }))
+        .send()
+        .await
+        .expect("jump request");
+    assert_eq!(jump_response.status(), reqwest::StatusCode::OK);
+    let body: Value = jump_response.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+
+    assert_eq!(h.status_for("tlc05-jump"), "running");
 }
 
 #[tokio::test]

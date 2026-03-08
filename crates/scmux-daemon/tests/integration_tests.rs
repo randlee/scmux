@@ -147,18 +147,18 @@ fn insert_remote_host(state: &Arc<AppState>, name: &str, address: &str, api_port
 async fn t_i_01_poll_cycle_writes_session_status_rows() {
     let (state, _tmp) = build_state();
     let name = unique_name("ti01");
-    let session_id = insert_session(&state, &name, false, None);
+    let _session_id = insert_session(&state, &name, false, None);
 
     tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     let db_conn = state.db.lock().expect("db lock");
     let count: i64 = db_conn
         .query_row(
-            "SELECT COUNT(*) FROM session_status WHERE session_id = ?1",
-            [session_id],
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_status'",
+            [],
             |r| r.get(0),
         )
-        .expect("status row count");
+        .expect("status table count");
     assert_eq!(count, 0);
 }
 
@@ -531,7 +531,7 @@ esac
 }
 
 #[tokio::test]
-async fn td_20_single_session_start_failure_does_not_abort_session_loop() {
+async fn t_lc_04_single_session_start_failure_does_not_abort_other_sessions() {
     let (state, _tmp) = build_state();
     let bad_name = unique_name("td20-bad");
     let good_name = unique_name("td20-good");
@@ -661,20 +661,28 @@ async fn t_wg_02_pollers_do_not_write_runtime_sqlite_tables() {
             |r| r.get(0),
         )
         .expect("sessions after");
-    let session_status_rows: i64 = db_conn
+    let deprecated_status_table: i64 = db_conn
         .query_row("SELECT COUNT(*) FROM session_status", [], |r| r.get(0))
-        .expect("session_status count");
-    let session_ci_rows: i64 = db_conn
-        .query_row("SELECT COUNT(*) FROM session_ci", [], |r| r.get(0))
-        .expect("session_ci count");
-    let session_atm_rows: i64 = db_conn
-        .query_row("SELECT COUNT(*) FROM session_atm", [], |r| r.get(0))
-        .expect("session_atm count");
+        .unwrap_or(0);
+    let deprecated_ci_table: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_ci'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("session_ci table existence");
+    let deprecated_atm_table: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_atm'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("session_atm table existence");
 
     assert_eq!(sessions_after, sessions_before);
-    assert_eq!(session_status_rows, 0);
-    assert_eq!(session_ci_rows, 0);
-    assert_eq!(session_atm_rows, 0);
+    assert_eq!(deprecated_status_table, 0);
+    assert_eq!(deprecated_ci_table, 0);
+    assert_eq!(deprecated_atm_table, 0);
 }
 
 #[tokio::test]

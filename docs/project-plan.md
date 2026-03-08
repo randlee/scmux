@@ -52,6 +52,8 @@ scmux is delivered in six phases with explicit integration branches and version 
 | S5.2 | Complete |
 | S5.3 | Complete |
 | S6.0 | In Progress (requirements/architecture realignment) |
+| S6.1 | Complete (writer-gate + runtime projection backend) |
+| S6.2 | In Progress (dashboard runtime-projection wiring) |
 
 ## Sprint S0 — Foundation (Complete)
 
