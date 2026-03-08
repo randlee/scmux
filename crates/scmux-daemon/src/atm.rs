@@ -39,8 +39,6 @@ struct AgentEntry {
     agent: String,
     #[serde(default)]
     state: String,
-    #[serde(default)]
-    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,10 +87,6 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         };
 
         for agent in agents {
-            let Some(session_name) = extract_session_name(agent.session_id.as_deref()) else {
-                continue;
-            };
-
             let state_entry = match query_agent_state(&socket_path, &team, &agent.agent).await {
                 Ok(entry) => Some(entry),
                 Err(err) => {
@@ -124,7 +118,8 @@ pub async fn poll_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             }
 
             updates.push(AtmRuntimeUpdate {
-                session_name,
+                team: team.clone(),
+                agent: agent.agent.clone(),
                 state: derived_state,
                 last_transition,
             });
@@ -250,19 +245,6 @@ fn normalize_state(state: &str) -> &'static str {
         "unknown" => "unknown",
         "stuck" => "stuck",
         _ => "unknown",
-    }
-}
-
-fn extract_session_name(session_id: Option<&str>) -> Option<String> {
-    let value = session_id?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let session = value.split(':').next().unwrap_or_default().trim();
-    if session.is_empty() {
-        None
-    } else {
-        Some(session.to_string())
     }
 }
 

@@ -7,10 +7,6 @@ use tracing::{info, warn};
 
 use crate::{db::SessionDefinition, tmux, AppState};
 
-pub async fn poll_cycle(state: &Arc<AppState>) -> anyhow::Result<()> {
-    crate::tmux_poller::poll_cycle(state).await
-}
-
 /// Returns true if the cron expression should fire within the current 15s window.
 pub fn should_run_now(expr: &str, now: &chrono::DateTime<Utc>) -> bool {
     let normalized = if expr.split_whitespace().count() == 5 {

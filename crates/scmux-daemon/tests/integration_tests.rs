@@ -1,6 +1,6 @@
 use chrono::{Datelike, Duration, Timelike, Utc};
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
-use scmux_daemon::{ci, db, definition_writer, hosts, scheduler, AppState, SystemClock};
+use scmux_daemon::{atm, ci, db, definition_writer, hosts, tmux_poller, AppState, SystemClock};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -40,7 +40,7 @@ fn build_state() -> (Arc<AppState>, TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("integration.db");
     let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-    let host_id = db::ensure_local_host(&conn).expect("local host");
+    let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
         db_path: db_path.to_string_lossy().to_string(),
@@ -149,7 +149,7 @@ async fn t_i_01_poll_cycle_writes_session_status_rows() {
     let name = unique_name("ti01");
     let session_id = insert_session(&state, &name, false, None);
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     let db_conn = state.db.lock().expect("db lock");
     let count: i64 = db_conn
@@ -184,7 +184,7 @@ exit 1
     ));
     let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&state).await;
+    let poll_result = tmux_poller::poll_cycle(&state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev);
     poll_result.expect("poll cycle");
 
@@ -197,7 +197,7 @@ async fn t_i_03_poll_cycle_marks_stopped_for_missing_session() {
     let name = unique_name("ti03");
     let _session_id = insert_session(&state, &name, false, None);
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     assert_eq!(runtime_status(&state, &name), "stopped");
 }
@@ -218,10 +218,15 @@ async fn t_i_04_running_to_missing_transition_logs_stopped_event() {
         let mut live = std::collections::HashMap::new();
         live.insert(name.clone(), panes);
         let mut runtime = state.runtime.lock().expect("runtime lock");
-        runtime.apply_tmux_snapshot(&[name.clone()], &live, &chrono::Utc::now().to_rfc3339());
+        runtime.apply_tmux_snapshot(
+            std::slice::from_ref(&name),
+            &live,
+            &std::collections::HashMap::new(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
     }
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     assert_eq!(runtime_status(&state, &name), "stopped");
 }
@@ -232,7 +237,7 @@ async fn t_i_04_auto_start_attempt_logs_event() {
     let name = unique_name("ti04");
     let _session_id = insert_session(&state, &name, true, None);
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     let status = runtime_status(&state, &name);
     assert!(status == "starting" || status == "running" || status == "stopped");
@@ -253,7 +258,7 @@ async fn t_i_05_due_cron_attempt_logs_event() {
     );
     let _session_id = insert_session(&state, &name, false, Some(cron));
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     let status = runtime_status(&state, &name);
     assert!(status == "starting" || status == "running" || status == "stopped");
@@ -283,7 +288,7 @@ async fn t_i_06_invalid_cron_does_not_attempt_start() {
         db_conn.last_insert_rowid()
     };
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     assert_eq!(runtime_status(&state, &name), "stopped");
 }
@@ -303,7 +308,7 @@ async fn t_i_07_single_cycle_does_not_retry_failed_start() {
     );
     let _session_id = insert_session(&state, &name, true, Some(cron));
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     let status = runtime_status(&state, &name);
     assert!(status == "starting" || status == "running" || status == "stopped");
@@ -313,7 +318,9 @@ async fn t_i_07_single_cycle_does_not_retry_failed_start() {
 async fn t_i_08_write_health_inserts_row() {
     let (state, _tmp) = build_state();
 
-    db::write_health(&state).await.expect("write health");
+    definition_writer::write_health(&state)
+        .await
+        .expect("write health");
 
     let db_conn = state.db.lock().expect("db lock");
     let count: i64 = db_conn
@@ -336,7 +343,9 @@ async fn t_i_09_write_health_prunes_older_than_seven_days() {
             .expect("seed old health row");
     }
 
-    db::write_health(&state).await.expect("write health");
+    definition_writer::write_health(&state)
+        .await
+        .expect("write health");
 
     let db_conn = state.db.lock().expect("db lock");
     let old_count: i64 = db_conn
@@ -433,13 +442,13 @@ async fn td_22_poll_cycle_latency_under_500ms_for_50_sessions() {
     let script = write_script("#!/bin/sh\nexit 1\n");
     let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
 
-    scheduler::poll_cycle(&state)
+    tmux_poller::poll_cycle(&state)
         .await
         .expect("warm-up poll cycle");
     let mut samples = Vec::new();
     for _ in 0..10 {
         let started = std::time::Instant::now();
-        scheduler::poll_cycle(&state).await.expect("poll cycle");
+        tmux_poller::poll_cycle(&state).await.expect("poll cycle");
         samples.push(started.elapsed());
     }
     restore_env_var("SCMUX_TMUX_BIN", prev);
@@ -475,7 +484,7 @@ exit 1
     );
     let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&state).await;
+    let poll_result = tmux_poller::poll_cycle(&state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev);
     poll_result.expect("poll cycle");
 
@@ -544,7 +553,7 @@ exit 1
     ));
     let prev = set_env_var("SCMUX_TMUXP_BIN", script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&state).await;
+    let poll_result = tmux_poller::poll_cycle(&state).await;
     restore_env_var("SCMUX_TMUXP_BIN", prev);
     poll_result.expect("poll cycle");
 
@@ -562,7 +571,7 @@ async fn td_24_daemon_rss_under_50mb_after_loading_20_sessions() {
         insert_session(&state, &name, false, None);
     }
 
-    scheduler::poll_cycle(&state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&state).await.expect("poll cycle");
 
     let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
     let rss_kb: u64 = status
@@ -582,4 +591,181 @@ async fn td_24_daemon_rss_under_50mb_after_loading_20_sessions() {
 #[tokio::test]
 async fn td_24_daemon_rss_under_50mb_after_loading_20_sessions() {
     // Linux-only implementation uses /proc/self/status; macOS is validated manually in Phase 4 runbook.
+}
+
+#[tokio::test]
+async fn t_wg_01_definition_writer_create_path_mutates_sqlite() {
+    let (state, _tmp) = build_state();
+    let name = unique_name("wg01");
+    let created = {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_session(
+            &db_conn,
+            &db::NewSession {
+                name: name.clone(),
+                project: Some("writer-gate".to_string()),
+                host_id: state.host_id,
+                config_json: format!(
+                    r#"{{"session_name":"{name}","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
+                ),
+                cron_schedule: None,
+                auto_start: false,
+                github_repo: None,
+                azure_project: None,
+            },
+        )
+        .expect("create via definition_writer")
+    };
+    assert!(created > 0);
+
+    let db_conn = state.db.lock().expect("db lock");
+    let count: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND name = ?2 AND enabled = 1",
+            rusqlite::params![state.host_id, name],
+            |r| r.get(0),
+        )
+        .expect("count session");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn t_wg_02_pollers_do_not_write_runtime_sqlite_tables() {
+    let (state, _tmp) = build_state();
+    let name = unique_name("wg02");
+    let _id = insert_session(&state, &name, false, None);
+
+    let sessions_before = {
+        let db_conn = state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND enabled = 1",
+                [state.host_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .expect("sessions before")
+    };
+
+    tmux_poller::poll_cycle(&state).await.expect("tmux poll");
+    hosts::poll_hosts(Arc::clone(&state))
+        .await
+        .expect("host poll");
+    ci::poll_once(&state).await.expect("ci poll");
+    let _ = atm::poll_once(&state).await;
+
+    let db_conn = state.db.lock().expect("db lock");
+    let sessions_after: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND enabled = 1",
+            [state.host_id],
+            |r| r.get(0),
+        )
+        .expect("sessions after");
+    let session_status_rows: i64 = db_conn
+        .query_row("SELECT COUNT(*) FROM session_status", [], |r| r.get(0))
+        .expect("session_status count");
+    let session_ci_rows: i64 = db_conn
+        .query_row("SELECT COUNT(*) FROM session_ci", [], |r| r.get(0))
+        .expect("session_ci count");
+    let session_atm_rows: i64 = db_conn
+        .query_row("SELECT COUNT(*) FROM session_atm", [], |r| r.get(0))
+        .expect("session_atm count");
+
+    assert_eq!(sessions_after, sessions_before);
+    assert_eq!(session_status_rows, 0);
+    assert_eq!(session_ci_rows, 0);
+    assert_eq!(session_atm_rows, 0);
+}
+
+#[tokio::test]
+async fn t_wg_03_unapproved_project_write_is_rejected() {
+    let (state, _tmp) = build_state();
+    let name = unique_name("wg03");
+    let db_conn = state.db.lock().expect("db lock");
+    let result = definition_writer::create_session(
+        &db_conn,
+        &db::NewSession {
+            name: name.clone(),
+            project: Some("writer-gate".to_string()),
+            host_id: state.host_id,
+            config_json: format!(r#"{{"session_name":"{name}","panes":[]}}"#),
+            cron_schedule: None,
+            auto_start: false,
+            github_repo: None,
+            azure_project: None,
+        },
+    );
+
+    match result {
+        Err(definition_writer::WriteError::Validation(message)) => {
+            assert!(message.contains("config_json.panes[]"));
+        }
+        Err(other) => panic!("expected validation error, got: {other:?}"),
+        Ok(_) => panic!("expected validation error for unapproved project write"),
+    }
+}
+
+#[tokio::test]
+async fn t_wg_04_delete_db_and_restart_does_not_reconstruct_from_tmux() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("wg04.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+
+    {
+        let conn = db::open(&db_path_str).expect("open db");
+        let _host_id = definition_writer::ensure_local_host(&conn).expect("local host");
+    }
+
+    std::fs::remove_file(&db_path).expect("delete sqlite");
+
+    let conn = db::open(&db_path_str).expect("reopen db");
+    let host_id = definition_writer::ensure_local_host(&conn).expect("local host after restart");
+    let state = Arc::new(AppState {
+        db: std::sync::Mutex::new(conn),
+        db_path: db_path_str,
+        host_id,
+        config: test_config(),
+        reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
+        ci_tools: ci::ToolAvailability::default(),
+        clock: Arc::new(SystemClock),
+        atm_available: std::sync::atomic::AtomicBool::new(false),
+        last_api_access: std::sync::atomic::AtomicU64::new(0),
+        started_at: std::time::Instant::now(),
+    });
+
+    let _guard = env_lock().lock().await;
+    let script = write_script(
+        r#"#!/bin/sh
+if [ "$1" = "list-sessions" ]; then
+  echo "wg04-alpha"
+  echo "wg04-beta"
+  exit 0
+fi
+if [ "$1" = "list-panes" ]; then
+  echo "0|lead|zsh|1"
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let prev = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let poll_result = tmux_poller::poll_cycle(&state).await;
+    restore_env_var("SCMUX_TMUX_BIN", prev);
+    poll_result.expect("poll cycle");
+
+    let db_conn = state.db.lock().expect("db lock");
+    let recovered_sessions: i64 = db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND enabled = 1",
+            [state.host_id],
+            |r| r.get(0),
+        )
+        .expect("session count");
+    assert_eq!(recovered_sessions, 0);
+    drop(db_conn);
+
+    let runtime = state.runtime.lock().expect("runtime lock");
+    assert_eq!(runtime.discovery_rows().len(), 2);
 }

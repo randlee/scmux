@@ -78,7 +78,7 @@ pub fn open(path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
+pub(crate) fn ensure_local_host(conn: &Connection) -> Result<i64> {
     if let Ok(id) = conn.query_row(
         "SELECT id FROM hosts WHERE is_local = 1 AND enabled = 1 LIMIT 1",
         [],
@@ -437,7 +437,7 @@ pub(crate) fn soft_delete_host(
     Ok(changed > 0)
 }
 
-pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
+pub(crate) async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
     let state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let running = {

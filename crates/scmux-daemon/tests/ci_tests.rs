@@ -41,7 +41,7 @@ fn build_state(ci_tools: ToolAvailability) -> (Arc<AppState>, TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("ci-tests.db");
     let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-    let host_id = db::ensure_local_host(&conn).expect("local host");
+    let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(conn),
         db_path: db_path.to_string_lossy().to_string(),
@@ -120,7 +120,12 @@ fn insert_ci_session(
     let mut live = std::collections::HashMap::new();
     live.insert(name.to_string(), panes);
     let mut runtime = state.runtime.lock().expect("runtime lock");
-    runtime.apply_tmux_snapshot(&[name.to_string()], &live, &chrono::Utc::now().to_rfc3339());
+    runtime.apply_tmux_snapshot(
+        &[name.to_string()],
+        &live,
+        &std::collections::HashMap::new(),
+        &chrono::Utc::now().to_rfc3339(),
+    );
 
     session_id
 }
