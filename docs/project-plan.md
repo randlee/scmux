@@ -55,7 +55,8 @@ scmux is delivered in six phases with explicit integration branches and version 
 | S6.1 | Complete — PR #28 |
 | S6.2 | Complete — PR #29 |
 | S6.3 | Complete — PR #38 |
-| S6.fix | In Progress — critical review fix pass |
+| S6.fix | Complete — PR #40 |
+| S6.cli | Complete — PR #41 |
 
 ## Sprint S0 — Foundation (Complete)
 
