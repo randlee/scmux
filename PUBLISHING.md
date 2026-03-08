@@ -112,15 +112,15 @@ cargo publish -p scmux
 
 ### Release
 
-1. **Tag the release**:
+1. **Spawn publisher** and wait for pre-publish audit report.
+
+2. **Push the tag** (team-lead only, after publisher confirms audit pass):
    ```bash
-   git checkout main
-   git pull origin main
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag vX.Y.Z origin/main
+   git push origin vX.Y.Z
    ```
 
-2. **Monitor GitHub Actions**: Watch the Release workflow at https://github.com/randlee/scmux/actions
+3. **Monitor GitHub Actions**: publisher monitors the Release workflow using background agents.
 
 3. **Verify the release**: Check https://github.com/randlee/scmux/releases for:
    - 3 platform archives (linux x86_64, macOS arm64, windows x86_64)
@@ -146,8 +146,21 @@ Version numbers follow semantic versioning. Each minor version corresponds to a 
 | Version | Milestone |
 |---------|-----------|
 | 0.1.0 | Initial release — core tmux session management |
-| 0.2.0 | Next milestone (planned) |
+| 0.2.0 | Multi-host, dashboard, CI polling, CLI binary |
+| 0.3.0 | Supervision, /health, launchd/systemd, E2E tests |
+| 0.4.1 | Dashboard embed, crates.io publish, Homebrew, ATM integration |
+| 0.5.0 | Definition-first architecture, CLI write commands, scmux doctor |
 | 1.0.0 | Stable release (TBD) |
+
+## Premature-Tag Recovery
+
+If a `v*` tag was pushed before a successful final release from `main`:
+
+1. Mark that version burned — do not reuse, move, or delete the tag.
+2. Bump patch version on `develop` (`X.Y.Z → X.Y.(Z+1)`).
+3. Run the full release flow with the new version.
+
+This applies to accidental tags, failed release workflows, and any case where the tag exists before the release workflow completed successfully.
 
 ---
 
