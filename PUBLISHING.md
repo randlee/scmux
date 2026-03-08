@@ -41,20 +41,25 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-### 2. Homebrew Tap (Manual)
+### 2. Homebrew Tap (Automated)
 
 **Repository**: [`randlee/homebrew-tap`](https://github.com/randlee/homebrew-tap)
 **Formula**: `Formula/scmux.rb`
 
-**Update process after a new GitHub Release**:
+Homebrew updates are handled by the `update-homebrew` job in
+`.github/workflows/release.yml` after the `release` job completes.
 
-1. Wait for the GitHub Release workflow to complete
-2. Download `checksums.txt` from the release assets
-3. Update `Formula/scmux.rb` in the homebrew-tap repo:
-   - Update `version` to match the new release
-   - Update SHA256 hashes for each platform from `checksums.txt`
-   - Update download URLs to point to the new release tag
-4. Commit and push to `randlee/homebrew-tap`
+The job:
+1. Downloads `checksums.txt` from the new GitHub release
+2. Parses SHA256 values for:
+   - `aarch64-apple-darwin`
+   - `x86_64-unknown-linux-gnu`
+3. Checks out `randlee/homebrew-tap` using `HOMEBREW_TAP_TOKEN`
+4. Patches `Formula/scmux.rb` (version, URLs, sha256 values) and pushes
+
+Note: Homebrew formula coverage intentionally includes only `aarch64-apple-darwin`
+and `x86_64-unknown-linux-gnu`. Intel macOS (`x86_64-apple-darwin`) is not part of
+the current release artifact matrix.
 
 **Verification**:
 ```bash
@@ -133,9 +138,9 @@ cargo publish -p scmux
 
 4. **Verify crates.io publish**: The `publish-crates` job runs automatically after the GitHub Release is created. Check the Actions tab for status. If it fails, use the manual fallback commands in the crates.io section above.
 
-5. **Update Homebrew tap**:
-   - Get SHA256s from `checksums.txt`
-   - Update `Formula/scmux.rb` in `randlee/homebrew-tap`
+5. **Verify Homebrew auto-update**:
+   - Confirm `update-homebrew` job passed in the release workflow
+   - Confirm `randlee/homebrew-tap/Formula/scmux.rb` was updated
 
 6. **Announce**: Update any relevant documentation or channels
 
@@ -160,6 +165,7 @@ Version numbers follow semantic versioning. Each minor version corresponds to a 
 | Secret | Description |
 |--------|-------------|
 | `CARGO_REGISTRY_TOKEN` | crates.io API token with publish scope |
+| `HOMEBREW_TAP_TOKEN` | fine-grained PAT with write access to `randlee/homebrew-tap` |
 
 ### GitHub Environments
 

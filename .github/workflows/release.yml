@@ -123,3 +123,95 @@ jobs:
           set -euo pipefail
           cargo publish -p scmux --locked
           cargo publish -p scmux-daemon --locked
+
+  update-homebrew:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          gh release download "${GITHUB_REF_NAME}" --pattern checksums.txt --dir release
+
+      - name: Parse SHAs and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          MACOS_SHA="$(grep 'aarch64-apple-darwin.tar.gz' release/checksums.txt | awk '{print $1}')"
+          LINUX_SHA="$(grep 'x86_64-unknown-linux-gnu.tar.gz' release/checksums.txt | awk '{print $1}')"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ -z "${MACOS_SHA}" || -z "${LINUX_SHA}" ]]; then
+            echo "Failed to parse required checksums from release/checksums.txt" >&2
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "MACOS_SHA=${MACOS_SHA}" >> "$GITHUB_ENV"
+          echo "LINUX_SHA=${LINUX_SHA}" >> "$GITHUB_ENV"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: randlee/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Patch formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          mac_sha = os.environ["MACOS_SHA"]
+          linux_sha = os.environ["LINUX_SHA"]
+
+          formula_path = Path("homebrew-tap/Formula/scmux.rb")
+          text = formula_path.read_text(encoding="utf-8")
+
+          text = re.sub(r'version "[^"]+"', f'version "{version}"', text, count=1)
+          text = re.sub(
+              r'https://github\.com/randlee/scmux/releases/download/v[^/]+/scmux-v[^"]+-aarch64-apple-darwin\.tar\.gz',
+              f'https://github.com/randlee/scmux/releases/download/v{version}/scmux-v{version}-aarch64-apple-darwin.tar.gz',
+              text,
+              count=1,
+          )
+          text = re.sub(
+              r'https://github\.com/randlee/scmux/releases/download/v[^/]+/scmux-v[^"]+-x86_64-unknown-linux-gnu\.tar\.gz',
+              f'https://github.com/randlee/scmux/releases/download/v{version}/scmux-v{version}-x86_64-unknown-linux-gnu.tar.gz',
+              text,
+              count=1,
+          )
+          text = re.sub(
+              r'(aarch64-apple-darwin\.tar\.gz"\n\s+sha256 ")[^"]*(")',
+              rf'\1{mac_sha}\2',
+              text,
+              count=1,
+          )
+          text = re.sub(
+              r'(x86_64-unknown-linux-gnu\.tar\.gz"\n\s+sha256 ")[^"]*(")',
+              rf'\1{linux_sha}\2',
+              text,
+              count=1,
+          )
+
+          formula_path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Commit and push to homebrew-tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/scmux.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "scmux ${VERSION}"
+          git push
