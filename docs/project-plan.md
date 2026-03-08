@@ -285,6 +285,59 @@ scmux is delivered in six phases with explicit integration branches and version 
   - QA re-review reports no blocking findings for Sprint 6.0 docs
 - Related PR: `#27`
 
+### Sprint 6.1 — Writer Gate + Runtime Projection
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s1-writer-gate`
+- Base branch: `integrate/phase-6`
+- PR target: `integrate/phase-6`
+- Status: Complete — merged PR #28 (6ddcdfb)
+- Scope:
+  - `definition_writer` module — sole persistent writer; `pub(crate)` visibility boundary on `db.rs` write functions
+  - In-memory runtime projection replacing poller writes to `session_status`, `session_ci`, `session_atm`
+  - `scheduler.rs` → `tmux_poller.rs` rename; cron logic in separate module
+  - Graceful stop: ATM shutdown → grace period → scoped hard-stop
+  - API host CRUD (POST/PATCH/DELETE /hosts) via definition_writer
+  - GET /discovery endpoint (read-only raw tmux discovery)
+- Acceptance criteria: all met — cargo clippy clean, 78 tests pass, writer-gate T-WG-01..T-WG-04 verified
+- Related PR: #28
+- Deferred findings (tracked as GH issues): #30, #31, #32, #33, #34
+
+### Sprint 6.2 — Dashboard Wiring + Per-Pane ATM + CI View
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s2-runtime-projection`
+- Base branch: `feature/p6-s1-writer-gate`
+- PR target: `integrate/phase-6`
+- Status: In Progress — PR #29 open (ea82804), QA running
+- Scope:
+  - Dashboard primary view: all defined projects (running + stopped)
+  - Per-pane ATM state on project cards (active/idle/stuck/offline/unknown)
+  - CI run color indicators (green/yellow/red) per project card
+  - Secondary discovery tab wired to GET /discovery
+  - Start/Stop buttons wired to POST /sessions/:name/start and /stop
+  - New Project + card Edit flows via POST/PATCH /sessions
+  - dashboard.js recompiled
+- Related PR: #29
+
+### Sprint 6.3 — Cleanup + Lifecycle Tests + Deferred Findings
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s3-cleanup-tests`
+- Base branch: `feature/p6-s2-runtime-projection`
+- PR target: `integrate/phase-6`
+- Status: Pending (awaiting S6.2 QA verdict)
+- Scope:
+  - #30 SCMUX-QA-P6S1-004: Remove deprecated table DDL (session_status, session_ci, session_atm) from db::migrate()
+  - #31 SCMUX-QA-P6S1-006: Explicit per-pane ATM field in API response (ATM-03)
+  - #32 SCMUX-QA-P6S1-007: Add approval policy comment to validate_approved_project
+  - #33 SCMUX-QA-P6S1-008: Tag/name T-LC-01..T-LC-06 lifecycle tests; add T-LC-03
+  - #34 SCMUX-QA-P6S1-009: Populate or remove recent_events field in GET /sessions/:name
+  - Any deferred findings from S6.2 QA
+- Acceptance criteria:
+  - cargo clippy clean, cargo test passes
+  - No deprecated table DDL in migrate()
+  - T-LC-01..T-LC-06 named and passing
+  - recent_events populated or removed
+  - GH issues #30–34 closed
+
 ## Dependencies Across Sprints
 
 - `1.1` must merge before `1.2`.
