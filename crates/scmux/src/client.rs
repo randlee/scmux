@@ -140,6 +140,39 @@ pub struct HostSummary {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateHostRequest {
+    pub name: String,
+    pub address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_local: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PatchHostRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_port: Option<u16>,
+}
+
+impl PatchHostRequest {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.address.is_none()
+            && self.ssh_user.is_none()
+            && self.api_port.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -305,6 +338,27 @@ impl ApiClient {
 
     pub async fn list_hosts(&self) -> Result<Vec<HostSummary>, ClientError> {
         self.request_json(Method::GET, "/hosts", None::<&()>).await
+    }
+
+    pub async fn create_host(
+        &self,
+        req: &CreateHostRequest,
+    ) -> Result<ActionResponse, ClientError> {
+        self.request_json(Method::POST, "/hosts", Some(req)).await
+    }
+
+    pub async fn patch_host(
+        &self,
+        id: i64,
+        req: &PatchHostRequest,
+    ) -> Result<ActionResponse, ClientError> {
+        self.request_json(Method::PATCH, &format!("/hosts/{id}"), Some(req))
+            .await
+    }
+
+    pub async fn delete_host(&self, id: i64) -> Result<ActionResponse, ClientError> {
+        self.request_json(Method::DELETE, &format!("/hosts/{id}"), None::<&()>)
+            .await
     }
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {

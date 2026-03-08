@@ -209,11 +209,11 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | CLI-06 | `scmux start <name>` — start session | 3.2 |
 | CLI-07 | `scmux stop <name>` — stop session | 3.2 |
 | CLI-08 | `scmux jump <name>` — launch terminal via daemon | 3.2 |
-| CLI-09 | Project-definition create/edit/delete shall be dashboard editor-only in the current release (CLI write commands deferred) | 6.0 |
+| CLI-09 | `scmux session add/edit/disable/enable/remove` shall mutate session definitions via daemon write endpoints | 6.cli |
 | CLI-10 | `scmux hosts` — list hosts with reachability | 3.2 |
 | CLI-11 | `scmux daemon status` — show daemon health | 3.2 |
 | CLI-12 | Reserved for future non-editor write flows (requires explicit approval model) | 6.0 |
-| CLI-13 | `scmux host add` — deferred; host persistence remains editor-only in current release | 6.0 |
+| CLI-13 | `scmux host add/edit/remove` shall mutate host definitions via daemon write endpoints | 6.cli |
 | CLI-14 | `scmux daemon restart` — deferred to v2. Not implemented in current release | — |
 | CLI-15 | `scmux doctor` — comprehensive runtime diagnostic output: daemon health endpoint, poller states, ATM socket availability, sessions running count, and recent error signals; replaces `daemon_health` table visibility | 6.fix |
 
