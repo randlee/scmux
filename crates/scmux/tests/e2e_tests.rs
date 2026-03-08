@@ -58,10 +58,12 @@ impl CliE2eHarness {
                 atm: AtmConfig {
                     socket_path: None,
                     stuck_minutes: Some(10),
+                    stop_grace_secs: None,
                 },
                 hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+            runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
             ci_tools: ci::ToolAvailability::default(),
             clock: Arc::new(SystemClock),
             atm_available: std::sync::atomic::AtomicBool::new(false),
@@ -95,7 +97,12 @@ impl CliE2eHarness {
         let payload = json!({
             "name": name,
             "project": "e2e",
-            "config_json": { "session_name": name },
+            "config_json": {
+                "session_name": name,
+                "panes": [
+                    { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
+                ]
+            },
             "auto_start": false
         });
         let response = self

@@ -1,11 +1,8 @@
-// DG-02: This module is the sole SQLite writer. All Connection access is via AppState.db mutex.
-// No other module calls Connection::open — verified by audit (grep Connection::open crates/).
-use crate::config::HostConfig;
+// DG-02: SQLite is a definition store. Runtime pollers are read-only and update in-memory projection.
 use crate::AppState;
 use anyhow::{anyhow, bail};
 use cron::Schedule;
-use rusqlite::{params, Connection, Result};
-use rusqlite::{types::Value as SqlValue, OptionalExtension};
+use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension, Result};
 use std::sync::Arc;
 use std::{fmt::Write as _, str::FromStr};
 
@@ -33,51 +30,45 @@ pub struct SessionPatch {
 }
 
 #[derive(Debug, Clone)]
-pub struct RemoteSessionUpsert {
-    pub name: String,
-    pub project: Option<String>,
-    pub cron_schedule: Option<String>,
-    pub auto_start: bool,
-    pub status: String,
-    pub panes_json: String,
-    pub polled_at: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CiSession {
+pub struct SessionDefinition {
     pub id: i64,
     pub name: String,
+    pub project: Option<String>,
+    pub host_id: i64,
+    pub config_json: String,
+    pub cron_schedule: Option<String>,
+    pub auto_start: bool,
+    pub enabled: bool,
     pub github_repo: Option<String>,
     pub azure_project: Option<String>,
-    pub has_active_pane: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionCiUpdate {
-    pub session_id: i64,
-    pub provider: String,
-    pub status: String,
-    pub data_json: Option<String>,
-    pub tool_message: Option<String>,
-    pub polled_at: String,
-    pub next_poll_at: String,
+pub struct NewHost {
+    pub name: String,
+    pub address: String,
+    pub ssh_user: Option<String>,
+    pub api_port: u16,
+    pub is_local: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HostPatch {
+    pub name: Option<String>,
+    pub address: Option<String>,
+    pub ssh_user: Option<Option<String>>,
+    pub api_port: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionAtmUpdate {
-    pub session_name: String,
-    pub agent_id: String,
-    pub team: String,
-    pub state: String,
-    pub last_transition: Option<String>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionAtmRow {
-    pub session_name: String,
-    pub state: String,
-    pub last_transition: Option<String>,
+pub struct HostDefinition {
+    pub id: i64,
+    pub name: String,
+    pub address: String,
+    pub ssh_user: Option<String>,
+    pub api_port: u16,
+    pub is_local: bool,
+    pub last_seen: Option<String>,
 }
 
 pub fn open(path: &str) -> Result<Connection> {
@@ -88,52 +79,151 @@ pub fn open(path: &str) -> Result<Connection> {
 }
 
 pub fn ensure_local_host(conn: &Connection) -> Result<i64> {
-    if let Ok(id) = conn.query_row("SELECT id FROM hosts WHERE is_local = 1 LIMIT 1", [], |r| {
-        r.get(0)
-    }) {
+    if let Ok(id) = conn.query_row(
+        "SELECT id FROM hosts WHERE is_local = 1 AND enabled = 1 LIMIT 1",
+        [],
+        |r| r.get(0),
+    ) {
         return Ok(id);
     }
 
     let hostname = system_hostname();
     conn.execute(
-        "INSERT INTO hosts (name, address, is_local) VALUES (?1, 'localhost', 1)",
+        "INSERT INTO hosts (name, address, is_local, enabled) VALUES (?1, 'localhost', 1, 1)",
         params![hostname],
     )?;
-    conn.query_row("SELECT id FROM hosts WHERE is_local = 1 LIMIT 1", [], |r| {
-        r.get(0)
-    })
+    conn.query_row(
+        "SELECT id FROM hosts WHERE is_local = 1 AND enabled = 1 LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
 }
 
-pub fn seed_hosts_from_config(conn: &Connection, hosts: &[HostConfig]) -> anyhow::Result<()> {
-    for host in hosts {
-        conn.execute(
-            "INSERT OR IGNORE INTO hosts (name, address, ssh_user, api_port, is_local)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                host.name,
-                host.address,
-                host.ssh_user,
-                host.api_port.unwrap_or(7878),
-                host.is_local.unwrap_or(false)
-            ],
-        )?;
-    }
-    Ok(())
+pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<Option<i64>> {
+    let value = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
+            params![name, host_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(value)
 }
 
-pub fn update_host_last_seen(
+pub fn list_sessions_for_host(
     conn: &Connection,
     host_id: i64,
-    last_seen: &str,
-) -> anyhow::Result<()> {
-    conn.execute(
-        "UPDATE hosts SET last_seen = ?1 WHERE id = ?2",
-        params![last_seen, host_id],
+) -> anyhow::Result<Vec<SessionDefinition>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, project, host_id, config_json, cron_schedule, auto_start, enabled, github_repo, azure_project
+         FROM sessions
+         WHERE host_id = ?1 AND enabled = 1
+         ORDER BY host_id, project, name",
     )?;
-    Ok(())
+    let rows = stmt
+        .query_map(params![host_id], |r| {
+            Ok(SessionDefinition {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                project: r.get(2)?,
+                host_id: r.get(3)?,
+                config_json: r.get(4)?,
+                cron_schedule: r.get(5)?,
+                auto_start: r.get(6)?,
+                enabled: r.get(7)?,
+                github_repo: r.get(8)?,
+                azure_project: r.get(9)?,
+            })
+        })?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    Ok(rows)
 }
 
-pub fn create_session(conn: &Connection, session: &NewSession) -> anyhow::Result<i64> {
+pub fn get_session_for_host(
+    conn: &Connection,
+    host_id: i64,
+    name: &str,
+) -> anyhow::Result<Option<SessionDefinition>> {
+    let row = conn
+        .query_row(
+            "SELECT id, name, project, host_id, config_json, cron_schedule, auto_start, enabled, github_repo, azure_project
+             FROM sessions
+             WHERE host_id = ?1 AND name = ?2 AND enabled = 1
+             LIMIT 1",
+            params![host_id, name],
+            |r| {
+                Ok(SessionDefinition {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    project: r.get(2)?,
+                    host_id: r.get(3)?,
+                    config_json: r.get(4)?,
+                    cron_schedule: r.get(5)?,
+                    auto_start: r.get(6)?,
+                    enabled: r.get(7)?,
+                    github_repo: r.get(8)?,
+                    azure_project: r.get(9)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+pub fn list_hosts(conn: &Connection) -> anyhow::Result<Vec<HostDefinition>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, address, ssh_user, api_port, is_local, last_seen
+         FROM hosts
+         WHERE enabled = 1
+         ORDER BY is_local DESC, name",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(HostDefinition {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                address: r.get(2)?,
+                ssh_user: r.get(3)?,
+                api_port: r.get(4)?,
+                is_local: r.get(5)?,
+                last_seen: r.get(6)?,
+            })
+        })?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    Ok(rows)
+}
+
+pub fn get_host(conn: &Connection, host_id: i64) -> anyhow::Result<Option<HostDefinition>> {
+    let row = conn
+        .query_row(
+            "SELECT id, name, address, ssh_user, api_port, is_local, last_seen
+             FROM hosts
+             WHERE id = ?1 AND enabled = 1
+             LIMIT 1",
+            params![host_id],
+            |r| {
+                Ok(HostDefinition {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    address: r.get(2)?,
+                    ssh_user: r.get(3)?,
+                    api_port: r.get(4)?,
+                    is_local: r.get(5)?,
+                    last_seen: r.get(6)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+pub(crate) fn create_session(
+    _guard: &crate::definition_writer::WriteGuard,
+    conn: &Connection,
+    session: &NewSession,
+) -> anyhow::Result<i64> {
     validate_config_session_name(&session.name, &session.config_json)?;
     if let Some(expr) = &session.cron_schedule {
         validate_cron(expr)?;
@@ -157,7 +247,8 @@ pub fn create_session(conn: &Connection, session: &NewSession) -> anyhow::Result
     Ok(conn.last_insert_rowid())
 }
 
-pub fn update_session(
+pub(crate) fn update_session(
+    _guard: &crate::definition_writer::WriteGuard,
     conn: &Connection,
     host_id: i64,
     name: &str,
@@ -244,7 +335,12 @@ pub fn update_session(
     Ok(true)
 }
 
-pub fn soft_delete_session(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<bool> {
+pub(crate) fn soft_delete_session(
+    _guard: &crate::definition_writer::WriteGuard,
+    conn: &Connection,
+    host_id: i64,
+    name: &str,
+) -> anyhow::Result<bool> {
     let changed = conn.execute(
         "UPDATE sessions SET enabled = 0 WHERE name = ?1 AND host_id = ?2 AND enabled = 1",
         params![name, host_id],
@@ -252,212 +348,109 @@ pub fn soft_delete_session(conn: &Connection, host_id: i64, name: &str) -> anyho
     Ok(changed > 0)
 }
 
-pub fn session_id(conn: &Connection, host_id: i64, name: &str) -> anyhow::Result<Option<i64>> {
-    let value = conn
-        .query_row(
-            "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
-            params![name, host_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?;
-    Ok(value)
+pub(crate) fn create_host(
+    _guard: &crate::definition_writer::WriteGuard,
+    conn: &Connection,
+    host: &NewHost,
+) -> anyhow::Result<i64> {
+    conn.execute(
+        "INSERT INTO hosts (name, address, ssh_user, api_port, is_local, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+        params![
+            host.name,
+            host.address,
+            host.ssh_user,
+            host.api_port,
+            host.is_local
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
-pub fn upsert_remote_session(
+pub(crate) fn update_host(
+    _guard: &crate::definition_writer::WriteGuard,
     conn: &Connection,
     host_id: i64,
-    session: &RemoteSessionUpsert,
-) -> anyhow::Result<()> {
-    let config_json = serde_json::json!({ "session_name": session.name }).to_string();
-    conn.execute(
-        "INSERT INTO sessions (
-            name, project, host_id, config_json, cron_schedule, auto_start, enabled
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
-         ON CONFLICT(name, host_id) DO UPDATE SET
-            project = excluded.project,
-            cron_schedule = excluded.cron_schedule,
-            auto_start = excluded.auto_start,
-            enabled = 1",
-        params![
-            session.name,
-            session.project,
-            host_id,
-            config_json,
-            session.cron_schedule,
-            session.auto_start
-        ],
-    )?;
-
-    let session_id: i64 = conn.query_row(
-        "SELECT id FROM sessions WHERE name = ?1 AND host_id = ?2",
-        params![session.name, host_id],
-        |r| r.get(0),
-    )?;
-
-    conn.execute(
-        "INSERT INTO session_status (session_id, status, panes_json, polled_at)
-         VALUES (
-            ?1,
-            ?2,
-            ?3,
-            COALESCE(?4, datetime('now'))
-         )
-         ON CONFLICT(session_id) DO UPDATE SET
-            status = excluded.status,
-            panes_json = excluded.panes_json,
-            polled_at = excluded.polled_at",
-        params![
-            session_id,
-            session.status,
-            session.panes_json,
-            session.polled_at
-        ],
-    )?;
-
-    Ok(())
-}
-
-pub fn list_ci_sessions(conn: &Connection) -> anyhow::Result<Vec<CiSession>> {
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.name, s.github_repo, s.azure_project, COALESCE(ss.panes_json, '[]')
-         FROM sessions s
-         LEFT JOIN session_status ss ON ss.session_id = s.id
-         WHERE s.enabled = 1
-           AND (s.github_repo IS NOT NULL OR s.azure_project IS NOT NULL)
-         ORDER BY s.id",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            let panes_json: String = r.get(4)?;
-            Ok(CiSession {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                github_repo: r.get(2)?,
-                azure_project: r.get(3)?,
-                has_active_pane: panes_json_has_active(&panes_json),
-            })
-        })?
-        .filter_map(|row| row.ok())
-        .collect::<Vec<_>>();
-    Ok(rows)
-}
-
-pub fn ci_provider_due(
-    conn: &Connection,
-    session_id: i64,
-    provider: &str,
-    now_iso: &str,
+    patch: &HostPatch,
 ) -> anyhow::Result<bool> {
-    let due = conn
+    let row_exists = conn
         .query_row(
-            "SELECT next_poll_at <= ?3
-             FROM session_ci
-             WHERE session_id = ?1 AND provider = ?2",
-            params![session_id, provider, now_iso],
+            "SELECT COUNT(*) > 0 FROM hosts WHERE id = ?1 AND enabled = 1",
+            params![host_id],
             |r| r.get::<_, bool>(0),
         )
-        .optional()?
-        .unwrap_or(true);
-    Ok(due)
-}
-
-pub fn upsert_session_ci(conn: &Connection, update: &SessionCiUpdate) -> anyhow::Result<()> {
-    conn.execute(
-        "INSERT INTO session_ci (
-            session_id, provider, status, data_json, tool_message, polled_at, next_poll_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(session_id, provider) DO UPDATE SET
-            status = excluded.status,
-            data_json = excluded.data_json,
-            tool_message = excluded.tool_message,
-            polled_at = excluded.polled_at,
-            next_poll_at = excluded.next_poll_at",
-        params![
-            update.session_id,
-            update.provider,
-            update.status,
-            update.data_json,
-            update.tool_message,
-            update.polled_at,
-            update.next_poll_at
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn replace_session_atm(conn: &Connection, updates: &[SessionAtmUpdate]) -> anyhow::Result<()> {
-    conn.execute("DELETE FROM session_atm", [])?;
-
-    for update in updates {
-        conn.execute(
-            "INSERT INTO session_atm (
-                session_name, agent_id, team, state, last_transition, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                update.session_name,
-                update.agent_id,
-                update.team,
-                update.state,
-                update.last_transition,
-                update.updated_at
-            ],
-        )?;
+        .unwrap_or(false);
+    if !row_exists {
+        return Ok(false);
     }
 
-    Ok(())
+    let mut set_parts: Vec<&str> = Vec::new();
+    let mut values: Vec<SqlValue> = Vec::new();
+
+    if let Some(name) = &patch.name {
+        set_parts.push("name = ?");
+        values.push(SqlValue::Text(name.clone()));
+    }
+    if let Some(address) = &patch.address {
+        set_parts.push("address = ?");
+        values.push(SqlValue::Text(address.clone()));
+    }
+    if let Some(ssh_user) = &patch.ssh_user {
+        set_parts.push("ssh_user = ?");
+        values.push(match ssh_user {
+            Some(value) => SqlValue::Text(value.clone()),
+            None => SqlValue::Null,
+        });
+    }
+    if let Some(api_port) = patch.api_port {
+        set_parts.push("api_port = ?");
+        values.push(SqlValue::Integer(api_port as i64));
+    }
+
+    if set_parts.is_empty() {
+        return Ok(true);
+    }
+
+    let mut sql = String::from("UPDATE hosts SET ");
+    for (idx, part) in set_parts.iter().enumerate() {
+        if idx > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(part);
+    }
+    sql.push_str(" WHERE id = ? AND enabled = 1");
+    values.push(SqlValue::Integer(host_id));
+
+    conn.execute(&sql, rusqlite::params_from_iter(values))?;
+    Ok(true)
 }
 
-pub fn list_session_atm(conn: &Connection) -> anyhow::Result<Vec<SessionAtmRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT session_name, state, last_transition
-         FROM session_atm
-         ORDER BY session_name",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(SessionAtmRow {
-                session_name: r.get(0)?,
-                state: r.get(1)?,
-                last_transition: r.get(2)?,
-            })
-        })?
-        .filter_map(|row| row.ok())
-        .collect::<Vec<_>>();
-    Ok(rows)
-}
-
-pub fn log_session_event(
+pub(crate) fn soft_delete_host(
+    _guard: &crate::definition_writer::WriteGuard,
     conn: &Connection,
-    session_id: i64,
-    event: &str,
-    trigger: &str,
-    note: Option<&str>,
-) -> anyhow::Result<()> {
-    conn.execute(
-        "INSERT INTO session_events (session_id, event, trigger, note) VALUES (?1, ?2, ?3, ?4)",
-        params![session_id, event, trigger, note],
+    host_id: i64,
+) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE hosts SET enabled = 0 WHERE id = ?1 AND enabled = 1 AND is_local = 0",
+        params![host_id],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
     let state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
-        let db = state.db.lock().unwrap();
-        let running: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM session_status WHERE status = 'running'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+        let running = {
+            let runtime = state.runtime.lock().expect("runtime lock");
+            runtime.live_session_count()
+        };
 
+        let db = state.db.lock().unwrap();
         db.execute(
             "INSERT INTO daemon_health (host_id, status, sessions_running) VALUES (?1, 'ok', ?2)",
             params![state.host_id, running],
         )?;
 
-        // Prune records older than 7 days
         db.execute(
             "DELETE FROM daemon_health WHERE recorded_at < datetime('now', '-7 days')",
             [],
@@ -471,10 +464,8 @@ pub async fn write_health(state: &Arc<AppState>) -> anyhow::Result<()> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
-    // DG-06: Migration is idempotent — safe to run on every startup.
-    // All DDL statements use CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS /
-    // CREATE TRIGGER IF NOT EXISTS so re-running on an existing schema is a no-op.
-    conn.execute_batch(r#"
+    conn.execute_batch(
+        r#"
         CREATE TABLE IF NOT EXISTS hosts (
             id         INTEGER PRIMARY KEY,
             name       TEXT    NOT NULL UNIQUE,
@@ -482,6 +473,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             ssh_user   TEXT,
             api_port   INTEGER NOT NULL DEFAULT 7878,
             is_local   BOOLEAN NOT NULL DEFAULT 0,
+            enabled    BOOLEAN NOT NULL DEFAULT 1,
             created_at DATETIME NOT NULL DEFAULT (datetime('now')),
             last_seen  TEXT
         );
@@ -564,8 +556,10 @@ fn migrate(conn: &Connection) -> Result<()> {
           BEGIN
             UPDATE sessions SET updated_at = datetime('now') WHERE id = OLD.id;
           END;
-    "#)?;
+    "#,
+    )?;
     ensure_hosts_last_seen_column(conn)?;
+    ensure_hosts_enabled_column(conn)?;
     Ok(())
 }
 
@@ -578,6 +572,22 @@ fn ensure_hosts_last_seen_column(conn: &Connection) -> Result<()> {
 
     if !has_last_seen {
         conn.execute("ALTER TABLE hosts ADD COLUMN last_seen TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn ensure_hosts_enabled_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(hosts)")?;
+    let has_enabled = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "enabled");
+
+    if !has_enabled {
+        conn.execute(
+            "ALTER TABLE hosts ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -599,20 +609,6 @@ fn validate_cron(expr: &str) -> anyhow::Result<()> {
     let normalized = normalize_cron_expr(expr);
     Schedule::from_str(&normalized).map_err(|e| anyhow!("invalid cron_schedule: {e}"))?;
     Ok(())
-}
-
-fn panes_json_has_active(panes_json: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(panes_json) else {
-        return false;
-    };
-    let Some(items) = value.as_array() else {
-        return false;
-    };
-    items.iter().any(|item| {
-        item.get("status")
-            .and_then(|status| status.as_str())
-            .is_some_and(|status| status.eq_ignore_ascii_case("active"))
-    })
 }
 
 fn normalize_cron_expr(expr: &str) -> String {
