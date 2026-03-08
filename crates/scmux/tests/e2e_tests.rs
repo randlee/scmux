@@ -3,6 +3,7 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
+use scmux_daemon::definition_writer;
 use scmux_daemon::{AppState, SystemClock};
 use serde_json::json;
 use std::sync::Arc;
@@ -36,7 +37,7 @@ impl CliE2eHarness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("scmux-cli-e2e.db");
         let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-        let host_id = db::ensure_local_host(&conn).expect("local host");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
 
         let state = Arc::new(AppState {
             db: std::sync::Mutex::new(conn),
@@ -58,10 +59,12 @@ impl CliE2eHarness {
                 atm: AtmConfig {
                     socket_path: None,
                     stuck_minutes: Some(10),
+                    stop_grace_secs: None,
                 },
                 hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+            runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
             ci_tools: ci::ToolAvailability::default(),
             clock: Arc::new(SystemClock),
             atm_available: std::sync::atomic::AtomicBool::new(false),
@@ -95,7 +98,12 @@ impl CliE2eHarness {
         let payload = json!({
             "name": name,
             "project": "e2e",
-            "config_json": { "session_name": name },
+            "config_json": {
+                "session_name": name,
+                "panes": [
+                    { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
+                ]
+            },
             "auto_start": false
         });
         let response = self

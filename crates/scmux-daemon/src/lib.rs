@@ -3,10 +3,13 @@ pub mod atm;
 pub mod ci;
 pub mod config;
 pub mod db;
+pub mod definition_writer;
 pub mod hosts;
 pub mod logging;
-pub mod scheduler;
+pub mod runtime;
+mod start_cycle;
 pub mod tmux;
+pub mod tmux_poller;
 
 pub trait Clock: Send + Sync {
     fn now_utc(&self) -> chrono::DateTime<chrono::Utc>;
@@ -27,6 +30,7 @@ pub struct AppState {
     pub host_id: i64,
     pub config: config::Config,
     pub reachability: std::sync::Mutex<std::collections::HashMap<i64, hosts::HostReachability>>,
+    pub runtime: std::sync::Mutex<runtime::RuntimeProjection>,
     pub ci_tools: ci::ToolAvailability,
     pub clock: std::sync::Arc<dyn Clock>,
     pub atm_available: std::sync::atomic::AtomicBool,

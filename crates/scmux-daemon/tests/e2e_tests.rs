@@ -3,7 +3,9 @@ use scmux_daemon::api;
 use scmux_daemon::ci;
 use scmux_daemon::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
 use scmux_daemon::db;
-use scmux_daemon::scheduler;
+use scmux_daemon::definition_writer;
+use scmux_daemon::tmux::PaneInfo;
+use scmux_daemon::tmux_poller;
 use scmux_daemon::{AppState, Clock, SystemClock};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -45,7 +47,7 @@ impl E2eHarness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("scmux-e2e.db");
         let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
-        let host_id = db::ensure_local_host(&conn).expect("local host");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
 
         let state = Arc::new(AppState {
             db: std::sync::Mutex::new(conn),
@@ -67,10 +69,12 @@ impl E2eHarness {
                 atm: AtmConfig {
                     socket_path: None,
                     stuck_minutes: Some(10),
+                    stop_grace_secs: None,
                 },
                 hosts: Vec::new(),
             },
             reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+            runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
             ci_tools: ci::ToolAvailability::default(),
             clock,
             atm_available: std::sync::atomic::AtomicBool::new(false),
@@ -105,7 +109,12 @@ impl E2eHarness {
         let payload = json!({
             "name": name,
             "project": "e2e",
-            "config_json": { "session_name": name },
+            "config_json": {
+                "session_name": name,
+                "panes": [
+                    { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
+                ]
+            },
             "auto_start": auto_start,
             "cron_schedule": cron_schedule
         });
@@ -119,38 +128,12 @@ impl E2eHarness {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
-    fn session_id(&self, name: &str) -> i64 {
-        let db = self.state.db.lock().expect("db lock");
-        db.query_row("SELECT id FROM sessions WHERE name = ?1", [name], |r| {
-            r.get(0)
-        })
-        .expect("session id")
-    }
-
-    fn event_count(&self, name: &str, event: &str, trigger: &str) -> i64 {
-        let db = self.state.db.lock().expect("db lock");
-        db.query_row(
-            "SELECT COUNT(*)
-             FROM session_events se
-             INNER JOIN sessions s ON s.id = se.session_id
-             WHERE s.name = ?1 AND se.event = ?2 AND se.trigger = ?3",
-            rusqlite::params![name, event, trigger],
-            |r| r.get(0),
-        )
-        .expect("event count")
-    }
-
     fn status_for(&self, name: &str) -> String {
-        let db = self.state.db.lock().expect("db lock");
-        db.query_row(
-            "SELECT ss.status
-             FROM session_status ss
-             INNER JOIN sessions s ON s.id = ss.session_id
-             WHERE s.name = ?1",
-            [name],
-            |r| r.get(0),
-        )
-        .expect("status")
+        let runtime = self.state.runtime.lock().expect("runtime lock");
+        runtime
+            .session(name)
+            .map(|row| row.status.clone())
+            .unwrap_or_else(|| "stopped".to_string())
     }
 }
 
@@ -221,39 +204,47 @@ async fn t_e_02_add_session_auto_start_within_single_poll_cycle() {
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
     let prev_tmuxp = set_env_var("SCMUX_TMUXP_BIN", tmuxp_script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&h.state).await;
+    let poll_result = tmux_poller::poll_cycle(&h.state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
     restore_env_var("SCMUX_TMUXP_BIN", prev_tmuxp);
     poll_result.expect("poll cycle");
 
-    assert_eq!(h.event_count("te02-auto", "started", "auto_start"), 1);
+    let status = h.status_for("te02-auto");
+    assert!(status == "starting" || status == "running");
 }
 
 #[tokio::test]
 async fn t_e_03_kill_session_externally_detected_stopped_on_next_poll() {
     let h = E2eHarness::new().await;
     h.create_session("te03-stop", false, None).await;
-    let session_id = h.session_id("te03-stop");
     {
-        let db = h.state.db.lock().expect("db lock");
-        db.execute(
-            "INSERT INTO session_status (session_id, status, polled_at)
-             VALUES (?1, 'running', datetime('now'))",
-            [session_id],
-        )
-        .expect("seed running status");
+        let panes = vec![PaneInfo {
+            index: 0,
+            name: "pane-0".to_string(),
+            status: "active".to_string(),
+            last_activity: "now".to_string(),
+            current_command: "bash".to_string(),
+        }];
+        let mut live = std::collections::HashMap::new();
+        live.insert("te03-stop".to_string(), panes);
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.apply_tmux_snapshot(
+            &["te03-stop".to_string()],
+            &live,
+            &std::collections::HashMap::new(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
     }
 
     let _guard = env_lock().lock().await;
     let tmux_script = write_script("#!/bin/sh\nexit 1\n");
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&h.state).await;
+    let poll_result = tmux_poller::poll_cycle(&h.state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
     poll_result.expect("poll cycle");
 
     assert_eq!(h.status_for("te03-stop"), "stopped");
-    assert!(h.event_count("te03-stop", "stopped", "daemon") >= 1);
 }
 
 #[tokio::test]
@@ -301,7 +292,7 @@ exit 1
     let body: Value = start_response.json().await.expect("json");
     assert_eq!(body["ok"], true);
 
-    scheduler::poll_cycle(&h.state).await.expect("poll cycle");
+    tmux_poller::poll_cycle(&h.state).await.expect("poll cycle");
     restore_env_var("SCMUX_TMUXP_BIN", prev_tmuxp);
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
 
@@ -340,7 +331,7 @@ exit 1
     ));
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
 
-    scheduler::poll_cycle(&h.state)
+    tmux_poller::poll_cycle(&h.state)
         .await
         .expect("poll cycle running");
     let stop_response = h
@@ -350,7 +341,7 @@ exit 1
         .await
         .expect("stop request");
     assert_eq!(stop_response.status(), reqwest::StatusCode::OK);
-    scheduler::poll_cycle(&h.state)
+    tmux_poller::poll_cycle(&h.state)
         .await
         .expect("poll cycle stopped");
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
@@ -382,10 +373,11 @@ async fn t_e_07_cron_session_starts_at_scheduled_time_with_injected_clock() {
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", tmux_script.to_string_lossy().as_ref());
     let prev_tmuxp = set_env_var("SCMUX_TMUXP_BIN", tmuxp_script.to_string_lossy().as_ref());
 
-    let poll_result = scheduler::poll_cycle(&h.state).await;
+    let poll_result = tmux_poller::poll_cycle(&h.state).await;
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
     restore_env_var("SCMUX_TMUXP_BIN", prev_tmuxp);
     poll_result.expect("poll cycle");
 
-    assert_eq!(h.event_count("te07-cron", "started", "cron"), 1);
+    let status = h.status_for("te07-cron");
+    assert!(status == "starting" || status == "running");
 }

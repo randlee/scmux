@@ -30,6 +30,7 @@ pub struct PollingConfig {
 pub struct AtmConfig {
     pub socket_path: Option<String>,
     pub stuck_minutes: Option<u64>,
+    pub stop_grace_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

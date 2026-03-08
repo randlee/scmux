@@ -1,6 +1,8 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, atm, ci, db, hosts, logging, scheduler, AppState, SystemClock};
+use scmux_daemon::{
+    api, atm, ci, db, definition_writer, hosts, logging, tmux_poller, AppState, SystemClock,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -59,16 +61,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let conn = db::open(&db_path)?;
-    db::seed_hosts_from_config(
-        &conn,
-        &config
-            .hosts
-            .iter()
-            .filter(|host| !host.is_local.unwrap_or(false))
-            .cloned()
-            .collect::<Vec<_>>(),
-    )?;
-    let host_id = db::ensure_local_host(&conn)?;
+    let host_id = definition_writer::ensure_local_host(&conn)
+        .map_err(|err| anyhow::anyhow!(err.message()))?;
     let ci_tools = ci::detect_tools();
 
     info!("scmux-daemon starting — db={db_path} host_id={host_id}");
@@ -97,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         host_id,
         config,
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+        runtime: std::sync::Mutex::new(scmux_daemon::runtime::RuntimeProjection::default()),
         ci_tools,
         clock: std::sync::Arc::new(SystemClock),
         atm_available: std::sync::atomic::AtomicBool::new(false),
@@ -111,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::interval(tokio::time::Duration::from_secs(poll_interval_secs));
         loop {
             interval.tick().await;
-            if let Err(e) = scheduler::poll_cycle(&poll_state).await {
+            if let Err(e) = tmux_poller::poll_cycle(&poll_state).await {
                 tracing::error!("poll cycle error: {e}");
             }
         }
@@ -124,8 +119,8 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::interval(tokio::time::Duration::from_secs(health_interval_secs));
         loop {
             interval.tick().await;
-            if let Err(e) = db::write_health(&health_state).await {
-                tracing::error!("health write error: {e}");
+            if let Err(e) = definition_writer::write_health(&health_state).await {
+                tracing::error!("health write error: {}", e.message());
             }
         }
     });
