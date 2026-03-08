@@ -38,9 +38,9 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 |----|-------------|--------|
 | DG-01 | The daemon shall be a single self-contained binary (`scmux-daemon`) | 1.1 |
 | DG-02 | SQLite shall be a definition store only (projects/hosts/approved roster edits), not a tmux discovery cache | 6.0 |
-| DG-03 | Persistent SQLite writes shall be allowed only through the project-definition writer subsystem; multiple user editor entry points are allowed, but all must route through that subsystem | 6.0 |
-| DG-04 | The write module shall enforce an approved-project policy before accepting any persistent write | 6.0 |
-| DG-05 | Poller modules (`tmux_poller`, `hosts`, `ci`, `atm`) shall not persist runtime observations to SQLite | 6.0 |
+| DG-03 | Persistent SQLite writes shall be allowed only through a dedicated `definition_writer` module; persistent-write functions in `db.rs` shall be visibility-restricted (`pub(crate)`/`pub(super)`) so non-editor modules cannot call them directly | 6.0 |
+| DG-04 | Approved-project policy: a project is approved when created via the editor write path and valid with `enabled = 1` and non-empty `config_json.panes[]`; `definition_writer` shall reject persistent writes for non-approved/invalid projects | 6.0 |
+| DG-05 | Poller modules (`tmux_poller`, `hosts`, `ci`, `atm`) shall not persist runtime observations to SQLite; runtime state shall be served from an in-memory projection layer | 6.0 |
 | DG-06 | Deleting SQLite definitions shall not trigger reconstruction from tmux discovery; missing definitions remain missing until user redefines them | 6.0 |
 | DG-07 | The daemon shall serve the web dashboard as static files at `GET /` | 1.2 |
 | DG-08 | The daemon shall load configuration from `~/.config/scmux/scmux.toml` at startup | 1.1 |
@@ -48,6 +48,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DG-10 | Logging paths shall be structured and OpenTelemetry-ready (trace context propagation and consistent event attributes) for near-term OTel integration | 6.0 |
 | DG-11 | On panic or partial failure, the daemon shall isolate failures and shall not mass-stop unrelated sessions/agents | 6.0 |
 | DG-12 | Runtime state is live/ephemeral and shall not be treated as persistent source-of-truth data in SQLite | 6.0 |
+| DG-13 | Legacy runtime cache tables (`session_status`, `session_ci`, `session_atm`) are deprecated in P6 and replaced by in-memory projection for API responses | 6.0 |
 
 ### 4.2 Daemon — Session Lifecycle
 
@@ -62,6 +63,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | SL-07 | Start/stop failures shall be isolated to the target session and shall not cascade to other sessions | 6.0 |
 | SL-08 | Polling tmux/ATM/CI shall update runtime view only and shall not persist discovery-derived project definitions | 6.0 |
 | SL-09 | Auto-start/cron may trigger `start` only for already-defined projects in SQLite | 6.0 |
+| SL-10 | If `starting` fails (tmux/session creation or pane launch error), the session shall transition back to `stopped` with structured error details | 6.0 |
 
 ### 4.3 Daemon — Pane Status
 
@@ -72,6 +74,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | PS-03 | Pane presentation shall include: pane name, configured command, ATM agent/team mapping, current runtime state, and optional current task | 6.0 |
 | PS-04 | Missing ATM data shall degrade to `unknown` without failing session rendering | 6.0 |
 | PS-05 | Pane runtime snapshots are derived data; pollers shall not persist them as project-definition writes | 6.0 |
+| PS-06 | Per-pane runtime state shall be ephemeral in-memory projection data (not persisted runtime cache tables) | 6.0 |
 
 ### 4.4 Daemon — Terminal Launch (Jump)
 
@@ -122,8 +125,8 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-02 | All responses shall be JSON | 1.2 |
 | API-03 | CORS shall be permissive | 1.2 |
 | API-04 | `GET /health` — daemon status, uptime seconds, enabled session count, DB path, version | 1.2 |
-| API-05 | `GET /sessions` — all defined projects with live runtime status (running or stopped) | 6.0 |
-| API-06 | `GET /sessions/:name` — full detail: definition, pane mappings, ATM state, CI snapshot | 6.0 |
+| API-05 | `GET /sessions` — all defined projects with live runtime status (running or stopped), sourced from in-memory runtime projection + persisted definitions | 6.0 |
+| API-06 | `GET /sessions/:name` — full detail: definition, pane mappings, ATM state, CI snapshot, sourced from in-memory runtime projection + persisted definitions | 6.0 |
 | API-07 | `GET /sessions/:name` — 404 if not found | 1.2 |
 | API-08 | `POST /sessions/:name/start` — launch from stored project definition, return ok/error | 6.0 |
 | API-09 | `POST /sessions/:name/stop` — graceful-first shutdown path, return ok/error | 6.0 |
@@ -133,7 +136,8 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-13 | `DELETE /sessions/:name` — remove/disable project definition (editor-only persistent write path) | 6.0 |
 | API-14 | `GET /hosts` — list all hosts with reachability status | 1.2 |
 | API-15 | `GET /dashboard-config.json` — host list + dashboard settings for web UI | 1.2 |
-| API-16 | A secondary endpoint/view shall expose raw tmux discovery without mutating SQLite definitions | 6.0 |
+| API-16 | `GET /discovery` shall expose raw tmux discovery (including non-defined sessions) without mutating SQLite definitions | 6.0 |
+| API-17 | `POST /sessions/:name/start` shall reject missing/malformed `config_json` with a structured validation error payload | 6.0 |
 
 ### 4.8 Multi-Host / VPN Handling
 
@@ -164,8 +168,9 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DV-09 | Text search by session name | 2.2 |
 | DV-10 | Filters shall be combinable | 2.2 |
 | DV-11 | Header shall show global counts: running, idle, stopped, active agents, open PRs | 2.2 |
-| DV-12 | A secondary tab/view shall show raw tmux discovery for sessions not linked to defined projects; this view is informational only | 6.0 |
+| DV-12 | A secondary tab/view shall show `GET /discovery` raw tmux sessions not linked to defined projects; this view is informational only | 6.0 |
 | DV-13 | Each project card shall provide an Edit affordance that opens the project editor for definition updates | 6.0 |
+| DV-14 | The dashboard shall provide a `New Project` flow that creates project definitions through the `definition_writer` subsystem | 6.0 |
 
 ### 4.10 Dashboard — CI Display
 
@@ -252,6 +257,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | ATM-04 | `stuck` shall be derived from prolonged active state over configurable threshold (`atm.stuck_minutes`) | P5.3 |
 | ATM-05 | ATM unavailability shall degrade gracefully: project remains visible, ATM fields marked unavailable/unknown, no daemon crash | P5.3 |
 | ATM-06 | Runtime ATM observations shall not be auto-persisted as project-definition writes | 6.0 |
+| ATM-07 | Canonical per-pane ATM lookup key shall be (`pane.atm_team`, `pane.atm_agent`); pane index/name are display metadata only | 6.0 |
 
 ---
 
@@ -264,7 +270,6 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | NF-03 | Poll cycle shall complete in < 500ms for up to 50 projects | 4.1 |
 | NF-04 | HTTP read endpoints shall respond in < 100ms | 4.1 |
 | NF-05 | The system shall work on macOS (primary) and Linux (DGX Spark) | 4.1 |
-| NF-06 | Deleting SQLite definitions shall not trigger reconstruction from tmux discovery; definitions are restored only via explicit user edits/import | 6.0 |
 | NF-07 | All CI/ATM/network errors shall be handled gracefully and logged with trace context | 6.0 |
 | NF-08 | Single-host or single-session failures shall not crash the daemon or stop unrelated sessions | 4.1 |
 | NF-09 | Stop behavior shall be graceful-first and must not perform bulk kill on panic/error paths | 6.0 |
@@ -288,10 +293,11 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | ID | Test | Sprint |
 |----|------|--------|
 | T-LC-01 | `POST /sessions/:name/start` launches tmux session and pane commands from `config_json` | 6.0 |
-| T-LC-02 | Session transitions `stopped -> starting -> running -> idle` follow deterministic criteria; `done` transitions are validated once lifecycle policy is finalized | 6.0 |
+| T-LC-02 | Session transitions `stopped -> starting -> running -> idle` follow deterministic criteria; `done` transition-in behavior is deferred pending lifecycle decision | 6.0 |
 | T-LC-03 | `POST /sessions/:name/stop` sends ATM shutdown first, waits grace period, then performs scoped hard-stop only if needed | 6.0 |
 | T-LC-04 | Panic/error in one session does not stop or tear down unrelated sessions | 6.0 |
 | T-LC-05 | Closing iTerm does not stop tmux session or running agents | 6.0 |
+| T-LC-06 | `starting` failures transition session back to `stopped` with structured error details | 6.0 |
 
 ### 6.3 API Tests
 
@@ -305,7 +311,8 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-A-06 | `POST /sessions/:name/stop` returns ok true/false with graceful-stop diagnostics | 6.0 |
 | T-A-07 | `POST /sessions/:name/jump` opens viewer terminal without affecting session lifecycle | 6.0 |
 | T-A-08 | Editor endpoints (`POST/PATCH/DELETE /sessions`) are the only persistent-write API paths | 6.0 |
-| T-A-09 | Raw tmux discovery endpoint/view is read-only and does not mutate definitions | 6.0 |
+| T-A-09 | `GET /discovery` is read-only and does not mutate definitions | 6.0 |
+| T-A-10 | `POST /sessions/:name/start` returns structured validation errors for malformed/missing `config_json` | 6.0 |
 
 ### 6.4 Dashboard Manual Tests
 
@@ -391,3 +398,5 @@ The system is complete when:
 | OQ-5 | `scmux` CLI scope? | Separate binary, HTTP client to daemon. Same API as web UI. Persistent writes are restricted to the project-definition editor path. |
 | OQ-6 | Final `done` semantics and auto-teardown policy? | Pending product decision; keep default non-destructive behavior until explicitly approved. |
 | OQ-7 | Stop escalation exact parameters (timeouts/retries/hard-stop policy)? | Pending product decision; keep graceful-first and scoped behavior mandatory. |
+| OQ-8 | Runtime state persistence model? | P6 uses in-memory runtime projection; pollers do not persist runtime snapshots to SQLite. |
+| OQ-9 | Secondary discovery endpoint path? | `GET /discovery`. |

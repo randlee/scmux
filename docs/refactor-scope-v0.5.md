@@ -21,6 +21,7 @@ This document lists code paths that conflict with the corrected architecture and
   - writes to `session_atm` from ATM polling.
 - `crates/scmux-daemon/src/hosts.rs`
   - discovery-driven write paths for remote runtime data.
+  - `update_host_last_seen` persistence path must be removed from poller writes and replaced by in-memory host runtime projection.
 
 ## 2. Must Constrain
 
@@ -45,7 +46,21 @@ This document lists code paths that conflict with the corrected architecture and
   3. scoped hard-stop only if needed.
 - Panic/error paths must never bulk-stop unrelated sessions.
 
-## 5. Keep and Reuse
+## 5. Must Implement (New Behavior)
+
+1. `definition_writer` module:
+- Single persistent writer subsystem for project/host/approved-roster edits.
+- Rust visibility boundary so non-editor modules cannot call persistent write helpers.
+
+2. In-memory runtime projection layer:
+- Replace poller persistence into `session_status`, `session_ci`, `session_atm`.
+- Serve runtime state to API/dashboard/CLI from projection + persisted definitions.
+
+3. Graceful ATM stop integration:
+- `stop_session` sends ATM shutdown request first.
+- Applies scoped hard-stop only after grace timeout if needed.
+
+## 6. Keep and Reuse
 
 - Existing host reachability display concepts.
 - Existing dashboard embed/release automation paths.

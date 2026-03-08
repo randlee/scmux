@@ -14,10 +14,11 @@ Primary value: show all defined projects at once (running or stopped), expose pe
 
 2. Exactly one persistent writer subsystem exists.
 - Multiple editor entry points are allowed (`New Project`, `Project Editor`, card-level `Edit`), but all persistent writes must route through the same writer subsystem.
+- Compile boundary is enforced via Rust visibility: persistent-write functions in `db.rs` are restricted (`pub(crate)`/`pub(super)`) and callable only from `definition_writer`.
 - All pollers and runtime loops are SQLite read-only.
 
 3. Approved-project write policy is mandatory.
-- Any persistent write must validate that target project is approved.
+- Any persistent write must validate that target project is approved (`enabled = 1` and non-empty `config_json.panes[]` created via editor flow).
 
 4. Discovery is read-only.
 - Raw tmux discovery is informational and never mutates project definitions.
@@ -49,6 +50,8 @@ Runtime projection
   -> Dashboard + CLI
 ```
 
+P6 decision: runtime cache tables (`session_status`, `session_ci`, `session_atm`) are replaced by in-memory projection for runtime display paths.
+
 ## 4. Module Responsibilities
 
 ### 4.1 `definition_writer` (new/central)
@@ -74,13 +77,14 @@ Runtime projection
 
 ### 4.5 `atm.rs`
 - Reads ATM socket runtime state per agent.
-- Maps per-pane state via `config_json` (`atm_agent`, `atm_team`).
+- Maps per-pane state via canonical key (`pane.atm_team`, `pane.atm_agent`).
 - Permanent roster changes are editor-driven writes only.
 
 ### 4.6 `api.rs`
 - Read endpoints expose aggregated runtime + persisted definitions.
 - Action endpoints (`start/stop/jump`) control runtime only.
 - Persistent writes are only via definition-editor endpoints.
+- Discovery endpoint is explicit: `GET /discovery` for read-only raw tmux view.
 
 ## 5. Session Lifecycle Model
 
@@ -90,9 +94,10 @@ State machine:
 
 - `stopped`: project exists in definitions; runtime session absent.
 - `starting`: launch requested; tmux/agents being created.
+- `starting` failure edge: if tmux/session creation or pane launch fails, transition back to `stopped` with structured error details.
 - `running`: tmux exists and at least one pane agent is ATM-active.
 - `idle`: tmux exists; all pane agents idle/offline.
-- `done`: semantics and auto-teardown policy are intentionally unresolved and remain non-destructive by default.
+- `done`: semantics and auto-teardown policy are intentionally unresolved; no transition-in path is required in P6 and behavior remains non-destructive by default.
 
 ## 6. Key Flows
 
@@ -123,7 +128,7 @@ State machine:
 - Running projects show per-pane ATM + CI runtime status.
 
 ### 7.2 Secondary View
-- Raw tmux discovery tab.
+- Raw tmux discovery tab backed by `GET /discovery`.
 - Informational only, no persistence side effects.
 
 ## 8. Definition Schema (`config_json`)

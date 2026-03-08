@@ -2,7 +2,7 @@
 
 ## Overview
 
-scmux is delivered in four phases with explicit integration branches and version targets.
+scmux is delivered in six phases with explicit integration branches and version targets.
 
 | Phase | Theme | Target Version | Integration Branch |
 |-------|-------|----------------|--------------------|
@@ -10,6 +10,8 @@ scmux is delivered in four phases with explicit integration branches and version
 | 2 | Multi-host + Dashboard | 0.2.0 | `integrate/phase-2` |
 | 3 | CI + CLI | 0.3.0 | `integrate/phase-3` |
 | 4 | Supervision + Release | 0.3.0 | `integrate/phase-4` |
+| 5 | Dashboard Embed + Release Automation + ATM Activity | 0.4.x | `integrate/phase-5` |
+| 6 | Definition-First Architecture Realignment | 0.5.0 | `integrate/phase-6` (planned) |
 
 ## Execution Model
 
@@ -46,6 +48,10 @@ scmux is delivered in four phases with explicit integration branches and version
 | S3.2 | Pending |
 | S4.1 | Pending |
 | S4.2 | Pending |
+| S5.1 | Complete |
+| S5.2 | Complete |
+| S5.3 | Complete |
+| S6.0 | In Progress (requirements/architecture realignment) |
 
 ## Sprint S0 — Foundation (Complete)
 
@@ -235,6 +241,43 @@ scmux is delivered in four phases with explicit integration branches and version
 - Requirement IDs: `T-E-01..T-E-11`, `AC-1..AC-10`.
 - Detailed spec: [docs/sprint-specs/p4-s2-release.md](./sprint-specs/p4-s2-release.md)
 
+## Phase 5 — Dashboard Embed + Release Automation + ATM Activity (Complete)
+
+**Goal:** make dashboard self-contained for packaging, automate Homebrew updates, and add ATM activity visibility.
+**Version:** `0.4.x`
+**Integration branch:** `integrate/phase-5`
+
+### Sprint 5.1 — Dashboard Embed + crates.io
+- Status: Complete
+- Primary outcomes: embedded dashboard assets, release publish order fixes, CI dashboard drift checks.
+
+### Sprint 5.2 — Homebrew Release Automation
+- Status: Complete
+- Primary outcomes: `update-homebrew` workflow, formula patch automation and docs alignment.
+
+### Sprint 5.3 — ATM Integration
+- Status: Complete
+- Primary outcomes: ATM daemon polling, API/CLI/dashboard activity display, follow-up artifact sync fixes.
+
+## Phase 6 — Definition-First Architecture Realignment (Current)
+
+**Goal:** replace discovery-first assumptions with definition-first architecture and writer-subsystem constraints.
+**Version:** `0.5.0` (planned)
+**Integration branch:** `integrate/phase-6` (planned; current docs work targets `develop`)
+
+### Sprint 6.0 — Requirements + Architecture Rewrite
+
+- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-requirements-revision`
+- Base branch: `develop`
+- PR target: `develop`
+- Status: In Progress
+- Scope:
+  - hard-replace `docs/requirements.md` and `docs/architecture.md` to definition-first model
+  - define writer subsystem boundaries and prohibited poller writes
+  - define in-memory runtime projection approach and discovery endpoint contract
+  - capture refactor scope for conflicting runtime-write paths
+- Related PR: `#27`
+
 ## Dependencies Across Sprints
 
 - `1.1` must merge before `1.2`.
@@ -244,9 +287,11 @@ scmux is delivered in four phases with explicit integration branches and version
 - `3.1` must merge before `3.2`.
 - `3.2` must merge before any phase 4 sprint.
 - `4.1` must merge before `4.2`.
+- `4.2` must merge before phase 5 implementation sprints.
+- phase 5 completion is a prerequisite for phase 6 realignment implementation.
 
 ## Current Phase Entry Point
 
-- Active planning baseline: `Phase 1`.
-- Next implementation sprint: `1.1`.
-- First QA gate: after `1.1` PR opens on `integrate/phase-1`.
+- Active planning baseline: `Phase 6`.
+- Current sprint: `6.0` (requirements + architecture realignment).
+- Next implementation sprint: `6.1` (writer subsystem + runtime projection refactor, pending approval).
