@@ -37,40 +37,41 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | ID | Requirement | Sprint |
 |----|-------------|--------|
 | DG-01 | The daemon shall be a single self-contained binary (`scmux-daemon`) | 1.1 |
-| DG-02 | The daemon shall own all SQLite writes; no other component writes to the database | 1.1 |
-| DG-03 | The daemon shall serve the web dashboard as static files at `GET /` | 1.2 |
-| DG-04 | The daemon shall load configuration from `~/.config/scmux/scmux.toml` at startup | 1.1 |
-| DG-05 | The daemon shall seed the SQLite `hosts` table from `scmux.toml` on first run if the table is empty | 1.1 |
-| DG-06 | The daemon shall apply SQLite schema migrations on every startup (idempotent) | 1.1 |
-| DG-07 | The daemon shall log structured output via `tracing` at INFO level by default | 1.1 |
-| DG-08 | The daemon shall initialize logging via a `logging.rs` module that: reads `SCMUX_LOG` env var (trace/debug/info/warn/error, default info); writes human-readable output to stderr with `with_target(false)`; writes JSONL-formatted events to `~/.config/scmux/scmux-daemon.log` with 50 MiB size limit and 5-file rotation; exposes `init_logging()` returning `LoggingGuards` (RAII); supports `--verbose`/`-v` flag (sets `SCMUX_LOG=debug`). | 1.1 |
+| DG-02 | SQLite shall be a definition store only (projects/hosts/approved roster edits), not a tmux discovery cache | 6.0 |
+| DG-03 | Persistent SQLite writes shall be allowed only through the project-definition writer subsystem; multiple user editor entry points are allowed, but all must route through that subsystem | 6.0 |
+| DG-04 | The write module shall enforce an approved-project policy before accepting any persistent write | 6.0 |
+| DG-05 | Poller modules (`tmux_poller`, `hosts`, `ci`, `atm`) shall not persist runtime observations to SQLite | 6.0 |
+| DG-06 | Deleting SQLite definitions shall not trigger reconstruction from tmux discovery; missing definitions remain missing until user redefines them | 6.0 |
+| DG-07 | The daemon shall serve the web dashboard as static files at `GET /` | 1.2 |
+| DG-08 | The daemon shall load configuration from `~/.config/scmux/scmux.toml` at startup | 1.1 |
+| DG-09 | The daemon shall apply SQLite schema migrations on every startup (idempotent) | 1.1 |
+| DG-10 | Logging paths shall be structured and OpenTelemetry-ready (trace context propagation and consistent event attributes) for near-term OTel integration | 6.0 |
+| DG-11 | On panic or partial failure, the daemon shall isolate failures and shall not mass-stop unrelated sessions/agents | 6.0 |
+| DG-12 | Runtime state is live/ephemeral and shall not be treated as persistent source-of-truth data in SQLite | 6.0 |
 
 ### 4.2 Daemon — Session Lifecycle
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| SL-01 | The daemon shall poll `tmux list-sessions` every 15 seconds | 1.2 |
-| SL-02 | The daemon shall update `session_status` for all enabled sessions on every poll | 1.2 |
-| SL-03 | A session not found in `tmux list-sessions` shall be marked `stopped` | 1.2 |
-| SL-04 | A session found in `tmux list-sessions` shall be marked `running` | 1.2 |
-| SL-05 | When a running session disappears between polls, the daemon shall write a `stopped` event to `session_events` | 1.2 |
-| SL-06 | Sessions with `auto_start = 1` that are stopped shall be started by the daemon on the next poll cycle | 1.2 |
-| SL-07 | Sessions with a `cron_schedule` shall be started when the cron expression fires, if currently stopped | 1.2 |
-| SL-08 | Cron evaluation shall use a 15-second window to avoid missing fires between poll cycles | 1.2 |
-| SL-09 | Sessions shall be started via `tmuxp load -d <temp_config_file>` | 1.2 |
-| SL-10 | If `tmuxp load` fails, the daemon shall write a `failed` event with the error message to `session_events` | 1.2 |
-| SL-11 | Failed starts shall not be retried in the same poll cycle | 1.2 |
+| SL-01 | Runtime state machine shall be: `stopped -> starting -> running -> idle -> done` | 6.0 |
+| SL-02 | `POST /sessions/:name/start` shall load the project definition from SQLite `config_json`, create tmux layout, and launch all pane commands without requiring iTerm | 6.0 |
+| SL-03 | `running` means tmux session exists and at least one configured agent is ATM-active | 6.0 |
+| SL-04 | `idle` means tmux session exists and all configured agents are ATM-idle/offline | 6.0 |
+| SL-05 | `done` semantics are provisional and shall be finalized in a dedicated lifecycle decision; auto-teardown shall default to disabled until finalized | 6.0 |
+| SL-06 | `POST /sessions/:name/stop` shall be graceful-first: send ATM shutdown signal/message, wait a configurable grace period, then escalate to scoped hard-stop only if still running; escalation parameters are configurable and subject to product-level finalization | 6.0 |
+| SL-07 | Start/stop failures shall be isolated to the target session and shall not cascade to other sessions | 6.0 |
+| SL-08 | Polling tmux/ATM/CI shall update runtime view only and shall not persist discovery-derived project definitions | 6.0 |
+| SL-09 | Auto-start/cron may trigger `start` only for already-defined projects in SQLite | 6.0 |
 
 ### 4.3 Daemon — Pane Status
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| PS-01 | The daemon shall collect pane info for each running session via `tmux list-panes` | 1.2 |
-| PS-02 | Each pane shall report: index, name (pane_title), current_command, active flag | 1.2 |
-| PS-03 | A pane with `pane_active = 1` shall be reported as status `active` | 1.2 |
-| PS-04 | All other panes in a running session shall be reported as `idle` | 1.2 |
-| PS-05 | If `pane_title` is empty, fall back to `pane-<index>` | 1.2 |
-| PS-06 | Pane data shall be stored as JSON in `session_status.panes_json` | 1.2 |
+| PS-01 | Pane identity shall be definition-driven from `config_json.panes[]` (`name`, `command`, `atm_agent`, `atm_team`) | 6.0 |
+| PS-02 | Per-pane runtime state shall be resolved from ATM first (`active`, `idle`, `stuck`, `offline`) and tmux signals second | 6.0 |
+| PS-03 | Pane presentation shall include: pane name, configured command, ATM agent/team mapping, current runtime state, and optional current task | 6.0 |
+| PS-04 | Missing ATM data shall degrade to `unknown` without failing session rendering | 6.0 |
+| PS-05 | Pane runtime snapshots are derived data; pollers shall not persist them as project-definition writes | 6.0 |
 
 ### 4.4 Daemon — Terminal Launch (Jump)
 
@@ -92,14 +93,14 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | CI-01 | The daemon shall support two CI providers: GitHub (`gh` CLI) and Azure DevOps (`az` CLI) | 3.1 |
 | CI-02 | Both providers are optional; sessions may have one, both, or neither | 3.1 |
 | CI-03 | On startup, the daemon shall detect whether `gh` and `az` are available in PATH | 3.1 |
-| CI-04 | If a required CLI tool is not available, the daemon shall record `tool_unavailable` status in `session_ci` with an install message | 3.1 |
+| CI-04 | If a required CLI tool is not available, the daemon shall expose `tool_unavailable` runtime status with install guidance | 3.1 |
 | CI-05 | The daemon shall poll CI status on an adaptive interval per session | 3.1 |
 | CI-06 | When any pane in a session has status `active`, the CI poll interval shall be 1 minute | 3.1 |
 | CI-07 | When all panes are idle or session is stopped, the CI poll interval shall be 5 minutes | 3.1 |
-| CI-08 | Each session shall track its own `next_poll_at` in `session_ci` | 3.1 |
-| CI-09 | GitHub polling shall collect: open PRs (number, title, URL, author, draft flag) and recent workflow runs (status, branch, timestamp) via `gh pr list` and `gh run list` | 3.1 |
-| CI-10 | Azure polling shall collect: open PRs and pipeline run status via `az pipelines` | 3.1 |
-| CI-11 | CI results shall be stored as JSON blobs in `session_ci` with provider, polled_at, next_poll_at | 3.1 |
+| CI-08 | GitHub polling shall collect open PR list and recent workflow runs (`#`, title, URL, status, branch, timestamp) | 3.1 |
+| CI-09 | Azure polling shall collect open PRs and pipeline run status | 3.1 |
+| CI-10 | Project cards shall expose CI summary counts: active PRs, passing jobs, failing jobs, running jobs | 6.0 |
+| CI-11 | CI polling modules shall not persist runtime snapshots to SQLite | 6.0 |
 | CI-12 | The `github_repo` column on `sessions` shall hold the repo in `owner/repo` format | 3.1 |
 | CI-13 | The `azure_project` column on `sessions` shall hold the Azure DevOps project URL or identifier | 3.1 |
 
@@ -107,9 +108,9 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| DH-01 | The daemon shall write a heartbeat row to `daemon_health` every 60 seconds | 1.1 |
-| DH-02 | Each heartbeat shall include: host_id, status ("ok"), running session count, timestamp | 1.1 |
-| DH-03 | The daemon shall prune `daemon_health` rows older than 7 days on each write | 1.1 |
+| DH-01 | `GET /health` shall expose daemon liveness, uptime, and poller health | 1.1 |
+| DH-02 | Host polling shall expose reachability, last-seen timestamp, and stale-data status for display | 2.1 |
+| DH-03 | Single host/session poll errors shall not crash the daemon and shall not degrade unrelated project state | 4.1 |
 | DH-04 | The daemon shall start automatically on machine boot (launchd / systemd) | 4.1 |
 | DH-05 | The daemon shall restart automatically if it crashes | 4.1 |
 
@@ -121,24 +122,24 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | API-02 | All responses shall be JSON | 1.2 |
 | API-03 | CORS shall be permissive | 1.2 |
 | API-04 | `GET /health` — daemon status, uptime seconds, enabled session count, DB path, version | 1.2 |
-| API-05 | `GET /sessions` — all enabled sessions with live status, panes, CI summary | 1.2 |
-| API-06 | `GET /sessions/:name` — full detail: config, panes, CI, last 20 events | 1.2 |
+| API-05 | `GET /sessions` — all defined projects with live runtime status (running or stopped) | 6.0 |
+| API-06 | `GET /sessions/:name` — full detail: definition, pane mappings, ATM state, CI snapshot | 6.0 |
 | API-07 | `GET /sessions/:name` — 404 if not found | 1.2 |
-| API-08 | `POST /sessions/:name/start` — start session, log event, return ok/error | 1.2 |
-| API-09 | `POST /sessions/:name/stop` — stop session, log event, return ok/error | 1.2 |
+| API-08 | `POST /sessions/:name/start` — launch from stored project definition, return ok/error | 6.0 |
+| API-09 | `POST /sessions/:name/stop` — graceful-first shutdown path, return ok/error | 6.0 |
 | API-10 | `POST /sessions/:name/jump` — spawn terminal, return ok/error | 1.2 |
-| API-11 | `POST /sessions` — register new session (from CLI or UI) | 1.2 |
-| API-12 | `PATCH /sessions/:name` — update session fields | 1.2 |
-| API-13 | `DELETE /sessions/:name` — disable or remove session | 1.2 |
+| API-11 | `POST /sessions` — create project definition (persistent write path via writer subsystem; e.g. New Project editor entry point) | 6.0 |
+| API-12 | `PATCH /sessions/:name` — update project definition (persistent write path via writer subsystem; e.g. Project Editor/card Edit entry points) | 6.0 |
+| API-13 | `DELETE /sessions/:name` — remove/disable project definition (editor-only persistent write path) | 6.0 |
 | API-14 | `GET /hosts` — list all hosts with reachability status | 1.2 |
 | API-15 | `GET /dashboard-config.json` — host list + dashboard settings for web UI | 1.2 |
-| API-16 | Start, stop, and jump actions shall be logged to `session_events` | 1.2 |
+| API-16 | A secondary endpoint/view shall expose raw tmux discovery without mutating SQLite definitions | 6.0 |
 
 ### 4.8 Multi-Host / VPN Handling
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| MH-01 | Hosts shall be defined in `scmux.toml` and seeded into SQLite on first run | 2.1 |
+| MH-01 | Hosts shall be user-defined in the project/host editor and persisted in SQLite | 6.0 |
 | MH-02 | The dashboard shall poll all known hosts independently | 2.1 |
 | MH-03 | A host that is unreachable (timeout, network error) shall NOT be treated as an error condition | 2.1 |
 | MH-04 | When a host is unreachable, the daemon shall retain the last known session data | 2.1 |
@@ -153,7 +154,7 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | ID | Requirement | Sprint |
 |----|-------------|--------|
 | DV-01 | The dashboard shall support three views: Grid, List, Grouped-by-project | 2.2 |
-| DV-02 | Grid: one card per session — name, project, status dot, pane list, CI/PR badges | 2.2 |
+| DV-02 | Primary dashboard view shall show all defined projects (running or stopped), one card per project | 6.0 |
 | DV-03 | List: table — name, project, status, pane count, active count, open PRs, last activity | 2.2 |
 | DV-04 | Grouped: sessions under project headers with per-project running count and PR count | 2.2 |
 | DV-05 | Stopped sessions shall be visually de-emphasized (reduced opacity) | 2.2 |
@@ -163,14 +164,16 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | DV-09 | Text search by session name | 2.2 |
 | DV-10 | Filters shall be combinable | 2.2 |
 | DV-11 | Header shall show global counts: running, idle, stopped, active agents, open PRs | 2.2 |
+| DV-12 | A secondary tab/view shall show raw tmux discovery for sessions not linked to defined projects; this view is informational only | 6.0 |
+| DV-13 | Each project card shall provide an Edit affordance that opens the project editor for definition updates | 6.0 |
 
 ### 4.10 Dashboard — CI Display
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| DC-01 | Each session card shall show CI badges for configured providers | 2.2 |
-| DC-02 | GitHub: show open PR count badge; click expands PR list with links | 2.2 |
-| DC-03 | Azure: show pipeline status badge (passing / failing / running) | 2.2 |
+| DC-01 | Each project card shall show CI summary badges for configured providers | 2.2 |
+| DC-02 | GitHub: show expandable PR list with links and per-run status (green/yellow/red/running) | 6.0 |
+| DC-03 | Azure: show pipeline status list with pass/fail/running indicators | 6.0 |
 | DC-04 | When a tool is unavailable, show a grayed badge with tooltip: "Install gh CLI: brew install gh" | 2.2 |
 | DC-05 | When a session has no CI configured, show nothing (no empty badge) | 2.2 |
 
@@ -198,25 +201,25 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | CLI-06 | `scmux start <name>` — start session | 3.2 |
 | CLI-07 | `scmux stop <name>` — stop session | 3.2 |
 | CLI-08 | `scmux jump <name>` — launch terminal via daemon | 3.2 |
-| CLI-09 | `scmux add --name --project --config --auto-start` — register session | 3.2 |
-| CLI-10 | `scmux edit <name> [--cron] [--auto-start] [--config]` — update session | 3.2 |
-| CLI-11 | `scmux disable <name>` / `scmux enable <name>` — toggle enabled flag | 3.2 |
-| CLI-12 | `scmux remove <name>` — delete session | 3.2 |
-| CLI-13 | `scmux hosts` — list hosts with reachability | 3.2 |
-| CLI-14 | `scmux daemon status` — show daemon health | 3.2 |
-| CLI-15 | `scmux host add` — deferred to v2. Not implemented in Phase 3. | — |
-| CLI-16 | `scmux daemon restart` — deferred to v2. Not implemented in Phase 3. | — |
+| CLI-09 | Project-definition create/edit/delete shall be dashboard editor-only in the current release (CLI write commands deferred) | 6.0 |
+| CLI-10 | `scmux hosts` — list hosts with reachability | 3.2 |
+| CLI-11 | `scmux daemon status` — show daemon health | 3.2 |
+| CLI-12 | Reserved for future non-editor write flows (requires explicit approval model) | 6.0 |
+| CLI-13 | `scmux host add` — deferred; host persistence remains editor-only in current release | 6.0 |
+| CLI-14 | `scmux daemon restart` — deferred to v2. Not implemented in current release | — |
 
 ### 4.13 Session Registry
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| SR-01 | Sessions shall be stored in SQLite with: name, project, host_id, config_json, cron_schedule, auto_start, enabled, github_repo, azure_project | 1.1 |
-| SR-02 | `config_json` shall be a valid tmuxp JSON blob with `session_name` matching the session `name` | 1.2 |
+| SR-01 | Project definitions shall be stored in SQLite with: name, project, host_id, config_json, scheduling fields, enabled flag, repo metadata | 6.0 |
+| SR-02 | `config_json` shall define pane-level agent launch metadata (`name`, `command`, `atm_agent`, `atm_team`), repo path, and optional layout | 6.0 |
 | SR-03 | Session names shall be unique per host | 1.2 |
 | SR-04 | Sessions shall be soft-deletable via `enabled = 0` | 1.2 |
 | SR-05 | `cron_schedule` shall use standard 5-field cron format; NULL = manual-only | 1.2 |
 | SR-06 | `github_repo` format: `owner/repo` (e.g. `randlee/scmux`) | 1.2 |
+| SR-07 | Runtime discovery data (tmux sessions, pane activity, CI runs, ATM state) shall not be auto-persisted as project definitions | 6.0 |
+| SR-08 | Permanent ATM roster/team composition edits shall be user-approved and persisted only via the editor write path | 6.0 |
 
 ### 4.14 Dashboard Embed & Self-Contained Binary (v0.4.0 / P5.1)
 
@@ -243,15 +246,12 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 
 | ID | Requirement | Sprint |
 |----|-------------|--------|
-| ATM-01 | For sessions whose `name` matches the session component of an ATM entry's `session_id` field (e.g., `"scmux"` from `"scmux:1.2"`), the daemon shall query the local ATM daemon via Unix socket IPC (`${ATM_HOME}/.claude/daemon/atm-daemon.sock`, overridable via `scmux.toml atm.socket_path`) for agent state | P5.3 |
-| ATM-02 | The daemon shall store ATM state in a new `session_atm` table: `session_name, agent_id, team, state, last_transition, updated_at`; state values: `active\|idle\|offline\|unknown\|stuck` | P5.3 |
-| ATM-03 | `GET /sessions` shall include an `atm` field (state object or null) for each session | P5.3 |
-| ATM-04 | The dashboard shall display an activity indicator (active / idle / stuck) for ATM-enrolled sessions | P5.3 |
-| ATM-05 | `scmux list` shall include an activity column for ATM-enrolled sessions | P5.3 |
-| ATM-06 | When the ATM daemon is unreachable, the `atm` field shall be null and the rest of the system shall be unaffected | P5.3 |
-| ATM-07 | Non-ATM sessions shall fall back to `pane_last_activity` from tmux as a proxy for agent activity | P5.3 |
-| ATM-08 | The daemon shall derive a `stuck` state for ATM sessions where `state == "active"` and `(now - last_transition) > atm.stuck_minutes` (default 10); this derived state shall be stored in `session_atm` and returned in `/sessions` | P5.3 |
-| ATM-09 | The ATM socket path shall default to `${ATM_HOME}/.claude/daemon/atm-daemon.sock` and be overridable via `[atm] socket_path` in `scmux.toml`; `atm.stuck_minutes` shall be configurable (default 10) | P5.3 |
+| ATM-01 | The daemon shall query the local ATM daemon via Unix socket IPC (`${ATM_HOME}/.claude/daemon/atm-daemon.sock`, overridable via `scmux.toml atm.socket_path`) for per-agent state | P5.3 |
+| ATM-02 | ATM state shall be mapped per configured pane (`atm_agent`, `atm_team`) and exposed in session/project responses | 6.0 |
+| ATM-03 | Dashboard and CLI shall render per-pane ATM state (`active|idle|stuck|offline|unknown`) rather than only a session-level badge | 6.0 |
+| ATM-04 | `stuck` shall be derived from prolonged active state over configurable threshold (`atm.stuck_minutes`) | P5.3 |
+| ATM-05 | ATM unavailability shall degrade gracefully: project remains visible, ATM fields marked unavailable/unknown, no daemon crash | P5.3 |
+| ATM-06 | Runtime ATM observations shall not be auto-persisted as project-definition writes | 6.0 |
 
 ---
 
@@ -261,119 +261,72 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 |----|-------------|--------|
 | NF-01 | The daemon binary shall be self-contained (no runtime deps beyond tmux, tmuxp, gh/az) | 4.1 |
 | NF-02 | The daemon shall use < 50MB RAM in normal operation | 4.1 |
-| NF-03 | Poll cycle shall complete in < 500ms for up to 50 sessions | 4.1 |
+| NF-03 | Poll cycle shall complete in < 500ms for up to 50 projects | 4.1 |
 | NF-04 | HTTP read endpoints shall respond in < 100ms | 4.1 |
 | NF-05 | The system shall work on macOS (primary) and Linux (DGX Spark) | 4.1 |
-| NF-06 | If the SQLite database is deleted while the daemon is stopped, the next start shall reconstruct currently-running session state from live tmux output without error. Stopped or disabled session definitions that were not in tmux at restart time are not recoverable and need not be reconstructed. | 4.1 |
-| NF-07 | All CI errors (network failure, auth error, rate limit) shall be handled gracefully and logged | 3.1 |
-| NF-08 | The daemon shall not crash on any single-host or single-session failure | 4.1 |
+| NF-06 | Deleting SQLite definitions shall not trigger reconstruction from tmux discovery; definitions are restored only via explicit user edits/import | 6.0 |
+| NF-07 | All CI/ATM/network errors shall be handled gracefully and logged with trace context | 6.0 |
+| NF-08 | Single-host or single-session failures shall not crash the daemon or stop unrelated sessions | 4.1 |
+| NF-09 | Stop behavior shall be graceful-first and must not perform bulk kill on panic/error paths | 6.0 |
+| NF-10 | Logging/event schema shall remain OpenTelemetry-compatible to enable near-term instrumentation rollout | 6.0 |
 
 ---
 
 ## 6. Test Requirements
 
-### 6.1 Daemon Unit Tests
+### 6.1 Writer-Gate and Persistence Tests
 
 | ID | Test | Sprint |
-|----|-------------|--------|
-| T-D-01 | `db::open()` creates schema on fresh database | 1.1 |
-| T-D-02 | `db::open()` is idempotent on existing database | 1.1 |
-| T-D-03 | `db::ensure_local_host()` inserts local host if absent | 1.1 |
-| T-D-04 | `db::ensure_local_host()` returns existing host_id if present | 1.1 |
-| T-D-05 | `should_run_now()` true when cron fires in 15s window | 1.1 |
-| T-D-06 | `should_run_now()` false when cron does not fire in window | 1.1 |
-| T-D-07 | `should_run_now()` false for invalid cron expression | 1.1 |
-| T-D-08 | `tmux::live_sessions()` returns empty map when tmux not running | 1.2 |
-| T-D-09 | `tmux::live_sessions()` parses session names correctly | 1.2 |
-| T-D-10 | CI interval is 1 minute when any pane is active | 3.1 |
-| T-D-11 | CI interval is 5 minutes when all panes are idle | 3.1 |
-| T-D-12 | `tool_unavailable` recorded when `gh` not in PATH | 3.1 |
-| T-D-13 | `tool_unavailable` recorded when `az` not in PATH | 3.1 |
-| T-D-14 | `init_logging()` creates `~/.config/scmux/scmux-daemon.log` on startup | 1.1 |
-| T-D-15 | `SCMUX_LOG=warn` suppresses INFO-level messages on stderr | 1.1 |
-| T-D-16 | `--verbose` flag sets effective log level to DEBUG | 1.1 |
-| T-D-17 | CI fetch with network failure (simulated) does not crash daemon; records error in `session_ci` | 3.1 |
-| T-D-18 | CI fetch with auth/rate-limit error does not crash daemon; records error in `session_ci` | 3.1 |
-| T-D-19 | Single unreachable host does not abort poll cycle; remaining hosts and sessions processed normally | 4.1 |
-| T-D-20 | Single session with bad tmux state does not abort session loop; other sessions processed normally | 4.1 |
-| T-D-22 | Poll cycle p95 < 500ms with 50 seeded sessions using deterministic fake tmux (`SCMUX_TMUX_BIN`), run in `--release` mode with warm-up cycle before measurement (NF-03) | 4.1 |
-| T-D-23 | GET /sessions p95 < 100ms with 50 seeded sessions, `--release` mode (NF-04) | 4.1 |
-| T-D-24 | Daemon RSS < 50MB after loading 20 sessions (NF-02) | 4.1 |
+|----|------|--------|
+| T-WG-01 | Only the project-definition editor path can mutate SQLite; all other modules are denied at compile boundary and runtime checks | 6.0 |
+| T-WG-02 | Poller modules (`tmux_poller`, `hosts`, `ci`, `atm`) perform zero SQLite writes during runtime polling | 6.0 |
+| T-WG-03 | Unapproved project write attempts are rejected with explicit error | 6.0 |
+| T-WG-04 | Deleting SQLite and restarting does not reconstruct definitions from tmux discovery | 6.0 |
 
-### 6.2 Daemon Integration Tests
+### 6.2 Lifecycle and Safety Tests
 
 | ID | Test | Sprint |
-|----|-------------|--------|
-| T-I-01 | Poll cycle with no sessions completes without error | 1.2 |
-| T-I-02 | Poll cycle marks session running when found in tmux | 1.2 |
-| T-I-03 | Poll cycle marks session stopped when not found in tmux | 1.2 |
-| T-I-04 | Poll cycle writes stopped event when session disappears | 1.2 |
-| T-I-05 | Poll cycle starts auto_start session when stopped | 1.2 |
-| T-I-06 | Poll cycle does not start disabled session | 1.2 |
-| T-I-07 | Poll cycle does not restart already-running auto_start session | 1.2 |
-| T-I-08 | Health write inserts daemon_health row | 1.2 |
-| T-I-09 | Health write prunes rows older than 7 days | 1.2 |
-| T-I-10 | Unreachable remote host does not crash poll cycle | 2.1 |
-| T-I-11 | Host marked unreachable when /health times out | 2.1 |
-| T-I-12 | Host resumes reachable when /health responds again | 2.1 |
-| T-I-20 | DB deleted while daemon stopped → next start reconstructs currently-running tmux sessions without error; daemon does not crash or return errors on /health or /sessions | 4.1 |
+|----|------|--------|
+| T-LC-01 | `POST /sessions/:name/start` launches tmux session and pane commands from `config_json` | 6.0 |
+| T-LC-02 | Session transitions `stopped -> starting -> running -> idle` follow deterministic criteria; `done` transitions are validated once lifecycle policy is finalized | 6.0 |
+| T-LC-03 | `POST /sessions/:name/stop` sends ATM shutdown first, waits grace period, then performs scoped hard-stop only if needed | 6.0 |
+| T-LC-04 | Panic/error in one session does not stop or tear down unrelated sessions | 6.0 |
+| T-LC-05 | Closing iTerm does not stop tmux session or running agents | 6.0 |
 
 ### 6.3 API Tests
 
 | ID | Test | Sprint |
-|----|-------------|--------|
-| T-A-01 | GET /health returns 200 with correct fields | 1.2 |
-| T-A-02 | GET /sessions returns empty array when no sessions | 1.2 |
-| T-A-03 | GET /sessions returns sessions with correct status and panes | 1.2 |
-| T-A-04 | GET /sessions/:name returns 200 with config and events | 1.2 |
-| T-A-05 | GET /sessions/:name returns 404 for unknown session | 1.2 |
-| T-A-06 | POST /sessions/:name/start returns ok:true and logs event | 1.2 |
-| T-A-07 | POST /sessions/:name/start returns ok:false on tmuxp failure | 1.2 |
-| T-A-08 | POST /sessions/:name/stop returns ok:true and logs event | 1.2 |
-| T-A-09 | POST /sessions/:name/jump returns ok:true when iTerm2 launched | 1.2 |
-| T-A-10 | POST /sessions/:name/jump returns ok:false when terminal unavailable | 1.2 |
-| T-A-11 | POST /sessions (add) creates session in SQLite | 1.2 |
-| T-A-12 | PATCH /sessions/:name updates cron_schedule | 1.2 |
-| T-A-13 | DELETE /sessions/:name disables session | 1.2 |
-| T-A-14 | GET /hosts returns all hosts with reachability flag | 1.2 |
+|----|------|--------|
+| T-A-01 | `GET /health` returns daemon and poller health | 1.2 |
+| T-A-02 | `GET /sessions` returns all defined projects including stopped projects | 6.0 |
+| T-A-03 | `GET /sessions/:name` includes config, per-pane ATM state, and CI snapshot | 6.0 |
+| T-A-04 | `GET /sessions/:name` returns 404 for unknown project | 1.2 |
+| T-A-05 | `POST /sessions/:name/start` returns ok true/false with actionable message | 6.0 |
+| T-A-06 | `POST /sessions/:name/stop` returns ok true/false with graceful-stop diagnostics | 6.0 |
+| T-A-07 | `POST /sessions/:name/jump` opens viewer terminal without affecting session lifecycle | 6.0 |
+| T-A-08 | Editor endpoints (`POST/PATCH/DELETE /sessions`) are the only persistent-write API paths | 6.0 |
+| T-A-09 | Raw tmux discovery endpoint/view is read-only and does not mutate definitions | 6.0 |
 
 ### 6.4 Dashboard Manual Tests
 
 | ID | Test | Sprint |
-|----|-------------|--------|
-| T-UI-01 | Grid view renders all sessions | 2.2 |
-| T-UI-02 | List view renders all sessions in table | 2.2 |
-| T-UI-03 | Grouped view groups by project | 2.2 |
-| T-UI-04 | Status filters work correctly | 2.2 |
-| T-UI-05 | Project filter shows only correct sessions | 2.2 |
-| T-UI-06 | Search filters by name substring | 2.2 |
-| T-UI-07 | Clicking session opens jump modal | 2.2 |
-| T-UI-08 | Modal shows correct pane list | 2.2 |
-| T-UI-09 | Modal shows correct PR badges with links | 2.2 |
-| T-UI-10 | Modal "Open in iTerm2" sends POST /jump and shows feedback | 2.2 |
-| T-UI-11 | Stopped sessions are visually de-emphasized | 2.2 |
-| T-UI-12 | Unreachable host sessions render in monochrome | 2.2 |
-| T-UI-13 | "Last seen N ago" shows for unreachable hosts | 2.2 |
-| T-UI-14 | Full color resumes when host returns | 2.2 |
-| T-UI-15 | Tool-unavailable CI badges show tooltip with install instructions | 2.2 |
-| T-UI-16 | Escape key closes modal | 2.2 |
-| T-UI-17 | Header counts match data | 2.2 |
+|----|------|--------|
+| T-UI-01 | Primary dashboard view shows all defined projects (running and stopped) | 6.0 |
+| T-UI-02 | Secondary discovery tab shows raw tmux sessions not linked to definitions | 6.0 |
+| T-UI-03 | Project cards show per-pane ATM state (active/idle/stuck/offline/unknown) | 6.0 |
+| T-UI-04 | CI panel shows per-project PR list and run indicators (green/yellow/red/running) | 6.0 |
+| T-UI-05 | Unreachable host sessions render monochrome and recover automatically on reconnect | 2.1 |
+| T-UI-06 | Jump modal attaches viewer terminal and does not change agent run state | 6.0 |
 
-### 6.5 End-to-End Tests
+### 6.5 Reliability and Observability Tests
 
 | ID | Test | Sprint |
-|----|-------------|--------|
-| T-E-01 | Daemon starts, creates DB, serves /health | 4.2 |
-| T-E-02 | Add session → daemon starts it via auto_start within 15s | 4.2 |
-| T-E-03 | Kill session externally → daemon detects stopped within 15s | 4.2 |
-| T-E-04 | POST /start → session appears in tmux | 4.2 |
-| T-E-05 | POST /stop → session disappears from tmux | 4.2 |
-| T-E-06 | POST /jump → iTerm2 opens, attaches to correct session (manual runbook) | 4.2 |
-| T-E-07 | Cron session starts at scheduled time with injected test clock | 4.2 |
-| T-E-08 | Disconnect from VPN → remote host goes monochrome, no error dialog (manual runbook) | 4.2 |
-| T-E-09 | Reconnect VPN → remote host resumes full color (manual runbook) | 4.2 |
-| T-E-10 | `scmux list` → matches dashboard data | 4.2 |
-| T-E-11 | `scmux jump <name>` → iTerm2 opens via daemon | 4.2 |
+|----|------|--------|
+| T-RB-01 | Single host failure does not degrade unrelated hosts/projects | 4.1 |
+| T-RB-02 | Single session launch/stop failure does not cascade to other sessions | 6.0 |
+| T-RB-03 | No panic/error path issues bulk stop for all sessions | 6.0 |
+| T-RB-04 | Logs include correlation fields suitable for OpenTelemetry export mapping | 6.0 |
+| T-RB-05 | Runtime polling refreshes live state continuously without requiring persistent runtime writes | 6.0 |
 
 ### 6.6 Dashboard Embed Tests (v0.4.0 / P5.1)
 
@@ -386,14 +339,14 @@ When running 20–30 concurrent Claude Code agent teams across multiple machines
 | T-DE-05 | `SCMUX_DASHBOARD_DIR=/path` causes daemon to serve files from disk instead of embedded | P5.1 |
 | T-DE-06 | `cargo install --path crates/scmux-daemon` on a clean machine serves the dashboard | P5.1 |
 
-### 6.7 ATM Integration Tests (v0.4.0 / P5.3)
+### 6.7 ATM Integration Tests (v0.4.0 / P5.3+)
 
 | ID | Test | Sprint |
 |----|------|--------|
-| T-ATM-01 | `GET /sessions` includes `"atm": null` for non-ATM sessions | P5.3 |
-| T-ATM-02 | `GET /sessions` includes `"atm": {"state": "active", ...}` for ATM-enrolled sessions when ATM daemon is reachable | P5.3 |
-| T-ATM-03 | ATM daemon unreachable → `atm` field is null, no daemon crash, no error in response body | P5.3 |
-| T-ATM-04 | Dashboard renders activity badge for ATM sessions; no badge for non-ATM sessions | P5.3 |
+| T-ATM-01 | `GET /sessions` returns per-pane ATM state mapping for ATM-enrolled projects | 6.0 |
+| T-ATM-02 | `stuck` derivation is threshold-driven and test-validated | 6.0 |
+| T-ATM-03 | ATM daemon unreachable degrades gracefully without daemon crash | P5.3 |
+| T-ATM-04 | Dashboard renders per-pane activity states; non-ATM panes show `unknown` fallback | 6.0 |
 
 ---
 
@@ -407,14 +360,14 @@ The system is complete when:
 
 1. `cargo build --release --workspace` succeeds with no warnings
 2. Daemon survives 24 hours on macOS without crashing
-3. All T-D, T-I, and T-A tests pass
-4. Dashboard shows real live data from daemon
-5. Jump via dashboard opens iTerm2 attached to correct session
-6. `auto_start` session killed externally restarts within 30 seconds
-7. Cron-scheduled session starts within 15 seconds of scheduled time
+3. All writer-gate, lifecycle, API, and reliability tests pass
+4. Primary dashboard shows all defined projects (running and stopped) with per-pane ATM state
+5. Jump via dashboard opens iTerm2 attached to correct session (viewer-only behavior)
+6. `stop` performs graceful ATM shutdown attempt before scoped hard-stop escalation
+7. Auto-start/cron only affect explicitly defined projects
 8. Disconnecting VPN for a remote host produces no error dialogs; host shows monochrome
 9. Reconnecting VPN restores full-color display within one poll cycle
-10. Missing `gh`/`az` tools show grayed badges with install tooltip
+10. Missing `gh`/`az` tools show degraded CI state with install guidance
 
 **v0.4.0 additional gates (AC-11..AC-16):**
 
@@ -434,5 +387,7 @@ The system is complete when:
 | OQ-1 | Dashboard served separately or by daemon? | Daemon serves static files at `/`. Single binary. |
 | OQ-2 | How does browser trigger terminal launch? | `POST /sessions/:name/jump` → daemon spawns iTerm2 via AppleScript. No URI schemes. |
 | OQ-3 | PR data: daemon or dashboard? | Daemon fetches via `gh`/`az` CLI. Adaptive interval: 1min active, 5min idle. Missing tools show gracefully. |
-| OQ-4 | Multi-host config location? | `scmux.toml` seeds SQLite. Hosts monitored continuously. VPN gaps are normal — monochrome, no errors. |
-| OQ-5 | `scmux` CLI scope? | Separate binary, HTTP client to daemon. Same API as web UI. Daemon is sole SQLite writer. |
+| OQ-4 | Multi-host config location? | Hosts are user-defined via editor and persisted in SQLite. VPN gaps are normal — monochrome, no errors. |
+| OQ-5 | `scmux` CLI scope? | Separate binary, HTTP client to daemon. Same API as web UI. Persistent writes are restricted to the project-definition editor path. |
+| OQ-6 | Final `done` semantics and auto-teardown policy? | Pending product decision; keep default non-destructive behavior until explicitly approved. |
+| OQ-7 | Stop escalation exact parameters (timeouts/retries/hard-stop policy)? | Pending product decision; keep graceful-first and scoped behavior mandatory. |
