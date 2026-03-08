@@ -10,6 +10,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -67,6 +68,7 @@ struct SessionSummary {
     panes: serde_json::Value,
     polled_at: Option<String>,
     session_ci: Vec<SessionCiSummary>,
+    atm: Option<SessionAtmSummary>,
 }
 
 #[derive(Serialize, Clone)]
@@ -77,6 +79,12 @@ struct SessionCiSummary {
     tool_message: Option<String>,
     polled_at: Option<String>,
     next_poll_at: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct SessionAtmSummary {
+    state: String,
+    last_transition: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -232,6 +240,11 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
     let sessions = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SessionSummary>> {
         let db = state.db.lock().unwrap();
         let ci_by_session = load_ci_by_session(&db)?;
+        let atm_by_session = if state.atm_available.load(Ordering::Relaxed) {
+            load_atm_by_session_name(&db)?
+        } else {
+            HashMap::new()
+        };
         let mut stmt = db.prepare(
             "SELECT s.id, s.name, s.project, s.host_id, s.cron_schedule, s.auto_start,
                     COALESCE(ss.status, 'stopped') as status,
@@ -246,9 +259,10 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
         let rows = stmt.query_map([], |r| {
             let panes_str: String = r.get(7)?;
             let id: i64 = r.get(0)?;
+            let name: String = r.get(1)?;
             Ok(SessionSummary {
                 id,
-                name: r.get(1)?,
+                name: name.clone(),
                 project: r.get(2)?,
                 host_id: r.get(3)?,
                 cron_schedule: r.get(4)?,
@@ -257,6 +271,7 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSu
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at: r.get(8)?,
                 session_ci: ci_by_session.get(&id).cloned().unwrap_or_default(),
+                atm: atm_by_session.get(&name).cloned(),
             })
         })?;
 
@@ -321,6 +336,11 @@ async fn get_session(
         ) = row;
         let session_ci =
             load_ci_for_session(&db, id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let atm = if state.atm_available.load(Ordering::Relaxed) {
+            load_atm_for_session(&db, &name).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            None
+        };
 
         let mut estmt = db
             .prepare(
@@ -356,6 +376,7 @@ async fn get_session(
                 panes: serde_json::from_str(&panes_str).unwrap_or(serde_json::json!([])),
                 polled_at,
                 session_ci,
+                atm,
             },
             config_json: serde_json::from_str(&config_str).unwrap_or(serde_json::json!({})),
             recent_events: events,
@@ -739,6 +760,31 @@ fn load_ci_for_session(
         .filter_map(|row| row.ok())
         .collect::<Vec<_>>();
     Ok(rows)
+}
+
+fn load_atm_by_session_name(
+    db: &rusqlite::Connection,
+) -> anyhow::Result<HashMap<String, SessionAtmSummary>> {
+    let rows = db::list_session_atm(db)?;
+    let mut map = HashMap::new();
+    for row in rows {
+        map.insert(
+            row.session_name,
+            SessionAtmSummary {
+                state: row.state,
+                last_transition: row.last_transition,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn load_atm_for_session(
+    db: &rusqlite::Connection,
+    session_name: &str,
+) -> anyhow::Result<Option<SessionAtmSummary>> {
+    let map = load_atm_by_session_name(db)?;
+    Ok(map.get(session_name).cloned())
 }
 
 async fn log_action_result(

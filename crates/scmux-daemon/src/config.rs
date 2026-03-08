@@ -6,6 +6,7 @@ use serde::Deserialize;
 pub struct Config {
     pub daemon: DaemonConfig,
     pub polling: PollingConfig,
+    pub atm: AtmConfig,
     pub hosts: Vec<HostConfig>,
 }
 
@@ -23,6 +24,12 @@ pub struct PollingConfig {
     pub health_interval_secs: Option<u64>,
     pub ci_active_interval_secs: Option<u64>,
     pub ci_idle_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AtmConfig {
+    pub socket_path: Option<String>,
+    pub stuck_minutes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -1,12 +1,13 @@
 use clap::Parser;
 use scmux_daemon::config::Config;
-use scmux_daemon::{api, ci, db, hosts, logging, scheduler, AppState, SystemClock};
+use scmux_daemon::{api, atm, ci, db, hosts, logging, scheduler, AppState, SystemClock};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
+const DEFAULT_ATM_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_PORT: u16 = 7878;
 #[derive(Debug, Parser)]
 #[command(name = "scmux-daemon")]
@@ -98,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
         ci_tools,
         clock: std::sync::Arc::new(SystemClock),
+        atm_available: std::sync::atomic::AtomicBool::new(false),
         last_api_access: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
     });
@@ -157,6 +159,20 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await;
             if let Err(e) = ci::poll_once(&ci_state).await {
                 tracing::warn!("ci poll loop error: {e}");
+            }
+        }
+    });
+
+    // ATM loop — separate from session poll to isolate IPC failures and cadence.
+    let atm_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            DEFAULT_ATM_POLL_INTERVAL_SECS,
+        ));
+        loop {
+            interval.tick().await;
+            if let Err(e) = atm::poll_once(&atm_state).await {
+                tracing::warn!("atm poll loop error: {e}");
             }
         }
     });
