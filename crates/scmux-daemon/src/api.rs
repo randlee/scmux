@@ -3,9 +3,10 @@ use axum::{
     http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -40,6 +41,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/:name/start", post(start_session))
         .route("/sessions/:name/stop", post(stop_session))
         .route("/sessions/:name/jump", post(jump_session))
+        .route("/editor/armadas", post(create_armada))
+        .route("/editor/armadas/:id", axum::routing::patch(patch_armada))
+        .route("/editor/fleets", post(create_fleet))
+        .route("/editor/fleets/:id", axum::routing::patch(patch_fleet))
+        .route("/editor/flotillas", post(create_flotilla))
+        .route(
+            "/editor/flotillas/:id",
+            axum::routing::patch(patch_flotilla),
+        )
+        .route("/editor/crews", post(create_crew_bundle))
+        .route("/editor/crews/:id", axum::routing::patch(patch_crew_bundle))
+        .route("/editor/crews/:id/clone", post(clone_crew_bundle))
+        .route("/editor/crew-refs/:id/move", post(move_crew_ref))
+        .route("/editor/crew-refs/:id", delete(unlink_crew_ref))
         .layer(CorsLayer::permissive())
         .layer(from_fn_with_state(middleware_state, touch_last_api_access))
         .with_state(state)
@@ -176,6 +191,101 @@ struct PatchHostRequest {
     address: Option<String>,
     ssh_user: Option<Option<String>>,
     api_port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateArmadaRequest {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchArmadaRequest {
+    name: Option<String>,
+    description: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFleetRequest {
+    armada_id: i64,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchFleetRequest {
+    armada_id: Option<i64>,
+    name: Option<String>,
+    color: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFlotillaRequest {
+    fleet_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchFlotillaRequest {
+    fleet_id: Option<i64>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrewMemberPayload {
+    member_id: String,
+    role: String,
+    ai_provider: String,
+    model: String,
+    startup_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrewVariantPayload {
+    host_id: i64,
+    repo_url: Option<String>,
+    branch_ref: Option<String>,
+    root_path: String,
+    config_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrewPlacementPayload {
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCrewBundleRequest {
+    crew_name: String,
+    crew_ulid: String,
+    members: Vec<CrewMemberPayload>,
+    variants: Vec<CrewVariantPayload>,
+    placement: CrewPlacementPayload,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchCrewBundleRequest {
+    crew_ulid: Option<String>,
+    members: Option<Vec<CrewMemberPayload>>,
+    variants: Option<Vec<CrewVariantPayload>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneCrewBundleRequest {
+    crew_name: String,
+    crew_ulid: String,
+    placement: CrewPlacementPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct MoveCrewRefRequest {
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -850,6 +960,381 @@ async fn delete_host(
     }
 }
 
+async fn create_armada(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateArmadaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let armada = definition_writer::NewArmada {
+        name: req.name.clone(),
+        description: req.description,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_armada(&db_conn, &armada)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_armada task".to_string()))?;
+
+    match result {
+        Ok(id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("armada '{id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_armada(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchArmadaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::ArmadaPatch {
+        name: req.name,
+        description: req.description,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_armada(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_armada task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("armada '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("armada '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn create_fleet(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateFleetRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let fleet = definition_writer::NewFleet {
+        armada_id: req.armada_id,
+        name: req.name.clone(),
+        color: req.color,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_fleet(&db_conn, &fleet)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_fleet task".to_string()))?;
+
+    match result {
+        Ok(id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("fleet '{id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_fleet(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchFleetRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::FleetPatch {
+        armada_id: req.armada_id,
+        name: req.name,
+        color: req.color,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_fleet(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_fleet task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("fleet '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("fleet '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn create_flotilla(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateFlotillaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let flotilla = definition_writer::NewFlotilla {
+        fleet_id: req.fleet_id,
+        name: req.name.clone(),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_flotilla(&db_conn, &flotilla)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_flotilla task".to_string()))?;
+
+    match result {
+        Ok(id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("flotilla '{id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_flotilla(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchFlotillaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::FlotillaPatch {
+        fleet_id: req.fleet_id,
+        name: req.name,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_flotilla(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_flotilla task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("flotilla '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("flotilla '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn create_crew_bundle(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateCrewBundleRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let members = req
+        .members
+        .iter()
+        .map(map_member_payload)
+        .collect::<Result<Vec<_>, _>>()?;
+    let variants = req
+        .variants
+        .iter()
+        .map(map_variant_payload)
+        .collect::<Result<Vec<_>, _>>()?;
+    let placement = map_placement_payload(&req.placement);
+
+    let bundle = definition_writer::NewCrewBundle {
+        crew_name: req.crew_name,
+        crew_ulid: req.crew_ulid,
+        members,
+        variants,
+        placement,
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_crew_bundle(&db_conn, &bundle)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_crew_bundle task".to_string()))?;
+
+    match result {
+        Ok(crew_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew '{crew_id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_crew_bundle(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchCrewBundleRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let editing_roster = req.members.is_some() || req.variants.is_some();
+    if editing_roster {
+        if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
+            let live = tmux::live_sessions().await.unwrap_or_default();
+            if live.contains_key(&crew_name) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse {
+                        ok: false,
+                        code: "running_edit_forbidden".to_string(),
+                        message: "running crew roster/prompt edits are not allowed".to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+
+    let members = req
+        .members
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .map(map_member_payload)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let variants = req
+        .variants
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .map(map_variant_payload)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+
+    let patch = definition_writer::CrewBundlePatch {
+        crew_ulid: req.crew_ulid,
+        members,
+        variants,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_crew_bundle(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_crew_bundle task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("crew '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn clone_crew_bundle(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneCrewBundleRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request = definition_writer::CloneCrewRequest {
+        crew_name: req.crew_name,
+        crew_ulid: req.crew_ulid,
+        placement: map_placement_payload(&req.placement),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::clone_crew(&db_conn, id, &request)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join clone_crew_bundle task".to_string()))?;
+
+    match result {
+        Ok(new_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew cloned to '{new_id}'"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn move_crew_ref(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<MoveCrewRefRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::MoveCrewRefPatch {
+        armada_id: req.armada_id,
+        fleet_id: req.fleet_id,
+        flotilla_id: req.flotilla_id,
+        alias_name: req.alias_name,
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::move_crew_ref(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join move_crew_ref task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew ref '{id}' moved"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("crew ref '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn unlink_crew_ref(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::unlink_crew_ref(&db_conn, id)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join unlink_crew_ref task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew ref '{id}' unlinked"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("crew ref '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
 async fn get_dashboard_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DashboardConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -984,6 +1469,77 @@ fn extract_shutdown_targets(config_json: &str) -> Vec<ShutdownTarget> {
             })
         })
         .collect::<Vec<_>>()
+}
+
+fn map_member_payload(
+    payload: &CrewMemberPayload,
+) -> Result<definition_writer::CrewMemberInput, (StatusCode, Json<ErrorResponse>)> {
+    let startup_prompts_json = serde_json::to_string(&payload.startup_prompts).map_err(|_| {
+        bad_request(
+            "invalid_startup_prompts",
+            "startup_prompts could not be serialized".to_string(),
+        )
+    })?;
+
+    Ok(definition_writer::CrewMemberInput {
+        member_id: payload.member_id.clone(),
+        role: payload.role.clone(),
+        ai_provider: payload.ai_provider.clone(),
+        model: payload.model.clone(),
+        startup_prompts_json,
+    })
+}
+
+fn map_variant_payload(
+    payload: &CrewVariantPayload,
+) -> Result<definition_writer::CrewVariantInput, (StatusCode, Json<ErrorResponse>)> {
+    let config_json = payload
+        .config_json
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| {
+            bad_request(
+                "invalid_variant_config",
+                "invalid variant config_json".to_string(),
+            )
+        })?;
+
+    Ok(definition_writer::CrewVariantInput {
+        host_id: payload.host_id,
+        repo_url: payload.repo_url.clone(),
+        branch_ref: payload.branch_ref.clone(),
+        root_path: payload.root_path.clone(),
+        config_json,
+    })
+}
+
+fn map_placement_payload(payload: &CrewPlacementPayload) -> definition_writer::CrewPlacementInput {
+    definition_writer::CrewPlacementInput {
+        armada_id: payload.armada_id,
+        fleet_id: payload.fleet_id,
+        flotilla_id: payload.flotilla_id,
+        alias_name: payload.alias_name.clone(),
+    }
+}
+
+async fn fetch_crew_name(
+    state: Arc<AppState>,
+    crew_id: i64,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT crew_name FROM crews WHERE id = ?1",
+                rusqlite::params![crew_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+    })
+    .await
+    .map_err(|_| internal_error("failed to join fetch_crew_name task".to_string()))?;
+    result.map_err(|_| internal_error("failed to read crew name".to_string()))
 }
 
 fn map_write_error(err: definition_writer::WriteError) -> (StatusCode, Json<ErrorResponse>) {
