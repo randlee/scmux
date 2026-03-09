@@ -1,4 +1,4 @@
-const { useState, useEffect, useMemo } = React;
+const { useEffect, useMemo, useState } = React;
 
 const PROJECT_COLORS = {
   "radiant-p3": "#3b82f6",

@@ -194,6 +194,7 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64, WriteError> {
 }
 
 pub fn create_armada(conn: &Connection, armada: &NewArmada) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     conn.execute(
         "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
         params![armada.name, armada.description],
@@ -207,6 +208,7 @@ pub fn patch_armada(
     armada_id: i64,
     patch: &ArmadaPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM armadas WHERE id = ?1",
@@ -256,6 +258,7 @@ pub fn clone_armada(
     source_armada_id: i64,
     request: &CloneArmadaRequest,
 ) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     let source_description: Option<String> = conn
         .query_row(
             "SELECT description FROM armadas WHERE id = ?1",
@@ -281,6 +284,7 @@ pub fn clone_armada(
 }
 
 pub fn create_fleet(conn: &Connection, fleet: &NewFleet) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     ensure_armada_exists(conn, fleet.armada_id)?;
     conn.execute(
         "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
@@ -295,6 +299,7 @@ pub fn patch_fleet(
     fleet_id: i64,
     patch: &FleetPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM fleets WHERE id = ?1",
@@ -352,6 +357,7 @@ pub fn clone_fleet(
     source_fleet_id: i64,
     request: &CloneFleetRequest,
 ) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     let source_row: Option<(i64, Option<String>)> = conn
         .query_row(
             "SELECT armada_id, color FROM fleets WHERE id = ?1",
@@ -381,6 +387,7 @@ pub fn clone_fleet(
 }
 
 pub fn create_flotilla(conn: &Connection, flotilla: &NewFlotilla) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     ensure_fleet_exists(conn, flotilla.fleet_id)?;
     conn.execute(
         "INSERT INTO flotillas (fleet_id, name) VALUES (?1, ?2)",
@@ -395,6 +402,7 @@ pub fn patch_flotilla(
     flotilla_id: i64,
     patch: &FlotillaPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM flotillas WHERE id = ?1",
@@ -441,6 +449,7 @@ pub fn patch_flotilla(
 }
 
 pub fn create_crew_bundle(conn: &Connection, bundle: &NewCrewBundle) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     validate_captain_count(&bundle.members)?;
     validate_startup_prompts_non_empty(&bundle.members)?;
     validate_variants_non_empty(&bundle.variants)?;
@@ -480,6 +489,7 @@ pub fn patch_crew_bundle(
     crew_id: i64,
     patch: &CrewBundlePatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     if let Some(members) = patch.members.as_ref() {
         validate_captain_count(members)?;
         validate_startup_prompts_non_empty(members)?;
@@ -536,6 +546,7 @@ pub fn clone_crew(
     source_crew_id: i64,
     request: &CloneCrewRequest,
 ) -> Result<i64, WriteError> {
+    let _guard = WriteGuard(());
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
 
     let source_exists: Option<i64> = tx
@@ -597,6 +608,7 @@ pub fn move_crew_ref(
     ref_id: i64,
     patch: &MoveCrewRefPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
     let exists: Option<i64> = tx
         .query_row(
@@ -647,6 +659,7 @@ pub fn move_crew_ref(
 }
 
 pub fn unlink_crew_ref(conn: &Connection, ref_id: i64) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
     let crew_id: Option<i64> = tx
         .query_row(
