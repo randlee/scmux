@@ -217,6 +217,32 @@ pub struct PollerStates {
     pub atm: PollerHealth,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiscoverySession {
+    pub name: String,
+    #[serde(default)]
+    pub panes: Vec<PaneSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RuntimeCrewSummary {
+    pub crew_id: i64,
+    pub crew_name: String,
+    pub crew_ulid: String,
+    pub host_id: i64,
+    pub root_path: String,
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    #[serde(default)]
+    pub branch_ref: Option<String>,
+    pub status: String,
+    pub discovered: bool,
+    pub pane_count: usize,
+    pub binding_valid: bool,
+    #[serde(default)]
+    pub binding_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateSessionRequest {
     pub name: String,
@@ -363,6 +389,16 @@ impl ApiClient {
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {
         self.request_json(Method::GET, "/health", None::<&()>).await
+    }
+
+    pub async fn list_runtime_crews(&self) -> Result<Vec<RuntimeCrewSummary>, ClientError> {
+        self.request_json(Method::GET, "/runtime/crews", None::<&()>)
+            .await
+    }
+
+    pub async fn list_unregistered_discovery(&self) -> Result<Vec<DiscoverySession>, ClientError> {
+        self.request_json(Method::GET, "/runtime/discovery/unregistered", None::<&()>)
+            .await
     }
 
     async fn request_json<T, B>(

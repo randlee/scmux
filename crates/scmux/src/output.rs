@@ -1,6 +1,9 @@
 //! Terminal output formatting helpers for `scmux` commands.
 
-use crate::client::{ActionResponse, HealthResponse, HostSummary, SessionSummary};
+use crate::client::{
+    ActionResponse, DiscoverySession, HealthResponse, HostSummary, RuntimeCrewSummary,
+    SessionSummary,
+};
 use std::collections::HashMap;
 
 pub fn print_session_list(sessions: &[SessionSummary], hosts: &[HostSummary]) {
@@ -70,7 +73,11 @@ pub fn print_health(status: &HealthResponse) {
     println!("db_path: {}", status.db_path);
 }
 
-pub fn print_doctor(status: &HealthResponse) {
+pub fn print_doctor(
+    status: &HealthResponse,
+    runtime_crews: Option<&[RuntimeCrewSummary]>,
+    unregistered_discovery: Option<&[DiscoverySession]>,
+) {
     println!("doctor");
     println!("  status: {}", status.status);
     println!("  version: {}", status.version);
@@ -94,6 +101,16 @@ pub fn print_doctor(status: &HealthResponse) {
         for row in &status.recent_errors {
             println!("    - {row}");
         }
+    }
+    if let Some(crews) = runtime_crews {
+        println!("  runtime_crews: {}", crews.len());
+        let invalid = crews.iter().filter(|crew| !crew.binding_valid).count();
+        if invalid > 0 {
+            println!("    invalid_bindings: {invalid}");
+        }
+    }
+    if let Some(rows) = unregistered_discovery {
+        println!("  unregistered_discovery_sessions: {}", rows.len());
     }
     println!("  db_path: {}", status.db_path);
 }

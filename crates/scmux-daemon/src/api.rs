@@ -8,7 +8,8 @@ use axum::{
 };
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -33,6 +34,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/dashboard-config.json", get(get_dashboard_config))
         .route("/discovery", get(get_discovery))
+        .route("/runtime/crews", get(list_runtime_crews))
+        .route(
+            "/runtime/discovery/unregistered",
+            get(get_unregistered_discovery),
+        )
         .route("/sessions", get(list_sessions).post(create_session))
         .route(
             "/sessions/:name",
@@ -56,6 +62,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/editor/crews/:id/clone", post(clone_crew_bundle))
         .route("/editor/crew-refs/:id/move", post(move_crew_ref))
         .route("/editor/crew-refs/:id", delete(unlink_crew_ref))
+        .route("/editor/import-discovery", post(import_discovery_session))
         .layer(CorsLayer::permissive())
         .layer(from_fn_with_state(middleware_state, touch_last_api_access))
         .with_state(state)
@@ -287,6 +294,43 @@ struct MoveCrewRefRequest {
     fleet_id: i64,
     flotilla_id: Option<i64>,
     alias_name: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportDiscoveryRequest {
+    session_name: String,
+    crew_name: Option<String>,
+    crew_ulid: Option<String>,
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<String>,
+    host_id: Option<i64>,
+    repo_url: Option<String>,
+    branch_ref: Option<String>,
+    root_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeCrewSummary {
+    crew_id: i64,
+    crew_name: String,
+    crew_ulid: String,
+    host_id: i64,
+    root_path: String,
+    repo_url: Option<String>,
+    branch_ref: Option<String>,
+    status: String,
+    discovered: bool,
+    pane_count: usize,
+    binding_valid: bool,
+    binding_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CrewVariantBinding {
+    host_id: i64,
+    root_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -749,6 +793,11 @@ async fn start_session(
                 message,
             }),
         ));
+    }
+    if let Some(binding) = fetch_preferred_crew_variant_binding(Arc::clone(&state), &name).await? {
+        if let Err(message) = validate_crew_variant_binding(&binding, state.host_id) {
+            return Err(bad_request("invalid_crew_variant_binding", message));
+        }
     }
 
     {
@@ -1522,6 +1571,217 @@ async fn get_discovery(
     Json(rows)
 }
 
+async fn get_unregistered_discovery(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::runtime::DiscoverySession>>, (StatusCode, Json<ErrorResponse>)> {
+    let discovery_rows = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime.discovery_rows()
+    };
+    let registered_crew_names = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || -> anyhow::Result<HashSet<String>> {
+            let db_conn = state.db.lock().expect("db lock");
+            let mut stmt = db_conn.prepare("SELECT crew_name FROM crews")?;
+            let mapped = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let values = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(values.into_iter().collect::<HashSet<_>>())
+        }
+    })
+    .await
+    .map_err(|_| internal_error("failed to join get_unregistered_discovery task".to_string()))?
+    .map_err(|err| internal_error(format!("failed to list registered crews: {err}")))?;
+
+    let rows = discovery_rows
+        .into_iter()
+        .filter(|row| !registered_crew_names.contains(&row.name))
+        .collect::<Vec<_>>();
+    Ok(Json(rows))
+}
+
+async fn list_runtime_crews(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<RuntimeCrewSummary>>, (StatusCode, Json<ErrorResponse>)> {
+    #[derive(Debug)]
+    struct CrewVariantRow {
+        crew_id: i64,
+        crew_name: String,
+        crew_ulid: String,
+        host_id: i64,
+        repo_url: Option<String>,
+        branch_ref: Option<String>,
+        root_path: String,
+    }
+
+    let variant_rows = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || -> anyhow::Result<Vec<CrewVariantRow>> {
+            let db_conn = state.db.lock().expect("db lock");
+            let mut stmt = db_conn.prepare(
+                "SELECT c.id, c.crew_name, c.crew_ulid, cv.host_id, cv.repo_url, cv.branch_ref, cv.root_path
+                 FROM crews c
+                 JOIN crew_variants cv ON cv.crew_id = c.id
+                 ORDER BY c.crew_name, cv.id",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(CrewVariantRow {
+                    crew_id: r.get(0)?,
+                    crew_name: r.get(1)?,
+                    crew_ulid: r.get(2)?,
+                    host_id: r.get(3)?,
+                    repo_url: r.get(4)?,
+                    branch_ref: r.get(5)?,
+                    root_path: r.get(6)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)
+        }
+    })
+    .await
+    .map_err(|_| internal_error("failed to join list_runtime_crews task".to_string()))?
+    .map_err(|err| internal_error(format!("failed to list crew variants: {err}")))?;
+
+    let rows = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        let discovery_rows = runtime.discovery_rows();
+        variant_rows
+            .into_iter()
+            .map(|row| {
+                let discovery = discovery_rows
+                    .iter()
+                    .find(|item| item.name == row.crew_name);
+                let status = runtime
+                    .session(&row.crew_name)
+                    .map(|entry| entry.status.clone())
+                    .or_else(|| discovery.map(|item| derive_discovery_status(&item.panes)))
+                    .unwrap_or_else(|| "stopped".to_string());
+                let binding = CrewVariantBinding {
+                    host_id: row.host_id,
+                    root_path: row.root_path.clone(),
+                };
+                let binding_error = validate_crew_variant_binding(&binding, state.host_id).err();
+                RuntimeCrewSummary {
+                    crew_id: row.crew_id,
+                    crew_name: row.crew_name,
+                    crew_ulid: row.crew_ulid,
+                    host_id: row.host_id,
+                    root_path: row.root_path,
+                    repo_url: row.repo_url,
+                    branch_ref: row.branch_ref,
+                    status,
+                    discovered: discovery.is_some(),
+                    pane_count: discovery.map(|item| item.panes.len()).unwrap_or(0),
+                    binding_valid: binding_error.is_none(),
+                    binding_error,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Ok(Json(rows))
+}
+
+async fn import_discovery_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ImportDiscoveryRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let session_name = req.session_name.trim().to_string();
+    if session_name.is_empty() {
+        return Err(bad_request(
+            "invalid_session_name",
+            "session_name is required".to_string(),
+        ));
+    }
+    let root_path = req.root_path.trim().to_string();
+    if root_path.is_empty() {
+        return Err(bad_request(
+            "invalid_root_path",
+            "root_path is required".to_string(),
+        ));
+    }
+
+    let discovery = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime.discovery_rows()
+    };
+    let row = discovery
+        .into_iter()
+        .find(|item| item.name == session_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    ok: false,
+                    code: "discovery_not_found".to_string(),
+                    message: format!("discovered session '{session_name}' not found"),
+                }),
+            )
+        })?;
+    if row.panes.is_empty() {
+        return Err(bad_request(
+            "empty_discovery_session",
+            "cannot import a discovered session with zero panes".to_string(),
+        ));
+    }
+
+    let host_id = req.host_id.unwrap_or(state.host_id);
+    let crew_name = req
+        .crew_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&session_name)
+        .to_string();
+    let crew_ulid = req
+        .crew_ulid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| generate_import_crew_ulid(&crew_name));
+
+    let members = map_discovery_members(&row.panes);
+    let bundle = definition_writer::NewCrewBundle {
+        crew_name: crew_name.clone(),
+        crew_ulid,
+        members,
+        variants: vec![definition_writer::CrewVariantInput {
+            host_id,
+            repo_url: req.repo_url,
+            branch_ref: req.branch_ref,
+            root_path: root_path.clone(),
+            config_json: None,
+        }],
+        placement: definition_writer::CrewPlacementInput {
+            armada_id: req.armada_id,
+            fleet_id: req.fleet_id,
+            flotilla_id: req.flotilla_id,
+            alias_name: req.alias_name,
+        },
+    };
+
+    let created = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || {
+            let db_conn = state.db.lock().expect("db lock");
+            definition_writer::create_crew_bundle(&db_conn, &bundle)
+        }
+    })
+    .await
+    .map_err(|_| internal_error("failed to join import_discovery_session task".to_string()))?;
+
+    match created {
+        Ok(crew_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!(
+                "imported discovered session '{}' into crew '{}' (id={})",
+                session_name, crew_name, crew_id
+            ),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
 async fn fetch_hosts(state: Arc<AppState>) -> anyhow::Result<Vec<HostSummary>> {
     let reachability = {
         let map = state.reachability.lock().expect("reachability lock");
@@ -1601,6 +1861,155 @@ fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn fetch_preferred_crew_variant_binding(
+    state: Arc<AppState>,
+    crew_name: &str,
+) -> Result<Option<CrewVariantBinding>, (StatusCode, Json<ErrorResponse>)> {
+    let crew_name = crew_name.to_string();
+    let host_id = state.host_id;
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT cv.host_id, cv.root_path
+                 FROM crews c
+                 JOIN crew_variants cv ON cv.crew_id = c.id
+                 WHERE c.crew_name = ?1
+                 ORDER BY CASE WHEN cv.host_id = ?2 THEN 0 ELSE 1 END, cv.id
+                 LIMIT 1",
+                rusqlite::params![crew_name, host_id],
+                |r| {
+                    Ok(CrewVariantBinding {
+                        host_id: r.get(0)?,
+                        root_path: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+    })
+    .await
+    .map_err(|_| {
+        internal_error("failed to join fetch_preferred_crew_variant_binding task".to_string())
+    })?;
+
+    result.map_err(|_| internal_error("failed to read crew variant binding".to_string()))
+}
+
+fn validate_crew_variant_binding(
+    binding: &CrewVariantBinding,
+    daemon_host_id: i64,
+) -> Result<(), String> {
+    if binding.host_id != daemon_host_id {
+        return Err(format!(
+            "crew variant host_id {} does not match local daemon host_id {}",
+            binding.host_id, daemon_host_id
+        ));
+    }
+    let root_path = binding.root_path.trim();
+    if root_path.is_empty() {
+        return Err("crew variant root_path is required".to_string());
+    }
+    let path = FsPath::new(root_path);
+    if !path.exists() {
+        return Err(format!(
+            "crew variant root_path does not exist: {root_path}"
+        ));
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "crew variant root_path is not a directory: {root_path}"
+        ));
+    }
+    Ok(())
+}
+
+fn derive_discovery_status(panes: &[crate::tmux::PaneInfo]) -> String {
+    if panes.is_empty() {
+        return "stopped".to_string();
+    }
+    let any_active = panes.iter().any(|pane| {
+        matches!(
+            pane.status.to_ascii_lowercase().as_str(),
+            "active" | "running" | "stuck"
+        )
+    });
+    if any_active {
+        "running".to_string()
+    } else {
+        "idle".to_string()
+    }
+}
+
+fn generate_import_crew_ulid(crew_name: &str) -> String {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let label = sanitize_identifier(crew_name);
+    format!(
+        "import-{}-{}",
+        if label.is_empty() { "crew" } else { &label },
+        suffix
+    )
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn map_discovery_members(
+    panes: &[crate::tmux::PaneInfo],
+) -> Vec<definition_writer::CrewMemberInput> {
+    let mut used = HashSet::new();
+    panes
+        .iter()
+        .enumerate()
+        .map(|(idx, pane)| {
+            let base = sanitize_identifier(&pane.name);
+            let mut candidate = if base.is_empty() {
+                format!("member-{}", idx + 1)
+            } else {
+                base.clone()
+            };
+            let mut serial = 2u32;
+            while !used.insert(candidate.clone()) {
+                let root = if base.is_empty() {
+                    format!("member-{}", idx + 1)
+                } else {
+                    base.clone()
+                };
+                candidate = format!("{root}-{serial}");
+                serial += 1;
+            }
+
+            let (role, ai_provider, model) = if idx == 0 {
+                ("captain", "claude", "claude-opus")
+            } else {
+                ("mate", "codex", "codex-high")
+            };
+
+            definition_writer::CrewMemberInput {
+                member_id: candidate,
+                role: role.to_string(),
+                ai_provider: ai_provider.to_string(),
+                model: model.to_string(),
+                startup_prompts_json: "[]".to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
 fn extract_shutdown_targets(config_json: &str) -> Vec<ShutdownTarget> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(config_json) else {
         return Vec::new();
@@ -1647,6 +2056,13 @@ fn map_member_payload(
 fn map_variant_payload(
     payload: &CrewVariantPayload,
 ) -> Result<definition_writer::CrewVariantInput, (StatusCode, Json<ErrorResponse>)> {
+    if payload.root_path.trim().is_empty() {
+        return Err(bad_request(
+            "invalid_root_path",
+            "root_path is required".to_string(),
+        ));
+    }
+
     let config_json = payload
         .config_json
         .as_ref()
