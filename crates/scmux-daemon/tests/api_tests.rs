@@ -347,6 +347,45 @@ async fn t_lc_01_post_sessions_name_start_launches_tmux_from_config() {
 }
 
 #[tokio::test]
+async fn t_lc_08_concurrent_start_rejected_when_action_in_progress() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+
+    let _guard = env_lock().lock().await;
+    let script = write_script("#!/bin/sh\nsleep 1\nexit 0\n");
+    let prev = set_env_var("SCMUX_TMUXP_BIN", script.to_string_lossy().as_ref());
+
+    let first_client = h.client.clone();
+    let first_url = format!("{}/sessions/alpha/start", h.base_url);
+    let first = tokio::spawn(async move {
+        first_client
+            .post(first_url)
+            .send()
+            .await
+            .expect("first start request")
+    });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let second = h
+        .client
+        .post(format!("{}/sessions/alpha/start", h.base_url))
+        .send()
+        .await
+        .expect("second start request");
+
+    let first = first.await.expect("join first");
+    restore_env_var("SCMUX_TMUXP_BIN", prev);
+
+    assert_eq!(second.status(), reqwest::StatusCode::CONFLICT);
+    let second_body: Value = second.json().await.expect("second json");
+    assert_eq!(second_body["code"], "action_in_progress");
+
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let first_body: Value = first.json().await.expect("first json");
+    assert_eq!(first_body["ok"], true);
+}
+
+#[tokio::test]
 async fn t_lc_06_start_failure_returns_500_and_keeps_session_stopped() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
@@ -705,6 +744,78 @@ exit 1
         .await
         .expect("patch running crew");
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
+
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["code"], "running_edit_forbidden");
+}
+
+#[tokio::test]
+async fn t_ed_06_starting_runtime_blocks_roster_patch() {
+    let h = ApiHarness::new().await;
+    let armada_id = h.create_armada("Run").await;
+    let fleet_id = h.create_fleet(armada_id, "Fleet").await;
+
+    let create = h
+        .client
+        .post(format!("{}/editor/crews", h.base_url))
+        .json(&json!({
+            "crew_name": "crew-starting",
+            "crew_ulid": "01JCREWSTARTING00000000000",
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["a.md"]
+                }
+            ],
+            "variants": [
+                {
+                    "host_id": h.state.host_id,
+                    "root_path": "/tmp/crew-starting"
+                }
+            ],
+            "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
+        }))
+        .send()
+        .await
+        .expect("create crew-starting");
+    assert_eq!(create.status(), reqwest::StatusCode::OK);
+
+    let crew_id: i64 = {
+        let db_conn = h.state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT id FROM crews WHERE crew_name = 'crew-starting'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("crew id")
+    };
+    {
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.mark_starting("crew-starting");
+    }
+
+    let response = h
+        .client
+        .patch(format!("{}/editor/crews/{}", h.base_url, crew_id))
+        .json(&json!({
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["updated.md"]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("patch starting crew");
 
     assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
     let body: Value = response.json().await.expect("json");

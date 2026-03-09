@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tower_http::cors::CorsLayer;
 
 use crate::atm::ShutdownTarget;
@@ -74,6 +74,7 @@ const REACT_JS: &[u8] = include_bytes!("../assets/react.min.js");
 const REACT_DOM_JS: &[u8] = include_bytes!("../assets/react-dom.min.js");
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_STOP_GRACE_SECS: u64 = 10;
+static SESSION_ACTIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -401,6 +402,19 @@ struct DashboardConfigResponse {
     hosts: Vec<HostSummary>,
     default_terminal: String,
     poll_interval_ms: u64,
+}
+
+struct SessionActionLease {
+    session_name: String,
+}
+
+impl Drop for SessionActionLease {
+    fn drop(&mut self) {
+        let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+        if let Ok(mut held) = lock.lock() {
+            held.remove(&self.session_name);
+        }
+    }
 }
 
 async fn serve_dashboard_asset(
@@ -762,6 +776,7 @@ async fn start_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _action_lease = acquire_session_action(&name, "start")?;
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -830,6 +845,7 @@ async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _action_lease = acquire_session_action(&name, "stop")?;
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -1281,6 +1297,35 @@ async fn patch_crew_bundle(
     let editing_roster = req.members.is_some() || req.variants.is_some();
     if editing_roster {
         if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
+            if is_session_action_in_progress(&crew_name) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse {
+                        ok: false,
+                        code: "action_in_progress".to_string(),
+                        message: "crew lifecycle action in progress; roster edit blocked"
+                            .to_string(),
+                    }),
+                ));
+            }
+
+            let runtime_running = {
+                let runtime = state.runtime.lock().expect("runtime lock");
+                runtime
+                    .session(&crew_name)
+                    .is_some_and(|entry| entry.status != "stopped")
+            };
+            if runtime_running {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse {
+                        ok: false,
+                        code: "running_edit_forbidden".to_string(),
+                        message: "running crew roster/prompt edits are not allowed".to_string(),
+                    }),
+                ));
+            }
+
             let live = tmux::live_sessions().await.unwrap_or_default();
             if live.contains_key(&crew_name) {
                 return Err((
@@ -1574,6 +1619,7 @@ async fn get_discovery(
 async fn get_unregistered_discovery(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<crate::runtime::DiscoverySession>>, (StatusCode, Json<ErrorResponse>)> {
+    // Discovery remains view-only: this endpoint shows only sessions not yet represented by a Crew.
     let discovery_rows = {
         let runtime = state.runtime.lock().expect("runtime lock");
         runtime.discovery_rows()
@@ -1602,6 +1648,8 @@ async fn get_unregistered_discovery(
 async fn list_runtime_crews(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<RuntimeCrewSummary>>, (StatusCode, Json<ErrorResponse>)> {
+    // Runtime projection endpoint for dashboard/CLI diagnostics.
+    // This is intentionally read-only and combines persisted crew variants with live projection state.
     #[derive(Debug)]
     struct CrewVariantRow {
         crew_id: i64,
@@ -1685,6 +1733,7 @@ async fn import_discovery_session(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ImportDiscoveryRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Explicit import flow: discovered runtime is converted to a Crew definition only on user request.
     let session_name = req.session_name.trim().to_string();
     if session_name.is_empty() {
         return Err(bad_request(
@@ -1838,6 +1887,40 @@ fn from_atm_runtime(entry: AtmRuntimeSummary) -> SessionAtmSummary {
     SessionAtmSummary {
         state: entry.state,
         last_transition: entry.last_transition,
+    }
+}
+
+fn acquire_session_action(
+    session_name: &str,
+    action: &str,
+) -> Result<SessionActionLease, (StatusCode, Json<ErrorResponse>)> {
+    // Lifecycle hardening: enforce one active start/stop action per session.
+    let key = session_name.trim().to_string();
+    let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut held = lock
+        .lock()
+        .map_err(|_| internal_error("failed to lock session action map".to_string()))?;
+    if held.contains(&key) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                ok: false,
+                code: "action_in_progress".to_string(),
+                message: format!(
+                    "cannot {action} session '{session_name}': another lifecycle action is in progress"
+                ),
+            }),
+        ));
+    }
+    held.insert(key.clone());
+    Ok(SessionActionLease { session_name: key })
+}
+
+fn is_session_action_in_progress(session_name: &str) -> bool {
+    let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    match lock.lock() {
+        Ok(held) => held.contains(session_name),
+        Err(_) => true,
     }
 }
 
