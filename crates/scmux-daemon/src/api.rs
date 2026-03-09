@@ -44,8 +44,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/editor/state", get(get_editor_state))
         .route("/editor/armadas", post(create_armada))
         .route("/editor/armadas/:id", axum::routing::patch(patch_armada))
+        .route("/editor/armadas/:id/clone", post(clone_armada))
         .route("/editor/fleets", post(create_fleet))
         .route("/editor/fleets/:id", axum::routing::patch(patch_fleet))
+        .route("/editor/fleets/:id/clone", post(clone_fleet))
         .route("/editor/flotillas", post(create_flotilla))
         .route(
             "/editor/flotillas/:id",
@@ -207,6 +209,12 @@ struct PatchArmadaRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CloneArmadaRequest {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateFleetRequest {
     armada_id: i64,
     name: String,
@@ -218,6 +226,13 @@ struct PatchFleetRequest {
     armada_id: Option<i64>,
     name: Option<String>,
     color: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneFleetRequest {
+    armada_id: Option<i64>,
+    name: String,
+    color: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1068,6 +1083,31 @@ async fn patch_armada(
     }
 }
 
+async fn clone_armada(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneArmadaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request = definition_writer::CloneArmadaRequest {
+        name: req.name,
+        description: req.description,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::clone_armada(&db_conn, id, &request)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join clone_armada task".to_string()))?;
+
+    match result {
+        Ok(clone_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("armada cloned to '{clone_id}'"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
 async fn create_fleet(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateFleetRequest>,
@@ -1123,6 +1163,32 @@ async fn patch_fleet(
                 message: format!("fleet '{id}' not found"),
             }),
         )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn clone_fleet(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneFleetRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request = definition_writer::CloneFleetRequest {
+        armada_id: req.armada_id,
+        name: req.name,
+        color: req.color,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::clone_fleet(&db_conn, id, &request)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join clone_fleet task".to_string()))?;
+
+    match result {
+        Ok(clone_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("fleet cloned to '{clone_id}'"),
+        })),
         Err(err) => Err(map_write_error(err)),
     }
 }
@@ -1232,8 +1298,17 @@ async fn patch_crew_bundle(
     let editing_roster = req.members.is_some() || req.variants.is_some();
     if editing_roster {
         if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
-            let live = tmux::live_sessions().await.unwrap_or_default();
-            if live.contains_key(&crew_name) {
+            let is_running = {
+                let runtime = state.runtime.lock().expect("runtime lock");
+                runtime
+                    .session(&crew_name)
+                    .is_some_and(|entry| entry.status != "stopped")
+                    || runtime
+                        .discovery_rows()
+                        .iter()
+                        .any(|row| row.name == crew_name)
+            };
+            if is_running {
                 return Err((
                     StatusCode::CONFLICT,
                     Json(ErrorResponse {

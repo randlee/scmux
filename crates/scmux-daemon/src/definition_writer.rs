@@ -37,6 +37,12 @@ pub struct ArmadaPatch {
 }
 
 #[derive(Debug, Clone)]
+pub struct CloneArmadaRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewFleet {
     pub armada_id: i64,
     pub name: String,
@@ -48,6 +54,13 @@ pub struct FleetPatch {
     pub armada_id: Option<i64>,
     pub name: Option<String>,
     pub color: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloneFleetRequest {
+    pub armada_id: Option<i64>,
+    pub name: String,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,8 +194,12 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64, WriteError> {
 }
 
 pub fn create_armada(conn: &Connection, armada: &NewArmada) -> Result<i64, WriteError> {
-    let guard = WriteGuard(());
-    write_armada(&guard, conn, armada)
+    conn.execute(
+        "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
+        params![armada.name, armada.description],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn patch_armada(
@@ -190,7 +207,6 @@ pub fn patch_armada(
     armada_id: i64,
     patch: &ArmadaPatch,
 ) -> Result<bool, WriteError> {
-    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM armadas WHERE id = ?1",
@@ -235,10 +251,43 @@ pub fn patch_armada(
     Ok(true)
 }
 
+pub fn clone_armada(
+    conn: &Connection,
+    source_armada_id: i64,
+    request: &CloneArmadaRequest,
+) -> Result<i64, WriteError> {
+    let source_description: Option<String> = conn
+        .query_row(
+            "SELECT description FROM armadas WHERE id = ?1",
+            params![source_armada_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_write_error)?
+        .ok_or(WriteError::NotFound)?;
+
+    let description = if request.description.is_some() {
+        request.description.clone()
+    } else {
+        source_description
+    };
+
+    conn.execute(
+        "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
+        params![request.name, description],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
+}
+
 pub fn create_fleet(conn: &Connection, fleet: &NewFleet) -> Result<i64, WriteError> {
-    let guard = WriteGuard(());
     ensure_armada_exists(conn, fleet.armada_id)?;
-    write_fleet(&guard, conn, fleet)
+    conn.execute(
+        "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
+        params![fleet.armada_id, fleet.name, fleet.color],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn patch_fleet(
@@ -246,7 +295,6 @@ pub fn patch_fleet(
     fleet_id: i64,
     patch: &FleetPatch,
 ) -> Result<bool, WriteError> {
-    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM fleets WHERE id = ?1",
@@ -299,10 +347,47 @@ pub fn patch_fleet(
     Ok(true)
 }
 
+pub fn clone_fleet(
+    conn: &Connection,
+    source_fleet_id: i64,
+    request: &CloneFleetRequest,
+) -> Result<i64, WriteError> {
+    let source_row: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT armada_id, color FROM fleets WHERE id = ?1",
+            params![source_fleet_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_write_error)?;
+    let Some((source_armada_id, source_color)) = source_row else {
+        return Err(WriteError::NotFound);
+    };
+
+    let armada_id = request.armada_id.unwrap_or(source_armada_id);
+    ensure_armada_exists(conn, armada_id)?;
+    let color = if request.color.is_some() {
+        request.color.clone()
+    } else {
+        source_color
+    };
+
+    conn.execute(
+        "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
+        params![armada_id, request.name, color],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
+}
+
 pub fn create_flotilla(conn: &Connection, flotilla: &NewFlotilla) -> Result<i64, WriteError> {
-    let guard = WriteGuard(());
     ensure_fleet_exists(conn, flotilla.fleet_id)?;
-    write_flotilla(&guard, conn, flotilla)
+    conn.execute(
+        "INSERT INTO flotillas (fleet_id, name) VALUES (?1, ?2)",
+        params![flotilla.fleet_id, flotilla.name],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn patch_flotilla(
@@ -310,7 +395,6 @@ pub fn patch_flotilla(
     flotilla_id: i64,
     patch: &FlotillaPatch,
 ) -> Result<bool, WriteError> {
-    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM flotillas WHERE id = ?1",
@@ -357,16 +441,22 @@ pub fn patch_flotilla(
 }
 
 pub fn create_crew_bundle(conn: &Connection, bundle: &NewCrewBundle) -> Result<i64, WriteError> {
-    let guard = WriteGuard(());
     validate_captain_count(&bundle.members)?;
+    validate_startup_prompts_non_empty(&bundle.members)?;
+    validate_variants_non_empty(&bundle.variants)?;
 
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
     validate_placement(&tx, &bundle.placement)?;
 
-    let crew_id = write_crew(&guard, &tx, &bundle.crew_name, &bundle.crew_ulid)?;
+    tx.execute(
+        "INSERT INTO crews (crew_name, crew_ulid) VALUES (?1, ?2)",
+        params![bundle.crew_name, bundle.crew_ulid],
+    )
+    .map_err(map_write_error)?;
+    let crew_id = tx.last_insert_rowid();
 
-    insert_members(&guard, &tx, crew_id, &bundle.members)?;
-    insert_variants(&guard, &tx, crew_id, &bundle.variants)?;
+    insert_members(&tx, crew_id, &bundle.members)?;
+    insert_variants(&tx, crew_id, &bundle.variants)?;
 
     tx.execute(
         "INSERT INTO crew_refs (crew_id, armada_id, fleet_id, flotilla_id, alias_name)
@@ -390,9 +480,12 @@ pub fn patch_crew_bundle(
     crew_id: i64,
     patch: &CrewBundlePatch,
 ) -> Result<bool, WriteError> {
-    let guard = WriteGuard(());
     if let Some(members) = patch.members.as_ref() {
         validate_captain_count(members)?;
+        validate_startup_prompts_non_empty(members)?;
+    }
+    if let Some(variants) = patch.variants.as_ref() {
+        validate_variants_non_empty(variants)?;
     }
 
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
@@ -422,7 +515,7 @@ pub fn patch_crew_bundle(
             params![crew_id],
         )
         .map_err(map_write_error)?;
-        insert_members(&guard, &tx, crew_id, members)?;
+        insert_members(&tx, crew_id, members)?;
     }
 
     if let Some(variants) = patch.variants.as_ref() {
@@ -431,7 +524,7 @@ pub fn patch_crew_bundle(
             params![crew_id],
         )
         .map_err(map_write_error)?;
-        insert_variants(&guard, &tx, crew_id, variants)?;
+        insert_variants(&tx, crew_id, variants)?;
     }
 
     tx.commit().map_err(map_write_error)?;
@@ -443,7 +536,6 @@ pub fn clone_crew(
     source_crew_id: i64,
     request: &CloneCrewRequest,
 ) -> Result<i64, WriteError> {
-    let guard = WriteGuard(());
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
 
     let source_exists: Option<i64> = tx
@@ -460,61 +552,28 @@ pub fn clone_crew(
 
     validate_placement(&tx, &request.placement)?;
 
-    let new_crew_id = write_crew(&guard, &tx, &request.crew_name, &request.crew_ulid)?;
+    tx.execute(
+        "INSERT INTO crews (crew_name, crew_ulid) VALUES (?1, ?2)",
+        params![request.crew_name, request.crew_ulid],
+    )
+    .map_err(map_write_error)?;
+    let new_crew_id = tx.last_insert_rowid();
 
-    let source_members = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT member_id, role, ai_provider, model, startup_prompts_json
-                 FROM crew_members
-                 WHERE crew_id = ?1",
-            )
-            .map_err(map_write_error)?;
-        let mapped = stmt
-            .query_map(params![source_crew_id], |r| {
-                Ok(CrewMemberInput {
-                    member_id: r.get(0)?,
-                    role: r.get(1)?,
-                    ai_provider: r.get(2)?,
-                    model: r.get(3)?,
-                    startup_prompts_json: r.get(4)?,
-                })
-            })
-            .map_err(map_write_error)?;
-        mapped
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_write_error)?
-    };
-    for member in &source_members {
-        write_crew_member(&guard, &tx, new_crew_id, member)?;
-    }
+    tx.execute(
+        "INSERT INTO crew_members (crew_id, member_id, role, ai_provider, model, startup_prompts_json)
+         SELECT ?1, member_id, role, ai_provider, model, startup_prompts_json
+         FROM crew_members WHERE crew_id = ?2",
+        params![new_crew_id, source_crew_id],
+    )
+    .map_err(map_write_error)?;
 
-    let source_variants = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT host_id, repo_url, branch_ref, root_path, config_json
-                 FROM crew_variants
-                 WHERE crew_id = ?1",
-            )
-            .map_err(map_write_error)?;
-        let mapped = stmt
-            .query_map(params![source_crew_id], |r| {
-                Ok(CrewVariantInput {
-                    host_id: r.get(0)?,
-                    repo_url: r.get(1)?,
-                    branch_ref: r.get(2)?,
-                    root_path: r.get(3)?,
-                    config_json: r.get(4)?,
-                })
-            })
-            .map_err(map_write_error)?;
-        mapped
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(map_write_error)?
-    };
-    for variant in &source_variants {
-        write_crew_variant(&guard, &tx, new_crew_id, variant)?;
-    }
+    tx.execute(
+        "INSERT INTO crew_variants (crew_id, host_id, repo_url, branch_ref, root_path, config_json)
+         SELECT ?1, host_id, repo_url, branch_ref, root_path, config_json
+         FROM crew_variants WHERE crew_id = ?2",
+        params![new_crew_id, source_crew_id],
+    )
+    .map_err(map_write_error)?;
 
     tx.execute(
         "INSERT INTO crew_refs (crew_id, armada_id, fleet_id, flotilla_id, alias_name)
@@ -538,7 +597,6 @@ pub fn move_crew_ref(
     ref_id: i64,
     patch: &MoveCrewRefPatch,
 ) -> Result<bool, WriteError> {
-    let _guard = WriteGuard(());
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
     let exists: Option<i64> = tx
         .query_row(
@@ -623,123 +681,48 @@ pub fn unlink_crew_ref(conn: &Connection, ref_id: i64) -> Result<bool, WriteErro
 }
 
 fn insert_members(
-    guard: &WriteGuard,
     tx: &rusqlite::Transaction<'_>,
     crew_id: i64,
     members: &[CrewMemberInput],
 ) -> Result<(), WriteError> {
     for member in members {
-        write_crew_member(guard, tx, crew_id, member)?;
+        tx.execute(
+            "INSERT INTO crew_members (crew_id, member_id, role, ai_provider, model, startup_prompts_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                crew_id,
+                member.member_id,
+                member.role,
+                member.ai_provider,
+                member.model,
+                member.startup_prompts_json
+            ],
+        )
+        .map_err(map_write_error)?;
     }
     Ok(())
 }
 
 fn insert_variants(
-    guard: &WriteGuard,
     tx: &rusqlite::Transaction<'_>,
     crew_id: i64,
     variants: &[CrewVariantInput],
 ) -> Result<(), WriteError> {
     for variant in variants {
-        write_crew_variant(guard, tx, crew_id, variant)?;
+        tx.execute(
+            "INSERT INTO crew_variants (crew_id, host_id, repo_url, branch_ref, root_path, config_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                crew_id,
+                variant.host_id,
+                variant.repo_url,
+                variant.branch_ref,
+                variant.root_path,
+                variant.config_json
+            ],
+        )
+        .map_err(map_write_error)?;
     }
-    Ok(())
-}
-
-fn write_armada(
-    _guard: &WriteGuard,
-    conn: &Connection,
-    armada: &NewArmada,
-) -> Result<i64, WriteError> {
-    conn.execute(
-        "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
-        params![armada.name, armada.description],
-    )
-    .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
-}
-
-fn write_fleet(
-    _guard: &WriteGuard,
-    conn: &Connection,
-    fleet: &NewFleet,
-) -> Result<i64, WriteError> {
-    conn.execute(
-        "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
-        params![fleet.armada_id, fleet.name, fleet.color],
-    )
-    .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
-}
-
-fn write_flotilla(
-    _guard: &WriteGuard,
-    conn: &Connection,
-    flotilla: &NewFlotilla,
-) -> Result<i64, WriteError> {
-    conn.execute(
-        "INSERT INTO flotillas (fleet_id, name) VALUES (?1, ?2)",
-        params![flotilla.fleet_id, flotilla.name],
-    )
-    .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
-}
-
-fn write_crew(
-    _guard: &WriteGuard,
-    conn: &Connection,
-    crew_name: &str,
-    crew_ulid: &str,
-) -> Result<i64, WriteError> {
-    conn.execute(
-        "INSERT INTO crews (crew_name, crew_ulid) VALUES (?1, ?2)",
-        params![crew_name, crew_ulid],
-    )
-    .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
-}
-
-fn write_crew_member(
-    _guard: &WriteGuard,
-    conn: &Connection,
-    crew_id: i64,
-    member: &CrewMemberInput,
-) -> Result<(), WriteError> {
-    conn.execute(
-        "INSERT INTO crew_members (crew_id, member_id, role, ai_provider, model, startup_prompts_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            crew_id,
-            member.member_id,
-            member.role,
-            member.ai_provider,
-            member.model,
-            member.startup_prompts_json
-        ],
-    )
-    .map_err(map_write_error)?;
-    Ok(())
-}
-
-fn write_crew_variant(
-    _guard: &WriteGuard,
-    conn: &Connection,
-    crew_id: i64,
-    variant: &CrewVariantInput,
-) -> Result<(), WriteError> {
-    conn.execute(
-        "INSERT INTO crew_variants (crew_id, host_id, repo_url, branch_ref, root_path, config_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            crew_id,
-            variant.host_id,
-            variant.repo_url,
-            variant.branch_ref,
-            variant.root_path,
-            variant.config_json
-        ],
-    )
-    .map_err(map_write_error)?;
     Ok(())
 }
 
@@ -830,6 +813,34 @@ fn validate_captain_count(members: &[CrewMemberInput]) -> Result<(), WriteError>
     if captain_count != 1 {
         return Err(WriteError::Validation(
             "crew must have exactly one captain".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_startup_prompts_non_empty(members: &[CrewMemberInput]) -> Result<(), WriteError> {
+    for member in members {
+        let parsed: serde_json::Value = serde_json::from_str(&member.startup_prompts_json)
+            .map_err(|err| {
+                WriteError::Validation(format!("invalid startup_prompts_json: {err}"))
+            })?;
+        let prompts = parsed.as_array().ok_or_else(|| {
+            WriteError::Validation("startup_prompts must be an array".to_string())
+        })?;
+        if prompts.is_empty() {
+            return Err(WriteError::Validation(format!(
+                "member '{}' must include at least one startup prompt",
+                member.member_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_variants_non_empty(variants: &[CrewVariantInput]) -> Result<(), WriteError> {
+    if variants.is_empty() {
+        return Err(WriteError::Validation(
+            "crew must include at least one variant".to_string(),
         ));
     }
     Ok(())
