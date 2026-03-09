@@ -239,6 +239,8 @@ async fn t_a_01_get_health_returns_200_with_correct_fields() {
     assert_eq!(body["status"], "ok");
     assert!(body["uptime_secs"].as_u64().is_some());
     assert!(body["session_count"].as_i64().is_some());
+    assert!(body["atm_available"].as_bool().is_some());
+    assert!(body["atm_socket_available"].as_bool().is_some());
     assert!(body["db_path"].as_str().is_some());
     assert!(body["version"].as_str().is_some());
 }

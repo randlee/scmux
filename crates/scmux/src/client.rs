@@ -185,6 +185,8 @@ pub struct HealthResponse {
     #[serde(default)]
     pub atm_available: bool,
     #[serde(default)]
+    pub atm_socket_available: bool,
+    #[serde(default)]
     pub ci_available: Option<CiAvailability>,
     #[serde(default)]
     pub pollers: Option<PollerStates>,

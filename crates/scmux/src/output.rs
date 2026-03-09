@@ -86,7 +86,7 @@ pub fn print_doctor(
     println!("  sessions_running: {}", status.sessions_running);
     println!("  session_count: {}", status.session_count);
     println!("  atm_available: {}", status.atm_available);
-    println!("  atm_socket_available: {}", status.atm_available);
+    println!("  atm_socket_available: {}", status.atm_socket_available);
     if let Some(ci) = &status.ci_available {
         println!("  ci_available: gh={} az={}", ci.gh, ci.az);
     }
