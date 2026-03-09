@@ -327,7 +327,7 @@ async fn t_lc_06_start_failure_returns_500_and_keeps_session_stopped() {
 }
 
 #[tokio::test]
-async fn t_lc_03_stop_sends_atm_then_grace_then_hard_stop() {
+async fn t_lc_03_stop_grace_then_hard_stop_when_atm_send_is_stubbed() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
 
@@ -348,17 +348,7 @@ fi
 exit 1
 "#,
     ));
-    let atm_script = write_script(&format!(
-        r#"#!/bin/sh
-if [ "$1" = "send" ]; then
-  echo "send" >> "{marker_path}"
-  exit 0
-fi
-exit 1
-"#
-    ));
     let prev_tmux = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
-    let prev_atm = set_env_var("SCMUX_ATM_BIN", atm_script.to_string_lossy().as_ref());
     let started = Instant::now();
 
     let response = h
@@ -368,7 +358,6 @@ exit 1
         .await
         .expect("stop request");
     restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
-    restore_env_var("SCMUX_ATM_BIN", prev_atm);
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");
@@ -384,8 +373,8 @@ exit 1
 
     let marker_log = std::fs::read_to_string(marker.path()).expect("read marker");
     assert!(
-        marker_log.contains("send\nkill\n"),
-        "expected ATM send before tmux hard-stop, got: {marker_log:?}"
+        marker_log.contains("kill\n"),
+        "expected tmux hard-stop after grace timeout, got: {marker_log:?}"
     );
 }
 

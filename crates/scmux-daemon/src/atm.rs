@@ -3,9 +3,7 @@ use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -153,70 +151,17 @@ pub async fn send_shutdown_messages(
     state: &AppState,
     targets: &[ShutdownTarget],
 ) -> anyhow::Result<usize> {
-    if !state.config.atm.enabled || !state.config.atm.allow_shutdown {
-        tracing::warn!("ATM send not implemented");
-        return Ok(0);
-    }
-
-    if targets.is_empty() {
-        return Ok(0);
-    }
-
-    let allowed_teams = configured_teams(state).into_iter().collect::<HashSet<_>>();
-    if allowed_teams.is_empty() {
-        tracing::warn!("ATM shutdown skipped: atm.teams allowlist is empty");
-        return Ok(0);
-    }
-
-    let unique = targets
+    let configured_targets = targets
         .iter()
-        .filter(|target| allowed_teams.contains(&target.team))
-        .map(|target| (target.team.clone(), target.agent.clone()))
-        .collect::<HashSet<_>>();
-
-    let mut sent = 0usize;
-    for (team, agent) in unique {
-        let output = tokio::process::Command::new(atm_bin())
-            .arg("send")
-            .arg(&agent)
-            .arg("--team")
-            .arg(&team)
-            .arg("scmux: graceful shutdown requested; please stop current work and exit")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
-
-        match output {
-            Ok(result) if result.status.success() => {
-                sent += 1;
-            }
-            Ok(result) => {
-                let message = String::from_utf8_lossy(&result.stderr).trim().to_string();
-                tracing::warn!(
-                    "atm shutdown message failed team='{}' agent='{}': {}",
-                    team,
-                    agent,
-                    if message.is_empty() {
-                        format!("exit {}", result.status)
-                    } else {
-                        message
-                    }
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "atm shutdown message execution failed team='{}' agent='{}': {}",
-                    team,
-                    agent,
-                    err
-                );
-            }
-        }
-    }
-
-    Ok(sent)
+        .map(|target| format!("{}@{}", target.agent, target.team))
+        .collect::<Vec<_>>();
+    tracing::warn!(
+        "ATM send not implemented: skipping graceful shutdown send; enabled={} allow_shutdown={} targets={:?}",
+        state.config.atm.enabled,
+        state.config.atm.allow_shutdown,
+        configured_targets
+    );
+    Ok(0)
 }
 
 fn resolve_socket_path(state: &AppState) -> PathBuf {
@@ -334,10 +279,6 @@ fn request_id() -> String {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
-}
-
-fn atm_bin() -> String {
-    std::env::var("SCMUX_ATM_BIN").unwrap_or_else(|_| "atm".to_string())
 }
 
 #[cfg(unix)]

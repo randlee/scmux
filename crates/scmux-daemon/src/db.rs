@@ -204,6 +204,8 @@ pub fn get_host(conn: &Connection, host_id: i64) -> anyhow::Result<Option<HostDe
     Ok(row)
 }
 
+// Persistent write helpers are crate-visible for module organization, but gated by
+// `definition_writer::WriteGuard`, which cannot be constructed outside definition_writer.
 pub(crate) fn create_session(
     _guard: &crate::definition_writer::WriteGuard,
     conn: &Connection,
