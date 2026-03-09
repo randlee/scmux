@@ -151,14 +151,19 @@ pub async fn send_shutdown_messages(
     state: &AppState,
     targets: &[ShutdownTarget],
 ) -> anyhow::Result<usize> {
+    if !state.config.atm.enabled || !state.config.atm.allow_shutdown {
+        return Ok(0);
+    }
+
+    if targets.is_empty() {
+        return Ok(0);
+    }
     let configured_targets = targets
         .iter()
         .map(|target| format!("{}@{}", target.agent, target.team))
         .collect::<Vec<_>>();
     tracing::warn!(
-        "ATM send not implemented: skipping graceful shutdown send; enabled={} allow_shutdown={} targets={:?}",
-        state.config.atm.enabled,
-        state.config.atm.allow_shutdown,
+        "ATM send not implemented: skipping graceful shutdown send; targets={:?}",
         configured_targets
     );
     Ok(0)
@@ -328,4 +333,108 @@ async fn query_socket_raw<T: DeserializeOwned>(
     _request_json: &str,
 ) -> anyhow::Result<T> {
     Err(anyhow!("ATM socket IPC is only available on Unix"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AtmConfig, Config, DaemonConfig, PollingConfig};
+    use crate::{ci, db, definition_writer, runtime, AppState, RuntimeHealth, SystemClock};
+    use tempfile::TempDir;
+
+    fn build_state(atm: AtmConfig) -> (TempDir, AppState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("atm-tests.db");
+        let conn = db::open(db_path.to_str().expect("utf8 path")).expect("open db");
+        let host_id = definition_writer::ensure_local_host(&conn).expect("local host");
+
+        (
+            tmp,
+            AppState {
+                db: std::sync::Mutex::new(conn),
+                db_path: db_path.to_string_lossy().to_string(),
+                host_id,
+                config: Config {
+                    daemon: DaemonConfig {
+                        port: None,
+                        db_path: None,
+                        default_terminal: Some("iterm2".to_string()),
+                        log_level: None,
+                    },
+                    polling: PollingConfig {
+                        tmux_interval_secs: Some(15),
+                        health_interval_secs: Some(60),
+                        ci_active_interval_secs: None,
+                        ci_idle_interval_secs: None,
+                    },
+                    atm,
+                },
+                reachability: std::sync::Mutex::new(std::collections::HashMap::new()),
+                runtime: std::sync::Mutex::new(runtime::RuntimeProjection::default()),
+                ci_tools: ci::ToolAvailability::default(),
+                clock: std::sync::Arc::new(SystemClock),
+                atm_available: std::sync::atomic::AtomicBool::new(false),
+                last_api_access: std::sync::atomic::AtomicU64::new(0),
+                started_at: std::time::Instant::now(),
+                health: std::sync::Mutex::new(RuntimeHealth::default()),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn td_atm_09_shutdown_send_returns_early_when_allow_shutdown_false() {
+        let (_tmp, state) = build_state(AtmConfig {
+            enabled: true,
+            teams: vec!["scmux-dev".to_string()],
+            allow_shutdown: false,
+            socket_path: None,
+            stuck_minutes: Some(10),
+            stop_grace_secs: None,
+        });
+
+        let sent = send_shutdown_messages(
+            &state,
+            &[ShutdownTarget {
+                team: "scmux-dev".to_string(),
+                agent: "team-lead".to_string(),
+            }],
+        )
+        .await
+        .expect("send");
+
+        assert_eq!(sent, 0);
+    }
+
+    #[test]
+    fn td_atm_teams_are_config_only_not_scanned_from_home() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::create_dir_all(home.path().join(".claude/teams/should-not-load"))
+            .expect("create teams dir");
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: test-only env mutation within single test scope.
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let (_tmp, state) = build_state(AtmConfig {
+            enabled: true,
+            teams: vec!["scmux-dev".to_string()],
+            allow_shutdown: false,
+            socket_path: None,
+            stuck_minutes: Some(10),
+            stop_grace_secs: None,
+        });
+
+        let teams = configured_teams(&state);
+        assert_eq!(teams, vec!["scmux-dev".to_string()]);
+
+        match prev_home {
+            Some(value) => {
+                // SAFETY: restoring previous test-only env var value.
+                unsafe { std::env::set_var("HOME", value) };
+            }
+            None => {
+                // SAFETY: restoring previous test-only env var absence.
+                unsafe { std::env::remove_var("HOME") };
+            }
+        }
+    }
 }
