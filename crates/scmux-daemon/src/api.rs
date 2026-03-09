@@ -41,6 +41,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/:name/start", post(start_session))
         .route("/sessions/:name/stop", post(stop_session))
         .route("/sessions/:name/jump", post(jump_session))
+        .route("/editor/state", get(get_editor_state))
         .route("/editor/armadas", post(create_armada))
         .route("/editor/armadas/:id", axum::routing::patch(patch_armada))
         .route("/editor/fleets", post(create_fleet))
@@ -286,6 +287,56 @@ struct MoveCrewRefRequest {
     fleet_id: i64,
     flotilla_id: Option<i64>,
     alias_name: Option<Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorStateResponse {
+    armadas: Vec<EditorArmada>,
+    fleets: Vec<EditorFleet>,
+    flotillas: Vec<EditorFlotilla>,
+    crews: Vec<EditorCrew>,
+    crew_refs: Vec<EditorCrewRef>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorArmada {
+    id: i64,
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorFleet {
+    id: i64,
+    armada_id: i64,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorFlotilla {
+    id: i64,
+    fleet_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorCrew {
+    id: i64,
+    crew_name: String,
+    crew_ulid: String,
+    member_count: i64,
+    variant_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorCrewRef {
+    id: i64,
+    crew_id: i64,
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1332,6 +1383,109 @@ async fn unlink_crew_ref(
             }),
         )),
         Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn get_editor_state(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<EditorStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<EditorStateResponse> {
+        let db_conn = state.db.lock().expect("db lock");
+
+        let armadas = {
+            let mut stmt =
+                db_conn.prepare("SELECT id, name, description FROM armadas ORDER BY name")?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorArmada {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let fleets = {
+            let mut stmt =
+                db_conn.prepare("SELECT id, armada_id, name, color FROM fleets ORDER BY name")?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorFleet {
+                    id: r.get(0)?,
+                    armada_id: r.get(1)?,
+                    name: r.get(2)?,
+                    color: r.get(3)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let flotillas = {
+            let mut stmt = db_conn.prepare("SELECT id, fleet_id, name FROM flotillas ORDER BY name")?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorFlotilla {
+                    id: r.get(0)?,
+                    fleet_id: r.get(1)?,
+                    name: r.get(2)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let crews = {
+            let mut stmt = db_conn.prepare(
+                "SELECT c.id, c.crew_name, c.crew_ulid,
+                        (SELECT COUNT(*) FROM crew_members cm WHERE cm.crew_id = c.id) AS member_count,
+                        (SELECT COUNT(*) FROM crew_variants cv WHERE cv.crew_id = c.id) AS variant_count
+                 FROM crews c
+                 ORDER BY c.crew_name",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorCrew {
+                    id: r.get(0)?,
+                    crew_name: r.get(1)?,
+                    crew_ulid: r.get(2)?,
+                    member_count: r.get(3)?,
+                    variant_count: r.get(4)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let crew_refs = {
+            let mut stmt = db_conn.prepare(
+                "SELECT id, crew_id, armada_id, fleet_id, flotilla_id, alias_name
+                 FROM crew_refs
+                 ORDER BY armada_id, fleet_id, id",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorCrewRef {
+                    id: r.get(0)?,
+                    crew_id: r.get(1)?,
+                    armada_id: r.get(2)?,
+                    fleet_id: r.get(3)?,
+                    flotilla_id: r.get(4)?,
+                    alias_name: r.get(5)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        Ok(EditorStateResponse {
+            armadas,
+            fleets,
+            flotillas,
+            crews,
+            crew_refs,
+        })
+    })
+    .await
+    .map_err(|_| internal_error("failed to join get_editor_state task".to_string()))?;
+
+    match result {
+        Ok(body) => Ok(Json(body)),
+        Err(err) => Err(internal_error(format!(
+            "failed to load editor state: {err}"
+        ))),
     }
 }
 

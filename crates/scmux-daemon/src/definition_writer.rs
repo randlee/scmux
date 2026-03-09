@@ -190,6 +190,7 @@ pub fn patch_armada(
     armada_id: i64,
     patch: &ArmadaPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM armadas WHERE id = ?1",
@@ -245,6 +246,7 @@ pub fn patch_fleet(
     fleet_id: i64,
     patch: &FleetPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM fleets WHERE id = ?1",
@@ -308,6 +310,7 @@ pub fn patch_flotilla(
     flotilla_id: i64,
     patch: &FlotillaPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let exists: Option<i64> = conn
         .query_row(
             "SELECT id FROM flotillas WHERE id = ?1",
@@ -535,6 +538,7 @@ pub fn move_crew_ref(
     ref_id: i64,
     patch: &MoveCrewRefPatch,
 ) -> Result<bool, WriteError> {
+    let _guard = WriteGuard(());
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
     let exists: Option<i64> = tx
         .query_row(
