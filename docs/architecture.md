@@ -1,206 +1,202 @@
-# scmux — Architecture
+# scmux Architecture (Target)
 
-## 1. Product Architecture (Target)
+Status: v0.5.0 planning baseline architecture.
 
-scmux is a multi-team operations dashboard and launcher for AI agent teams.
+## 1. Architecture summary
 
-Primary value: show all defined projects at once (running or stopped), expose per-agent runtime state, show CI health, and start/stop safely without requiring a terminal window.
+scmux uses a strict split:
+- Persistent definition plane: editor-driven only.
+- Runtime observation plane: pollers + in-memory projection.
 
-## 2. Hard Invariants
+This split exists to prevent accidental runtime writes and to keep launch/control robust for many concurrent AI sessions.
 
-1. SQLite is a definition store only.
-- Stores user-approved project/host/roster definitions.
-- Does not auto-ingest tmux discovery.
+## 2. System planes
 
-2. Exactly one persistent writer subsystem exists.
-- Multiple editor entry points are allowed (`New Project`, `Project Editor`, card-level `Edit`), but all persistent writes must route through the same writer subsystem.
-- Compile boundary is enforced via Rust visibility: persistent-write functions in `db.rs` are restricted (`pub(crate)`/`pub(super)`) and callable only from `definition_writer`.
-- All pollers and runtime loops are SQLite read-only.
+### 2.1 Definition plane (persistent)
 
-3. Approved-project write policy is mandatory.
-- Any persistent write must validate that target project is approved (`enabled = 1` and non-empty `config_json.panes[]` created via editor flow).
+Owned by one writer module only.
 
-4. Discovery is read-only.
-- Raw tmux discovery is informational and never mutates project definitions.
+Responsibilities:
+- Persist Armada/Fleet/Flotilla/Crew/CrewMember definitions.
+- Enforce write constraints and identity rules.
+- Validate save operations atomically.
 
-5. Safety-first session control.
-- Stop is graceful-first (ATM shutdown request), then scoped hard-stop only if needed.
-- Panic/error paths must not bulk-stop unrelated sessions.
+### 2.2 Runtime plane (ephemeral)
 
-6. Runtime state is live/ephemeral.
-- Runtime status is refreshed continuously for UI/CLI display.
-- Runtime status is not persisted as definition truth.
+Owned by read-only poller modules and projector.
 
-## 3. Runtime Data Flow
+Responsibilities:
+- Observe tmux runtime, host health, CI status, ATM member state.
+- Build in-memory session/crew projection.
+- Serve runtime APIs and UI cards without mutating persistent definitions.
 
-```text
-User Form/Edit Action
-  -> Definition Write Module (only persistent writer)
-  -> SQLite definitions (projects/hosts/approved roster)
+## 3. Hard boundaries
 
-Pollers (read-only persistence)
-  -> tmux_poller reads tmux runtime
-  -> atm_poller reads ATM socket runtime
-  -> ci_poller reads gh/az runtime
-  -> hosts_poller reads remote health/runtime
+1. Exactly one persistent writer module.
+- Proposed module: `definition_writer` (name can be finalized during implementation).
+- All persistence mutating handlers call this module only.
 
-Runtime projection
-  -> in-memory aggregate session/project view
-  -> HTTP API
-  -> Dashboard + CLI
-```
+2. Pollers are write-prohibited for definitions.
+- `tmux_poller`, `hosts`, `ci`, `atm` must not persist discovery as definitions.
 
-P6 decision: runtime cache tables (`session_status`, `session_ci`, `session_atm`) are replaced by in-memory projection for runtime display paths.
+3. Discovery is import-only.
+- Unregistered tmux discovery view does not write DB.
+- Explicit user import invokes `definition_writer`.
 
-## 4. Module Responsibilities
+4. Runtime failures are scoped.
+- Panic/error in one crew flow cannot stop unrelated running crews.
 
-### 4.1 `definition_writer` (new/central)
-- Only module allowed to persist project definitions.
-- Can be invoked by multiple editor UX entry points.
-- Handles create/edit/delete for projects/hosts/approved roster changes.
-- Enforces approved-project constraints.
+## 4. Module responsibilities
 
-### 4.2 `tmux_poller` (rename target for current `scheduler.rs`)
-- Reads tmux session/pane runtime state.
-- Computes runtime state (`stopped|starting|running|idle|done`) for API projection.
-- No persistent writes.
+### 4.1 `definition_writer`
+
+Only persistent writer.
+
+Responsibilities:
+- CRUD for Armada/Fleet/Flotilla/Crew/CrewMember.
+- Reference/link updates for organization membership and move operations.
+- Copy-on-write fork operations when user chooses split.
+- Atomic transaction boundaries for complex edits.
+- Validation at save/start boundaries.
+
+### 4.2 `tmux_poller` (current `scheduler.rs` rename target)
+
+Responsibilities:
+- Read tmux sessions/windows/panes.
+- Resolve runtime bind for CrewVariants.
+- Feed projector with runtime session state.
+
+Prohibited:
+- Writing definitions or reconstruction data to SQLite.
 
 ### 4.3 `hosts.rs`
-- Reads remote daemon health/runtime snapshots.
-- Aggregates reachability and stale status for dashboard.
-- No persistent writes from discovery.
-- In-memory projection retains last-known remote session snapshots across consecutive failed poll cycles.
-- `last_seen` is updated on each successful poll in-memory for display.
-- Runtime host projection data is lost on daemon restart (acceptable for P6).
+
+Responsibilities:
+- Read remote daemon reachability/health snapshots.
+- Feed host runtime status into projector.
+
+Prohibited:
+- Persistent definition mutation from runtime polling.
 
 ### 4.4 `ci.rs`
-- Reads CI status from `gh`/`az`.
-- Produces runtime snapshot list per project (PRs + run statuses).
-- No persistent writes from CI polling.
+
+Responsibilities:
+- Read CI state snapshots (provider adapters).
+- Feed per-crew/per-project status into projector.
+
+Prohibited:
+- Persisting CI runtime snapshots as definition truth.
 
 ### 4.5 `atm.rs`
-- Reads ATM socket runtime state per agent.
-- Maps per-pane state via canonical key (`pane.atm_team`, `pane.atm_agent`).
-- Permanent roster changes are editor-driven writes only.
+
+Responsibilities:
+- Read ATM daemon runtime member status per crew member.
+- Map runtime status by configured identity references.
+
+Prohibited:
+- Autonomous roster/team persistent writes.
 
 ### 4.6 `api.rs`
-- Read endpoints expose aggregated runtime + persisted definitions.
-- Action endpoints (`start/stop/jump`) control runtime only.
-- Persistent writes are only via definition-editor endpoints.
-- Discovery endpoint is explicit: `GET /discovery` for read-only raw tmux view.
 
-## 5. Session Lifecycle Model
+Responsibilities:
+- Read endpoints: definitions + runtime projection responses.
+- Runtime actions: start/stop/jump pathways.
+- Editor endpoints: call `definition_writer` for persistence.
 
-State machine:
+Constraint:
+- No direct persistence calls from non-editor routes.
 
-`stopped -> starting -> running -> idle -> done`
+## 5. Core data model
 
-Additional explicit stop edges:
-- `running -> stopped` via `POST /sessions/:name/stop`.
-- `idle -> stopped` via `POST /sessions/:name/stop`.
+Logical hierarchy:
+- Armada
+- Fleet
+- Flotilla (optional)
+- Crew
+- CrewMember
+- CrewVariant
 
-- `stopped`: entered when (1) project is defined but never started, or (2) session is stopped from `running`/`idle`.
-- `starting`: launch requested; tmux/agents being created.
-- `starting` failure edge: if tmux/session creation or pane launch fails, transition back to `stopped` with structured error details.
-- `running`: tmux exists and at least one pane agent is ATM-active.
-- `idle`: tmux exists; all pane agents idle/offline.
-- `done`: semantics and auto-teardown policy are intentionally unresolved; no transition-in path is required in P6 and behavior remains non-destructive by default.
+Hierarchy model:
 
-## 6. Key Flows
-
-### 6.1 Start
-`POST /sessions/:name/start`
-1. Read `config_json` definition from SQLite.
-2. Create tmux session/window/pane layout.
-3. Launch each pane command.
-4. Publish runtime transitions to API/dashboard.
-
-### 6.2 Stop
-`POST /sessions/:name/stop`
-1. Send ATM shutdown signal/message to configured agents.
-2. Wait configurable grace period.
-3. If still running, apply scoped hard-stop to target session only (exact retries/timeouts are product-configurable and pending finalization).
-4. Never kill unrelated sessions.
-
-### 6.3 Jump
-`POST /sessions/:name/jump`
-- Opens iTerm (or selected terminal) as a viewer.
-- Attach/detach does not control lifecycle.
-
-## 7. Views
-
-### 7.1 Primary View
-- All defined projects from SQLite.
-- Includes stopped projects with Start affordance.
-- Running projects show per-pane ATM + CI runtime status.
-
-### 7.2 Secondary View
-- Raw tmux discovery tab backed by `GET /discovery`.
-- Informational only, no persistence side effects.
-
-## 8. Definition Schema (`config_json`)
-
-```json
-{
-  "panes": [
-    {
-      "name": "team-lead",
-      "command": "claude --profile team-lead",
-      "atm_agent": "team-lead",
-      "atm_team": "scmux-dev"
-    },
-    {
-      "name": "arch-cmux",
-      "command": "codex --profile arch-cmux",
-      "atm_agent": "arch-cmux",
-      "atm_team": "scmux-dev"
-    }
-  ],
-  "repo": "/Users/randlee/Documents/github/scmux",
-  "window_layout": "even-horizontal",
-  "atm_team": "scmux-dev"
-}
+```text
+Armada
+  -> Fleet
+    -> Flotilla (optional)
+      -> Crew
+        -> CrewMember (role/model/prompt definition)
+        -> CrewVariant (host/path/branch runtime binding)
 ```
 
-## 9. Observability Direction
+Key identity notes:
+- Crew has immutable-by-default `crew_name` aligned with ATM naming.
+- Crew has stable `crew_ulid` for cross-host identity continuity.
+- CrewVariant binds concrete runtime context (`host_id`, repo metadata, branch/path dimensions, tmux coordinates).
 
-Current logging should remain structured and stable with OpenTelemetry in mind.
+## 6. Runtime binding model
 
-Required now:
-- Correlation identifiers on lifecycle/action events.
-- Consistent key/value fields for session/project/agent/host.
-- Log/event schema that can be mapped to OTel traces/spans without redesign.
+Every runnable CrewVariant must resolve to tmux coordinates:
+- `session`
+- `window`
+- `pane`
 
-## 10. Prohibited Behaviors
+Implications:
+- Armada/Fleet/Flotilla are organization/view layers.
+- Cloning Armada does not duplicate live runtime by default; shared references show same running sessions until explicit fork.
 
-- Auto-writing project definitions from tmux discovery.
-- Reconstructing deleted definitions from live tmux.
-- Poller-based persistent writes (tmux/hosts/ci/atm loops).
-- Session-level-only ATM model as final representation.
-- Panic/error bulk-stop behavior.
+## 7. Editing and validation model
 
-## 11. Refactor Scope (Code Conflicts to Remove)
+### 7.1 Save-time behavior
 
-Conflicting current modules and expected direction:
+- Forms may allow temporary invalid states while editing.
+- Save must be atomic.
+- If save cannot be applied atomically, it fails and client refreshes current DB state.
 
-- `scheduler.rs`
-  - Remove discovery-to-definition persistence and reconstruction logic.
-  - Rename responsibility toward read-only runtime polling (`tmux_poller`).
+### 7.2 Start-time behavior
 
-- `hosts.rs`
-  - Remove remote discovery persistence paths.
-  - Keep health/runtime aggregation only.
+- Start gate is strict: unresolved required references (e.g., missing prompt files) block start.
+- Already running crews are not force-killed solely because a later validation check fails.
 
-- `ci.rs`
-  - Remove CI snapshot persistence writes.
-  - Keep runtime CI projection only.
+### 7.3 Running edit restrictions
 
-- `atm.rs`
-  - Remove autonomous persistent runtime writes.
-  - Keep per-pane runtime mapping; route roster persistence through editor.
+Allowed while running:
+- move Crew between Armada/Fleet/Flotilla
+- organizational/view edits
 
-- `api.rs`
-  - Ensure only definition-editor routes can persist data.
-  - Keep start/stop/jump as runtime control paths.
+Disallowed while running:
+- Crew roster/prompt definition edits
 
-This architecture supersedes earlier discovery-first assumptions.
+## 8. Discovery/import architecture
+
+- `GET /discovery` (or equivalent read endpoint) exposes unregistered tmux runtime objects.
+- Discovery view is non-persistent.
+- Import action maps selected discovered runtime to Crew/CrewMember definition payload and persists via `definition_writer`.
+
+## 9. Launch and stop architecture
+
+### 9.1 Launch
+
+1. API resolves Crew/CrewVariant definition.
+2. Validate start prerequisites.
+3. Create/attach tmux session layout.
+4. Launch CrewMember commands by pane.
+5. Runtime projector reflects transitions (`stopped -> starting -> running/idle`).
+
+### 9.2 Stop
+
+- Full coordinated ATM shutdown orchestration is intentionally deferred.
+- Current phase allows stub behavior with explicit log/error reporting when shutdown command path is not implemented.
+- Any hard-stop fallback must stay scoped to the targeted crew runtime.
+
+## 10. Observability direction
+
+- Structured logs with consistent action/session/member identifiers.
+- Keep logging schema OpenTelemetry-ready for near-term integration.
+- `scmux doctor` is the primary operational surface for runtime diagnostics.
+
+## 11. Prohibited behaviors
+
+- Auto-registration of discovered tmux runtime into DB.
+- Poller-driven persistent definition writes.
+- Reconstruction of deleted definitions from live runtime.
+- Session-wide-only ATM status as final model (member-level is required).
+- Unscoped mass shutdown on panic/error.

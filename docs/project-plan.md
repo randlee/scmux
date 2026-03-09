@@ -1,374 +1,135 @@
-# scmux — Project Plan
+# scmux Project Plan (Execution Reset)
 
-## Overview
+Status: Active v0.5.0 planning baseline.
 
-scmux is delivered in six phases with explicit integration branches and version targets.
+## 1. Objective
 
-| Phase | Theme | Target Version | Integration Branch |
-|-------|-------|----------------|--------------------|
-| 1 | Foundation + API | 0.1.0 | `integrate/phase-1` |
-| 2 | Multi-host + Dashboard | 0.2.0 | `integrate/phase-2` |
-| 3 | CI + CLI | 0.3.0 | `integrate/phase-3` |
-| 4 | Supervision + Release | 0.3.0 | `integrate/phase-4` |
-| 5 | Dashboard Embed + Release Automation + ATM Activity | 0.4.x | `integrate/phase-5` |
-| 6 | Definition-First Architecture Realignment | 0.5.0 | `integrate/phase-6` (planned) |
+Bring scmux to a stable MVP where users can reliably define, launch, and manage many AI crews with strict persistence controls.
 
-## Execution Model
+Top priorities:
+- Documentation and design language locked first.
+- Remove unsafe/legacy runtime-write behavior.
+- Implement editor-first definitions for Armada/Fleet/Flotilla/Crew/CrewMember.
+- Keep runtime state live and non-persistent.
 
-### Roles and ownership
+## 1.1 Phase map
 
-- `team-lead` owns sequencing, review, and merge decisions.
-- `arch-cmux` is the sole implementation agent for sprint delivery work.
-- `quality-mgr` runs dual QA tracks (`rust-qa-agent` + `scmux-qa-agent`) in parallel.
+| Phase | Theme | Target Branch |
+|---|---|---|
+| 1-6 | Historical delivery (foundation through architecture realignment) | `integrate/phase-1` ... `integrate/phase-6` |
+| 7 | Crew hierarchy, editor backend/UI, launch/import hardening | `integrate/phase-7` |
 
-### Branching and worktrees
+## 2. Scope boundaries
 
-- Main repo remains on `develop`.
-- Each sprint runs in a dedicated worktree at `/Users/randlee/Documents/github/scmux-worktrees/<branch>`.
-- Sprint PRs target the phase integration branch.
-- Phase integration branches merge to `develop` after phase completion.
+In scope for this plan:
+- `docs/requirements.md`, `docs/architecture.md`, `docs/project-plan.md` alignment.
+- Single persistent write gate implementation direction.
+- Editor flows above Crew editor (Armada/Fleet/Flotilla input/edit + CrewMember add/move).
+- Unregistered tmux discovery as view + explicit import.
+- tmux-bound launch/runtime model.
 
-### ATM communication protocol
+Out of scope for this cycle:
+- Full ATM shutdown orchestration implementation.
+- Heavy history/provenance subsystem.
+- Broad remote multi-daemon sync engine beyond stable identity direction.
+- Deferred issue set tracked for this cycle: GH `#31`, `#35`, `#36`, `#37`.
 
-- Assignment: `team-lead` sends direct ATM message to `arch-cmux`.
-- Ack: `arch-cmux` acknowledges receipt before coding.
-- Completion: `arch-cmux` reports commit/PR back via ATM.
-- Follow-up: QA findings are sent by `quality-mgr` to `team-lead`, then forwarded as fix tasks.
+## 3. Sprint roadmap
 
-## Sprint Status
+### Sprint P7-S1: Planning lock (docs + decision closure)
 
-| Sprint | Status |
-|--------|--------|
-| S0 | Complete (foundation: cargo build, workspace scaffold, env var rename) |
-| S1.1 | Complete |
-| S1.2 | Complete |
-| S2.1 | Complete |
-| S2.2 | Complete |
-| S3.1 | Complete |
-| S3.2 | Complete |
-| S4.1 | Complete |
-| S4.2 | Complete |
-| S5.1 | Complete |
-| S5.2 | Complete |
-| S5.3 | Complete |
-| S6.0 | Complete — PR #27 |
-| S6.1 | Complete — PR #28 |
-| S6.2 | Complete — PR #29 |
-| S6.3 | Complete — PR #38 |
-| S6.fix | Complete — PR #40 |
-| S6.cli | Complete — PR #41 |
+Deliverables:
+- Finalize `requirements.md`, `architecture.md`, `project-plan.md`.
+- Align terminology with `design-language.md`.
+- Record unresolved policy decisions explicitly.
 
-## Sprint S0 — Foundation (Complete)
+Exit criteria:
+- Docs are mutually consistent.
+- Team can execute implementation without redefining core behavior.
 
-**Status:** Complete as of initial repo setup (before formal sprint tracking began).
+### Sprint P7-S2: Runtime-write carve-out and safety gate
 
-**Delivered:**
-- `cargo build --workspace` clean with no errors
-- Workspace scaffold: `crates/scmux-daemon`, `crates/scmux`
-- `tms` → `scmux` rename throughout codebase
-- `SCMUX_DB` and `SCMUX_PORT` env vars established
+Deliverables:
+- Remove all persistent writes outside the writer gate.
+- Enforce visibility boundary so only writer module can mutate definitions.
+- Stub unsupported ATM send/shutdown paths with explicit error logs (no silent behavior).
+- Keep pollers read-only and projection-only.
+- Execute carve-out against explicit conflict inventory in [docs/refactor-scope-v0.5.md](./refactor-scope-v0.5.md).
 
-**Note:** Logging module (DG-08) was identified post-S0 and is assigned to Sprint S1.1.
+Exit criteria:
+- Grep/code review confirms no stray definition writes outside writer gate.
+- Existing runtime flows continue without DB reconstruction behavior.
 
-## Phase 1 — Foundation + API
+### Sprint P7-S3: Definition schema and editor backend
 
-**Goal:** daemon config/database foundations are compliant and the HTTP surface is complete.
-**Version:** `0.1.0`
-**Integration branch:** `integrate/phase-1`
+Deliverables:
+- Persisted model for Armada/Fleet/Flotilla/Crew/CrewMember/CrewVariant.
+- API endpoints for create/edit/clone/move/unlink across hierarchy.
+- Atomic save operations and reference-counted delete semantics.
+- Running-edit restrictions enforced (org moves allowed; roster/prompt edits blocked while running).
 
-### Sprint 1.1 — Foundation (Config + DB)
+Exit criteria:
+- Editor API coverage proves atomic updates and policy enforcement.
+- Copy-on-write fork path is explicit and testable.
 
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p1-s1-foundation`
-- Base branch: `integrate/phase-1`
-- PR target: `integrate/phase-1`
-- Context: build is clean, but config loading/host seeding/schema parity gaps remain.
-- Deliverables:
-  - `crates/scmux-daemon/src/config.rs` with `Config` model matching architecture section 6 (`daemon`, `polling`, `hosts`).
-  - `Config::load()` from `~/.config/scmux/scmux.toml` with defaults fallback.
-  - `crates/scmux-daemon/src/main.rs` uses config for `port`, `db_path`, intervals; `AppState` adds `config: Config`; default INFO logging.
-  - `crates/scmux-daemon/src/db.rs` adds `seed_hosts_from_config()`, `sessions_updated_at` trigger, schema index names matching `docs/schema.sql`.
-  - `scmux.toml.example` at repo root.
-  - `tests/db_tests.rs` for T-D-01..T-D-04.
-  - `tests/scheduler_tests.rs` for T-D-05..T-D-07 (`should_run_now` exposed as `pub(crate)`).
-- Acceptance criteria:
-  - daemon starts with defaults when config file is missing.
-  - config file values override defaults.
-  - host seeding is idempotent and inserts configured remote hosts.
-  - DB migration parity matches `docs/schema.sql` for trigger/index names.
-  - T-D-01..T-D-07 pass.
-- Requirement IDs: `DG-04`, `DG-05`, `DG-07`, `T-D-01..T-D-07`.
-- Detailed spec: [docs/sprint-specs/p1-s1-foundation.md](./sprint-specs/p1-s1-foundation.md)
+### Sprint P7-S4: UI editors and organization workflows
 
-### Sprint 1.2 — Full API Surface
+Deliverables:
+- Armada/Fleet editor screens, plus Flotilla editor screens when Flotilla is enabled for v1 (otherwise behind feature flag).
+- Basic edit controls above Crew editor (add/move crews and crew members as defined by policy).
+- Clone flows for Armada/Fleet/Crew with shared-by-default semantics.
+- Clear validation UX for unresolved references.
 
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p1-s2-api`
-- Base branch: `feature/p1-s1-foundation`
-- PR target: `integrate/phase-1`
-- Context: foundational daemon loop exists; API endpoints and jump/static serving are incomplete.
-- Deliverables:
-  - `crates/scmux-daemon/src/api.rs` adds `POST /sessions`, `PATCH /sessions/:name`, `DELETE /sessions/:name`, `GET /hosts`, `GET /dashboard-config.json`, `POST /sessions/:name/jump`, `GET /`.
-  - `crates/scmux-daemon/src/tmux.rs` / jump helper module implements iTerm2 AppleScript local+SSH launch.
-  - `crates/scmux-daemon/src/db.rs` and handler validation enforce session registration constraints (`SR-02`, soft delete behavior).
-  - event logging coverage for start/stop/jump actions (`API-16`).
-  - `tests/api_tests.rs` covering T-A-01..T-A-11.
-  - `tests/integration_tests.rs` covering T-I-01..T-I-07.
-- Acceptance criteria:
-  - full API routes respond with documented behavior/status.
-  - jump endpoint returns structured `{ok,message}` for success/failure.
-  - session CRUD flow works end-to-end with soft delete.
-  - integration/API tests listed above pass.
-- Requirement IDs: `API-08..API-16`, `TL-01..TL-08`, `DG-03`, `SR-02`, `SR-04`.
-- Detailed spec: [docs/sprint-specs/p1-s2-api.md](./sprint-specs/p1-s2-api.md)
+Exit criteria:
+- User can create full hierarchy and reorganize without direct DB manipulation.
+- Invalid definitions can be repaired via UI without dead-end validation traps.
 
-## Phase 2 — Multi-host + Dashboard
+### Sprint P7-S5: Launch/runtime and discovery import
 
-**Goal:** multi-host reachability is first-class and dashboard is live against daemon APIs.
-**Version:** `0.2.0`
-**Integration branch:** `integrate/phase-2`
+Deliverables:
+- Strict start validation and tmux binding from CrewVariant.
+- Runtime projection endpoints for dashboard/CLI.
+- Unregistered discovery view (sessions/windows/panes) and explicit import flow.
+- `scmux doctor` diagnostics surface for runtime visibility.
 
-### Sprint 2.1 — Multi-Host Reachability
+Exit criteria:
+- External tmux sessions can be imported into registered crews.
+- Launch/monitor workflows work without runtime persistence side effects.
 
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p2-s1-multihost`
-- Base branch: `integrate/phase-2`
-- PR target: `integrate/phase-2`
-- Context: hosts table exists, but active reachability model/last-seen behavior must be implemented.
-- Deliverables:
-  - `crates/scmux-daemon/src/hosts.rs` for host polling and in-memory reachability state.
-  - `crates/scmux-daemon/src/main.rs` adds host poll loop scheduling.
-  - `crates/scmux-daemon/src/api.rs` `/hosts` and dashboard config include `reachable` and `last_seen` fields.
-  - integration tests for unreachable/restore behavior.
-- Acceptance criteria:
-  - unreachable hosts are represented without daemon errors.
-  - last-known data remains available during outage.
-  - reachability auto-recovers within one poll cycle.
-- Requirement IDs: `MH-01..MH-09`, `T-I-10..T-I-12`.
-- Detailed spec: [docs/sprint-specs/p2-s1-multihost.md](./sprint-specs/p2-s1-multihost.md)
+### Sprint P7-S6: Hardening and release prep
 
-### Sprint 2.2 — Live Dashboard
+Deliverables:
+- Concurrency/race hardening around edit/save and runtime transitions.
+- Safety testing for panic/partial failure isolation.
+- Documentation final pass and release checklist updates.
 
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p2-s2-dashboard`
-- Base branch: `feature/p2-s1-multihost`
-- PR target: `integrate/phase-2`
-- Context: dashboard has static mock data and needs live integration + host-aware rendering.
-- Deliverables:
-  - `dashboard/team-dashboard.jsx` switched to live fetch across hosts.
-  - monochrome rendering for unreachable-host sessions.
-  - jump modal wired to daemon `POST /sessions/:name/jump` and feedback handling.
-  - grid/list/grouped + filters + header aggregate counts validated against API.
-  - dashboard manual test checklist coverage.
-- Acceptance criteria:
-  - dashboard renders live daemon data from all configured hosts.
-  - unreachable hosts are monochrome with `last seen` indicator.
-  - jump modal executes daemon jump and renders response.
-- Requirement IDs: `DV-01..DV-11`, `DC-01..DC-05`, `DJ-01..DJ-07`, `T-UI-01..T-UI-17`.
-- Detailed spec: [docs/sprint-specs/p2-s2-dashboard.md](./sprint-specs/p2-s2-dashboard.md)
+Exit criteria:
+- QA critical findings closed.
+- MVP acceptance checklist passes for create/edit/launch/manage/import flows.
 
-## Phase 3 — CI + CLI
+## 4. Policy decisions to finalize during execution
 
-**Goal:** CI signals are integrated and CLI is production-usable.
-**Version:** `0.3.0`
-**Integration branch:** `integrate/phase-3`
+1. Final persisted representation of Armada/Fleet/Flotilla (entity vs view-layer only where applicable).
+2. Precise clone matrix for “shared edit” vs “fork” by field category.
+3. Exact uniqueness constraints across `crew_ulid`, host, repo, branch, and path dimensions.
+4. Default UI organization mode and cross-host merge behavior.
+5. `crew_ulid` lifecycle ownership and conflict resolution.
+6. Import mapping rules from discovered tmux objects to Crew/CrewMember schema.
+7. Flotilla rollout mode (required in v1 vs feature flag).
 
-### Sprint 3.1 — CI Integration
+## 5. MVP acceptance checklist
 
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p3-s1-ci`
-- Base branch: `integrate/phase-3`
-- PR target: `integrate/phase-3`
-- Context: schema has `session_ci`; provider polling/tool-degradation behavior is not implemented.
-- Deliverables:
-  - `crates/scmux-daemon/src/ci.rs` for provider polling, parsing, persistence.
-  - `crates/scmux-daemon/src/main.rs` adds `ci_loop` with adaptive interval.
-  - tool discovery at startup for `gh`/`az`; `tool_unavailable` persisted to `session_ci`.
-  - API summaries expose provider status payloads.
-  - tests covering interval and tool-unavailable behavior.
-- Acceptance criteria:
-  - active sessions poll every 1 minute; idle/stopped every 5 minutes.
-  - unavailable provider tools yield persisted `tool_unavailable` status.
-  - provider payloads surface in API for dashboard display.
-- Requirement IDs: `CI-01..CI-13`, `T-D-10..T-D-13`.
-- Detailed spec: [docs/sprint-specs/p3-s1-ci.md](./sprint-specs/p3-s1-ci.md)
+MVP is considered successful when all are true:
+1. User can define Armada/Fleet/Flotilla/Crew/CrewMembers entirely from editors.
+2. User can add/move crew members and crews across organization layers per policy.
+3. Start launches tmux runtime from definitions with strict validation.
+4. Runtime state is visible and testable without writing runtime snapshots to DB.
+5. Unregistered tmux runtime can be discovered and imported explicitly.
+6. No persistent writes exist outside writer gate.
+7. Panic/error paths do not mass-stop unrelated crews.
 
-### Sprint 3.2 — CLI Binary
+## 6. Coordination and review cadence
 
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p3-s2-cli`
-- Base branch: `feature/p3-s1-ci`
-- PR target: `integrate/phase-3`
-- Context: CLI crate is only a stub and lacks network/command plumbing.
-- Deliverables:
-  - `crates/scmux/Cargo.toml` includes `reqwest`, `clap`, `tokio`.
-  - `crates/scmux/src/main.rs` implements command tree and dispatch.
-  - `crates/scmux/src/client.rs` HTTP client with `SCMUX_HOST`/`--host` support.
-  - command coverage for list/show/start/stop/jump/add/edit/disable/enable/remove/hosts/daemon status.
-- Acceptance criteria:
-  - all CLI commands map to daemon API routes and return actionable output.
-  - `scmux list` matches dashboard-visible state.
-  - `scmux jump` triggers daemon jump route successfully.
-- Requirement IDs: `CLI-01..CLI-14`.
-- Detailed spec: [docs/sprint-specs/p3-s2-cli.md](./sprint-specs/p3-s2-cli.md)
-
-## Phase 4 — Supervision + Release
-
-**Goal:** production hardening, end-to-end validation, and 1.0 release readiness.
-**Version:** `0.3.0`
-**Integration branch:** `integrate/phase-4`
-
-### Sprint 4.1 — Supervision + Performance
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p4-s1-supervision`
-- Base branch: `integrate/phase-4`
-- PR target: `integrate/phase-4`
-- Context: core features exist; service lifecycle and perf guarantees are not finalized.
-- Deliverables:
-  - launchd + systemd service assets and install/run docs.
-  - daemon status command and health telemetry refinements.
-  - profiling/optimization pass for poll/API latency constraints.
-- Acceptance criteria:
-  - boot supervision works on macOS and Linux.
-  - NF-03/NF-04 performance targets are measured and met.
-  - daemon remains resilient under partial-host/session failure.
-- Requirement IDs: `DH-04`, `DH-05`, `NF-01..NF-05`, `NF-08`.
-- Detailed spec: [docs/sprint-specs/p4-s1-supervision.md](./sprint-specs/p4-s1-supervision.md)
-
-### Sprint 4.2 — E2E Tests + Release
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p4-s2-release`
-- Base branch: `feature/p4-s1-supervision`
-- PR target: `integrate/phase-4`
-- Context: all feature work merged; final verification and release packaging required.
-- Deliverables:
-  - complete end-to-end suite T-E-01..T-E-11.
-  - acceptance criteria validation report.
-  - release artifacts/versioning to `0.3.0` and Homebrew publish steps.
-- Acceptance criteria:
-  - all E2E tests pass consistently.
-  - section 7 acceptance criteria in requirements are fully satisfied.
-  - release checklist complete for binary/crate/Homebrew channels.
-- Requirement IDs: `T-E-01..T-E-11`, `AC-1..AC-10`.
-- Detailed spec: [docs/sprint-specs/p4-s2-release.md](./sprint-specs/p4-s2-release.md)
-
-## Phase 5 — Dashboard Embed + Release Automation + ATM Activity (Complete)
-
-**Goal:** make dashboard self-contained for packaging, automate Homebrew updates, and add ATM activity visibility.
-**Version:** `0.4.x`
-**Integration branch:** `integrate/phase-5`
-
-### Sprint 5.1 — Dashboard Embed + crates.io
-- Status: Complete
-- Primary outcomes: embedded dashboard assets, release publish order fixes, CI dashboard drift checks.
-
-### Sprint 5.2 — Homebrew Release Automation
-- Status: Complete
-- Primary outcomes: `update-homebrew` workflow, formula patch automation and docs alignment.
-
-### Sprint 5.3 — ATM Integration
-- Status: Complete
-- Primary outcomes: ATM daemon polling, API/CLI/dashboard activity display, follow-up artifact sync fixes.
-
-## Phase 6 — Definition-First Architecture Realignment (Current)
-
-**Goal:** replace discovery-first assumptions with definition-first architecture and writer-subsystem constraints.
-**Version:** `0.5.0` (planned)
-**Integration branch:** `integrate/phase-6` (planned; current docs work targets `develop`)
-
-### Sprint 6.0 — Requirements + Architecture Rewrite
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-requirements-revision`
-- Base branch: `develop`
-- PR target: `develop`
-- Status: In Progress
-- Scope:
-  - hard-replace `docs/requirements.md` and `docs/architecture.md` to definition-first model
-  - define writer subsystem boundaries and prohibited poller writes
-  - define in-memory runtime projection approach and discovery endpoint contract
-  - capture refactor scope for conflicting runtime-write paths
-- Acceptance criteria:
-  - requirements + architecture reflect the definition-first model with no conflicting discovery-first language
-  - writer subsystem boundary is specified (including compile-boundary enforcement notes)
-  - in-memory runtime projection is explicitly defined for runtime API views
-  - discovery endpoint contract (`GET /discovery`) is defined
-  - refactor-scope document includes Must Remove, Must Constrain, and Must Implement sections
-  - QA re-review reports no blocking findings for Sprint 6.0 docs
-- Related PR: `#27`
-
-### Sprint 6.1 — Writer Gate + Runtime Projection
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s1-writer-gate`
-- Base branch: `integrate/phase-6`
-- PR target: `integrate/phase-6`
-- Status: Complete — merged PR #28 (6ddcdfb)
-- Scope:
-  - `definition_writer` module — sole persistent writer; `pub(crate)` visibility boundary on `db.rs` write functions
-  - In-memory runtime projection replacing poller writes to `session_status`, `session_ci`, `session_atm`
-  - `scheduler.rs` → `tmux_poller.rs` rename; cron logic in separate module
-  - Graceful stop: ATM shutdown → grace period → scoped hard-stop
-  - API host CRUD (POST/PATCH/DELETE /hosts) via definition_writer
-  - GET /discovery endpoint (read-only raw tmux discovery)
-- Acceptance criteria: all met — cargo clippy clean, 78 tests pass, writer-gate T-WG-01..T-WG-04 verified
-- Related PR: #28
-- Deferred findings (tracked as GH issues): #30, #31, #32, #33, #34
-
-### Sprint 6.2 — Dashboard Wiring + Per-Pane ATM + CI View
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s2-runtime-projection`
-- Base branch: `feature/p6-s1-writer-gate`
-- PR target: `integrate/phase-6`
-- Status: Complete — merged PR #29 (d13d1dc)
-- Scope:
-  - Dashboard primary view: all defined projects (running + stopped)
-  - Per-pane ATM state on project cards (active/idle/stuck/offline/unknown)
-  - CI run color indicators (green/yellow/red) per project card
-  - Secondary discovery tab wired to GET /discovery
-  - Start/Stop buttons wired to POST /sessions/:name/start and /stop
-  - New Project + card Edit flows via POST/PATCH /sessions
-  - dashboard.js recompiled
-- Related PR: #29
-
-### Sprint 6.3 — Cleanup + Lifecycle Tests + Deferred Findings
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-s3-cleanup-tests`
-- Base branch: `feature/p6-s2-runtime-projection`
-- PR target: `integrate/phase-6`
-- Status: Complete — merged PR #38 (956a389 + 155ee50)
-- Scope:
-  - #30 SCMUX-QA-P6S1-004: Remove deprecated table DDL (session_status, session_ci, session_atm) from db::migrate()
-  - #31 SCMUX-QA-P6S1-006: Explicit per-pane ATM field in API response (ATM-03)
-  - #32 SCMUX-QA-P6S1-007: Add approval policy comment to validate_approved_project
-  - #33 SCMUX-QA-P6S1-008: Tag/name T-LC-01..T-LC-06 lifecycle tests; add T-LC-03
-  - #34 SCMUX-QA-P6S1-009: Populate or remove recent_events field in GET /sessions/:name
-  - Any deferred findings from S6.2 QA
-- Acceptance criteria:
-  - cargo clippy clean, cargo test passes
-  - No deprecated table DDL in migrate()
-  - T-LC-01..T-LC-06 named and passing
-  - recent_events populated or removed
-  - GH issues #30–34 closed
-
-### Critical Review Fix Pass
-
-- Worktree: `/Users/randlee/Documents/github/scmux-worktrees/feature/p6-critical-review-fixes`
-- Base branch: `integrate/phase-6`
-- PR target: `integrate/phase-6`
-- Status: In Progress — assigned to arch-cmux
-- Sprint spec: `docs/sprint-specs/p6-critical-review-fixes.md`
-- Scope: B-01..B-10 + `scmux doctor` CLI command (see sprint spec for full details)
-- Design decisions: ATM auto-discovery removed; daemon_health moved to in-memory; ATM opt-in config
-- Pending: B-11 (CLI write commands) — owner decision required
-
-## Dependencies Across Sprints
-
-- `1.1` must merge before `1.2`.
-- `1.2` must merge before any phase 2 sprint.
-- `2.1` must merge before `2.2`.
-- `2.2` should merge before phase 3 UI-facing CI badge validation.
-- `3.1` must merge before `3.2`.
-- `3.2` must merge before any phase 4 sprint.
-- `4.1` must merge before `4.2`.
-- `4.2` must merge before phase 5 implementation sprints.
-- phase 5 completion is a prerequisite for phase 6 realignment implementation.
-
-## Current Phase Entry Point
-
-- Active planning baseline: `Phase 6`.
-- All sprints 6.0–6.3 complete and merged to `integrate/phase-6`.
-- Fix pass in progress (`feature/p6-critical-review-fixes`).
-- After fix pass merges: final PR `integrate/phase-6 → develop` for v0.5.0.
+- Team-lead owns sprint assignment/acceptance and policy decisions.
+- Implementation reports include: changed files, invariant checks, tests run, unresolved blockers.
+- QA review runs after each sprint, with blocking findings fed back before next sprint starts.
