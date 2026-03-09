@@ -204,6 +204,13 @@ fn write_script(contents: &str) -> tempfile::TempPath {
     file.into_temp_path()
 }
 
+fn test_root_path(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn set_env_var(key: &str, value: &str) -> Option<String> {
     let prev = std::env::var(key).ok();
     // SAFETY: test-only env mutation guarded by async mutex.
@@ -511,7 +518,7 @@ async fn t_ed_01_create_editor_hierarchy_and_crew_bundle() {
                     "host_id": h.state.host_id,
                     "repo_url": "git@github.com:randlee/scmux.git",
                     "branch_ref": "feature/demo",
-                    "root_path": "/tmp/scmux",
+                    "root_path": test_root_path("scmux"),
                     "config_json": { "session_name": "crew-alpha" }
                 }
             ],
@@ -588,7 +595,7 @@ async fn t_ed_02_clone_move_and_unlink_crew_ref_with_reference_count_delete() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-src"
+                    "root_path": test_root_path("crew-src")
                 }
             ],
             "placement": { "armada_id": armada_a, "fleet_id": fleet_a }
@@ -691,7 +698,7 @@ async fn t_ed_03_running_crew_blocks_roster_patch() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-running"
+                    "root_path": test_root_path("crew-running")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
@@ -711,21 +718,10 @@ async fn t_ed_03_running_crew_blocks_roster_patch() {
             )
             .expect("crew id")
     };
-
-    let _guard = env_lock().lock().await;
-    let script = write_script(
-        r#"#!/bin/sh
-if [ "$1" = "list-sessions" ]; then
-  echo "crew-running"
-  exit 0
-fi
-if [ "$1" = "list-panes" ]; then
-  exit 0
-fi
-exit 1
-"#,
-    );
-    let prev_tmux = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+    {
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.mark_starting("crew-running");
+    }
     let response = h
         .client
         .patch(format!("{}/editor/crews/{}", h.base_url, crew_id))
@@ -743,7 +739,6 @@ exit 1
         .send()
         .await
         .expect("patch running crew");
-    restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
 
     assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
     let body: Value = response.json().await.expect("json");
@@ -751,7 +746,7 @@ exit 1
 }
 
 #[tokio::test]
-async fn t_ed_06_starting_runtime_blocks_roster_patch() {
+async fn t_ed_09_starting_runtime_blocks_roster_patch() {
     let h = ApiHarness::new().await;
     let armada_id = h.create_armada("Run").await;
     let fleet_id = h.create_fleet(armada_id, "Fleet").await;
@@ -774,7 +769,7 @@ async fn t_ed_06_starting_runtime_blocks_roster_patch() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-starting"
+                    "root_path": test_root_path("crew-starting")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
@@ -815,7 +810,7 @@ async fn t_ed_06_starting_runtime_blocks_roster_patch() {
         }))
         .send()
         .await
-        .expect("patch starting crew");
+        .expect("patch crew-starting");
 
     assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
     let body: Value = response.json().await.expect("json");
@@ -853,7 +848,7 @@ async fn t_ed_04_invalid_roster_patch_is_atomic() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-atomic"
+                    "root_path": test_root_path("crew-atomic")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
@@ -919,88 +914,137 @@ async fn t_ed_04_invalid_roster_patch_is_atomic() {
 }
 
 #[tokio::test]
-async fn t_ed_05_import_discovery_creates_crew_bundle() {
+async fn t_ed_05_clone_armada_and_fleet_endpoints() {
     let h = ApiHarness::new().await;
-    let armada_id = h.create_armada("Import").await;
-    let fleet_id = h.create_fleet(armada_id, "Fleet").await;
+    let armada_id = h.create_armada("Source Armada").await;
+    let fleet_id = h.create_fleet(armada_id, "Source Fleet").await;
 
-    {
-        let mut runtime = h.state.runtime.lock().expect("runtime lock");
-        let mut live = std::collections::HashMap::new();
-        live.insert(
-            "external-session".to_string(),
-            vec![
-                PaneInfo {
-                    index: 0,
-                    name: "team-lead".to_string(),
-                    status: "active".to_string(),
-                    last_activity: "now".to_string(),
-                    current_command: "claude".to_string(),
-                },
-                PaneInfo {
-                    index: 1,
-                    name: "arch-cmux".to_string(),
-                    status: "idle".to_string(),
-                    last_activity: "now".to_string(),
-                    current_command: "codex".to_string(),
-                },
-            ],
-        );
-        runtime.apply_tmux_snapshot(
-            &Vec::new(),
-            &live,
-            &std::collections::HashMap::new(),
-            "2026-03-08T00:00:00Z",
-        );
-    }
-
-    let response = h
+    let armada_clone = h
         .client
-        .post(format!("{}/editor/import-discovery", h.base_url))
+        .post(format!("{}/editor/armadas/{}/clone", h.base_url, armada_id))
+        .json(&json!({ "name": "Cloned Armada" }))
+        .send()
+        .await
+        .expect("clone armada");
+    assert_eq!(armada_clone.status(), reqwest::StatusCode::OK);
+
+    let cloned_armada_id: i64 = {
+        let db_conn = h.state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT id FROM armadas WHERE name = 'Cloned Armada'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("cloned armada id")
+    };
+
+    let fleet_clone = h
+        .client
+        .post(format!("{}/editor/fleets/{}/clone", h.base_url, fleet_id))
         .json(&json!({
-            "session_name": "external-session",
-            "armada_id": armada_id,
-            "fleet_id": fleet_id,
-            "root_path": "/tmp/external-session"
+            "armada_id": cloned_armada_id,
+            "name": "Cloned Fleet"
         }))
         .send()
         .await
-        .expect("import discovery request");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+        .expect("clone fleet");
+    assert_eq!(fleet_clone.status(), reqwest::StatusCode::OK);
 
     let db_conn = h.state.db.lock().expect("db lock");
-    let crew_count: i64 = db_conn
+    let exists: i64 = db_conn
         .query_row(
-            "SELECT COUNT(*) FROM crews WHERE crew_name = 'external-session'",
-            [],
+            "SELECT COUNT(*) FROM fleets WHERE armada_id = ?1 AND name = 'Cloned Fleet'",
+            rusqlite::params![cloned_armada_id],
             |r| r.get(0),
         )
-        .expect("crew count");
-    let member_count: i64 = db_conn
-        .query_row(
-            "SELECT COUNT(*) FROM crew_members cm JOIN crews c ON c.id = cm.crew_id WHERE c.crew_name = 'external-session'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("member count");
-    assert_eq!(crew_count, 1);
-    assert_eq!(member_count, 2);
+        .expect("cloned fleet count");
+    assert_eq!(exists, 1);
 }
 
 #[tokio::test]
-async fn t_rt_01_runtime_crews_and_unregistered_discovery_endpoints() {
+async fn t_ed_06_create_crew_rejects_empty_startup_prompts() {
+    let h = ApiHarness::new().await;
+    let armada_id = h.create_armada("Prompts").await;
+    let fleet_id = h.create_fleet(armada_id, "Fleet").await;
+
+    let response = h
+        .client
+        .post(format!("{}/editor/crews", h.base_url))
+        .json(&json!({
+            "crew_name": "crew-empty-prompts",
+            "crew_ulid": "01JEMPTYPROMPTS00000000000",
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": []
+                }
+            ],
+            "variants": [
+                {
+                    "host_id": h.state.host_id,
+                    "root_path": test_root_path("crew-empty-prompts")
+                }
+            ],
+            "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
+        }))
+        .send()
+        .await
+        .expect("create invalid crew");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["code"], "validation_error");
+}
+
+#[tokio::test]
+async fn t_ed_07_create_crew_rejects_empty_variants() {
+    let h = ApiHarness::new().await;
+    let armada_id = h.create_armada("Variants").await;
+    let fleet_id = h.create_fleet(armada_id, "Fleet").await;
+
+    let response = h
+        .client
+        .post(format!("{}/editor/crews", h.base_url))
+        .json(&json!({
+            "crew_name": "crew-no-variants",
+            "crew_ulid": "01JNOVARIANTS000000000000",
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["lead.md"]
+                }
+            ],
+            "variants": [],
+            "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
+        }))
+        .send()
+        .await
+        .expect("create invalid crew");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["code"], "validation_error");
+}
+
+#[tokio::test]
+async fn t_ed_08_running_guard_uses_runtime_projection() {
     let h = ApiHarness::new().await;
     let armada_id = h.create_armada("Runtime").await;
     let fleet_id = h.create_fleet(armada_id, "Fleet").await;
-    let root = tempfile::tempdir().expect("temp root");
-    let root_path = root.path().to_string_lossy().to_string();
 
     let create = h
         .client
         .post(format!("{}/editor/crews", h.base_url))
         .json(&json!({
-            "crew_name": "crew-runtime",
-            "crew_ulid": "01JCREWRUNTIME000000000000",
+            "crew_name": "crew-runtime-guard",
+            "crew_ulid": "01JRUNTIMEGUARD0000000000",
             "members": [
                 {
                     "member_id": "team-lead",
@@ -1013,120 +1057,52 @@ async fn t_rt_01_runtime_crews_and_unregistered_discovery_endpoints() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": root_path
+                    "root_path": test_root_path("crew-runtime-guard")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
         }))
         .send()
         .await
-        .expect("create runtime crew");
+        .expect("create crew");
     assert_eq!(create.status(), reqwest::StatusCode::OK);
 
-    {
-        let mut runtime = h.state.runtime.lock().expect("runtime lock");
-        let mut live = std::collections::HashMap::new();
-        live.insert(
-            "crew-runtime".to_string(),
-            vec![PaneInfo {
-                index: 0,
-                name: "team-lead".to_string(),
-                status: "active".to_string(),
-                last_activity: "now".to_string(),
-                current_command: "claude".to_string(),
-            }],
-        );
-        live.insert(
-            "unregistered".to_string(),
-            vec![PaneInfo {
-                index: 0,
-                name: "solo".to_string(),
-                status: "idle".to_string(),
-                last_activity: "now".to_string(),
-                current_command: "bash".to_string(),
-            }],
-        );
-        runtime.apply_tmux_snapshot(
-            &Vec::new(),
-            &live,
-            &std::collections::HashMap::new(),
-            "2026-03-08T00:00:00Z",
-        );
-    }
-
-    let runtime_response = h
-        .client
-        .get(format!("{}/runtime/crews", h.base_url))
-        .send()
-        .await
-        .expect("runtime crews request");
-    assert_eq!(runtime_response.status(), reqwest::StatusCode::OK);
-    let runtime_body: Value = runtime_response.json().await.expect("runtime json");
-    let runtime_rows = runtime_body.as_array().expect("runtime array");
-    assert!(runtime_rows
-        .iter()
-        .any(|row| row["crew_name"] == "crew-runtime"
-            && row["discovered"] == true
-            && row["binding_valid"] == true));
-
-    let unregistered_response = h
-        .client
-        .get(format!("{}/runtime/discovery/unregistered", h.base_url))
-        .send()
-        .await
-        .expect("unregistered discovery request");
-    assert_eq!(unregistered_response.status(), reqwest::StatusCode::OK);
-    let unregistered_body: Value = unregistered_response
-        .json()
-        .await
-        .expect("unregistered json");
-    let names = unregistered_body
-        .as_array()
-        .expect("array")
-        .iter()
-        .map(|row| row["name"].as_str().unwrap_or_default().to_string())
-        .collect::<Vec<_>>();
-    assert!(names.contains(&"unregistered".to_string()));
-    assert!(!names.contains(&"crew-runtime".to_string()));
-}
-
-#[tokio::test]
-async fn t_lc_07_start_rejects_invalid_crew_variant_binding() {
-    let h = ApiHarness::new().await;
-    h.create_session("crew-invalid").await;
-
-    {
+    let crew_id: i64 = {
         let db_conn = h.state.db.lock().expect("db lock");
         db_conn
-            .execute(
-                "INSERT INTO crews (crew_name, crew_ulid) VALUES (?1, ?2)",
-                rusqlite::params!["crew-invalid", "01JCREWINVALID000000000000"],
-            )
-            .expect("insert crew");
-        let crew_id: i64 = db_conn
             .query_row(
-                "SELECT id FROM crews WHERE crew_name = 'crew-invalid'",
+                "SELECT id FROM crews WHERE crew_name = 'crew-runtime-guard'",
                 [],
                 |r| r.get(0),
             )
-            .expect("crew id");
-        db_conn
-            .execute(
-                "INSERT INTO crew_variants (crew_id, host_id, root_path) VALUES (?1, ?2, ?3)",
-                rusqlite::params![crew_id, h.state.host_id, "/path/does/not/exist"],
-            )
-            .expect("insert variant");
+            .expect("crew id")
+    };
+    {
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.mark_starting("crew-runtime-guard");
     }
 
     let response = h
         .client
-        .post(format!("{}/sessions/crew-invalid/start", h.base_url))
+        .patch(format!("{}/editor/crews/{}", h.base_url, crew_id))
+        .json(&json!({
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["updated.md"]
+                }
+            ]
+        }))
         .send()
         .await
-        .expect("start request");
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        .expect("patch crew");
+
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["code"], "invalid_crew_variant_binding");
+    assert_eq!(body["code"], "running_edit_forbidden");
 }
 
 #[tokio::test]

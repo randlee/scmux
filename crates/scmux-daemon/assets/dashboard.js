@@ -1,4 +1,4 @@
-const { useEffect, useMemo, useState } = React;
+const { useState, useEffect, useMemo } = React;
 
 const PROJECT_COLORS = {
   "radiant-p3": "#3b82f6",
@@ -1027,6 +1027,12 @@ function OrganizationEditorModal({
       setArmadaName("");
     }
   };
+  const cloneArmada = async (armadaId, sourceName) => {
+    const copyName = `${sourceName}-clone`;
+    await submitJson(`${baseUrl}/editor/armadas/${armadaId}/clone`, "POST", {
+      name: copyName
+    }, `Cloned armada to ${copyName}`);
+  };
   const createFleet = async () => {
     if (!fleetName.trim()) {
       setErrorMessage("Fleet name is required.");
@@ -1044,6 +1050,14 @@ function OrganizationEditorModal({
     if (ok) {
       setFleetName("");
     }
+  };
+  const cloneFleet = async (fleetId, sourceName, sourceArmadaId, sourceColor) => {
+    const copyName = `${sourceName}-clone`;
+    await submitJson(`${baseUrl}/editor/fleets/${fleetId}/clone`, "POST", {
+      armada_id: selectedArmadaId || sourceArmadaId,
+      name: copyName,
+      color: sourceColor || null
+    }, `Cloned fleet to ${copyName}`);
   };
   const createCrew = async () => {
     if (!newCrewName.trim()) {
@@ -1247,13 +1261,29 @@ function OrganizationEditorModal({
     style: {
       fontSize: 11,
       color: "#94a3b8",
-      padding: "2px 0"
+      padding: "2px 0",
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      alignItems: "center"
     }
-  }, armada.name, " ", /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("span", null, armada.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: "#475569"
     }
-  }, "#", armada.id))))), /*#__PURE__*/React.createElement("div", {
+  }, "#", armada.id)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => cloneArmada(armada.id, armada.name),
+    disabled: saving,
+    style: {
+      border: "1px solid #1e2535",
+      background: "#1e293b",
+      color: "#cbd5e1",
+      borderRadius: 5,
+      padding: "2px 7px",
+      cursor: "pointer",
+      fontSize: 10
+    }
+  }, "Clone"))))), /*#__PURE__*/React.createElement("div", {
     style: {
       border: "1px solid #1e2535",
       borderRadius: 8,
@@ -1327,13 +1357,29 @@ function OrganizationEditorModal({
     style: {
       fontSize: 11,
       color: "#94a3b8",
-      padding: "2px 0"
+      padding: "2px 0",
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      alignItems: "center"
     }
-  }, fleet.name, " ", /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("span", null, fleet.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: fleet.color || "#64748b"
     }
-  }, fleet.color || ""))))), /*#__PURE__*/React.createElement("div", {
+  }, fleet.color || "")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => cloneFleet(fleet.id, fleet.name, fleet.armada_id, fleet.color),
+    disabled: saving,
+    style: {
+      border: "1px solid #1e2535",
+      background: "#1e293b",
+      color: "#cbd5e1",
+      borderRadius: 5,
+      padding: "2px 7px",
+      cursor: "pointer",
+      fontSize: 10
+    }
+  }, "Clone"))))), /*#__PURE__*/React.createElement("div", {
     style: {
       border: "1px solid #1e2535",
       borderRadius: 8,

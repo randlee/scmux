@@ -893,6 +893,16 @@ function OrganizationEditorModal({ baseUrl, open, onClose, onSaved }) {
     }
   };
 
+  const cloneArmada = async (armadaId, sourceName) => {
+    const copyName = `${sourceName}-clone`;
+    await submitJson(
+      `${baseUrl}/editor/armadas/${armadaId}/clone`,
+      "POST",
+      { name: copyName },
+      `Cloned armada to ${copyName}`,
+    );
+  };
+
   const createFleet = async () => {
     if (!fleetName.trim()) {
       setErrorMessage("Fleet name is required.");
@@ -911,6 +921,20 @@ function OrganizationEditorModal({ baseUrl, open, onClose, onSaved }) {
     if (ok) {
       setFleetName("");
     }
+  };
+
+  const cloneFleet = async (fleetId, sourceName, sourceArmadaId, sourceColor) => {
+    const copyName = `${sourceName}-clone`;
+    await submitJson(
+      `${baseUrl}/editor/fleets/${fleetId}/clone`,
+      "POST",
+      {
+        armada_id: selectedArmadaId || sourceArmadaId,
+        name: copyName,
+        color: sourceColor || null,
+      },
+      `Cloned fleet to ${copyName}`,
+    );
   };
 
   const createCrew = async () => {
@@ -1084,8 +1108,20 @@ function OrganizationEditorModal({ baseUrl, open, onClose, onSaved }) {
               </button>
               <div style={{ maxHeight: 130, overflowY: "auto", borderTop: "1px solid #131820", paddingTop: 6 }}>
                 {state.armadas.map((armada) => (
-                  <div key={armada.id} style={{ fontSize: 11, color: "#94a3b8", padding: "2px 0" }}>
-                    {armada.name} <span style={{ color: "#475569" }}>#{armada.id}</span>
+                  <div
+                    key={armada.id}
+                    style={{ fontSize: 11, color: "#94a3b8", padding: "2px 0", display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}
+                  >
+                    <span>
+                      {armada.name} <span style={{ color: "#475569" }}>#{armada.id}</span>
+                    </span>
+                    <button
+                      onClick={() => cloneArmada(armada.id, armada.name)}
+                      disabled={saving}
+                      style={{ border: "1px solid #1e2535", background: "#1e293b", color: "#cbd5e1", borderRadius: 5, padding: "2px 7px", cursor: "pointer", fontSize: 10 }}
+                    >
+                      Clone
+                    </button>
                   </div>
                 ))}
               </div>
@@ -1124,8 +1160,20 @@ function OrganizationEditorModal({ baseUrl, open, onClose, onSaved }) {
               </button>
               <div style={{ maxHeight: 130, overflowY: "auto", borderTop: "1px solid #131820", paddingTop: 6 }}>
                 {fleetsForSelectedArmada.map((fleet) => (
-                  <div key={fleet.id} style={{ fontSize: 11, color: "#94a3b8", padding: "2px 0" }}>
-                    {fleet.name} <span style={{ color: fleet.color || "#64748b" }}>{fleet.color || ""}</span>
+                  <div
+                    key={fleet.id}
+                    style={{ fontSize: 11, color: "#94a3b8", padding: "2px 0", display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}
+                  >
+                    <span>
+                      {fleet.name} <span style={{ color: fleet.color || "#64748b" }}>{fleet.color || ""}</span>
+                    </span>
+                    <button
+                      onClick={() => cloneFleet(fleet.id, fleet.name, fleet.armada_id, fleet.color)}
+                      disabled={saving}
+                      style={{ border: "1px solid #1e2535", background: "#1e293b", color: "#cbd5e1", borderRadius: 5, padding: "2px 7px", cursor: "pointer", fontSize: 10 }}
+                    >
+                      Clone
+                    </button>
                   </div>
                 ))}
               </div>
