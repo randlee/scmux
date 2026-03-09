@@ -204,6 +204,13 @@ fn write_script(contents: &str) -> tempfile::TempPath {
     file.into_temp_path()
 }
 
+fn test_root_path(name: &str) -> String {
+    std::env::temp_dir()
+        .join(name)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn set_env_var(key: &str, value: &str) -> Option<String> {
     let prev = std::env::var(key).ok();
     // SAFETY: test-only env mutation guarded by async mutex.
@@ -472,7 +479,7 @@ async fn t_ed_01_create_editor_hierarchy_and_crew_bundle() {
                     "host_id": h.state.host_id,
                     "repo_url": "git@github.com:randlee/scmux.git",
                     "branch_ref": "feature/demo",
-                    "root_path": "/tmp/scmux",
+                    "root_path": test_root_path("scmux"),
                     "config_json": { "session_name": "crew-alpha" }
                 }
             ],
@@ -549,7 +556,7 @@ async fn t_ed_02_clone_move_and_unlink_crew_ref_with_reference_count_delete() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-src"
+                    "root_path": test_root_path("crew-src")
                 }
             ],
             "placement": { "armada_id": armada_a, "fleet_id": fleet_a }
@@ -652,7 +659,7 @@ async fn t_ed_03_running_crew_blocks_roster_patch() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-running"
+                    "root_path": test_root_path("crew-running")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
@@ -730,7 +737,7 @@ async fn t_ed_04_invalid_roster_patch_is_atomic() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-atomic"
+                    "root_path": test_root_path("crew-atomic")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
@@ -810,15 +817,16 @@ async fn t_ed_05_clone_armada_and_fleet_endpoints() {
         .expect("clone armada");
     assert_eq!(armada_clone.status(), reqwest::StatusCode::OK);
 
-    let db_conn = h.state.db.lock().expect("db lock");
-    let cloned_armada_id: i64 = db_conn
-        .query_row(
-            "SELECT id FROM armadas WHERE name = 'Cloned Armada'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("cloned armada id");
-    drop(db_conn);
+    let cloned_armada_id: i64 = {
+        let db_conn = h.state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT id FROM armadas WHERE name = 'Cloned Armada'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("cloned armada id")
+    };
 
     let fleet_clone = h
         .client
@@ -867,7 +875,7 @@ async fn t_ed_06_create_crew_rejects_empty_startup_prompts() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-empty-prompts"
+                    "root_path": test_root_path("crew-empty-prompts")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
@@ -938,7 +946,7 @@ async fn t_ed_08_running_guard_uses_runtime_projection() {
             "variants": [
                 {
                     "host_id": h.state.host_id,
-                    "root_path": "/tmp/crew-runtime-guard"
+                    "root_path": test_root_path("crew-runtime-guard")
                 }
             ],
             "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
