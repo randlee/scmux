@@ -356,6 +356,45 @@ async fn t_lc_01_post_sessions_name_start_launches_tmux_from_config() {
 }
 
 #[tokio::test]
+async fn t_lc_08_concurrent_start_rejected_when_action_in_progress() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+
+    let _guard = env_lock().lock().await;
+    let script = write_script("#!/bin/sh\nsleep 1\nexit 0\n");
+    let prev = set_env_var("SCMUX_TMUXP_BIN", script.to_string_lossy().as_ref());
+
+    let first_client = h.client.clone();
+    let first_url = format!("{}/sessions/alpha/start", h.base_url);
+    let first = tokio::spawn(async move {
+        first_client
+            .post(first_url)
+            .send()
+            .await
+            .expect("first start request")
+    });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let second = h
+        .client
+        .post(format!("{}/sessions/alpha/start", h.base_url))
+        .send()
+        .await
+        .expect("second start request");
+
+    let first = first.await.expect("join first");
+    restore_env_var("SCMUX_TMUXP_BIN", prev);
+
+    assert_eq!(second.status(), reqwest::StatusCode::CONFLICT);
+    let second_body: Value = second.json().await.expect("second json");
+    assert_eq!(second_body["code"], "action_in_progress");
+
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let first_body: Value = first.json().await.expect("first json");
+    assert_eq!(first_body["ok"], true);
+}
+
+#[tokio::test]
 async fn t_lc_06_start_failure_returns_500_and_keeps_session_stopped() {
     let h = ApiHarness::new().await;
     h.create_session("alpha").await;
@@ -393,6 +432,43 @@ async fn t_lc_06_start_failure_returns_500_and_keeps_session_stopped() {
     assert_eq!(sessions.status(), reqwest::StatusCode::OK);
     let rows: Vec<Value> = sessions.json().await.expect("json");
     assert_eq!(rows[0]["status"], "stopped");
+}
+
+#[tokio::test]
+async fn t_rb_02_single_session_start_failure_does_not_cascade() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    h.create_session("beta").await;
+
+    let _guard = env_lock().lock().await;
+    let fail_script = write_script("#!/bin/sh\necho \"tmuxp failed\" 1>&2\nexit 1\n");
+    let prev = set_env_var("SCMUX_TMUXP_BIN", fail_script.to_string_lossy().as_ref());
+
+    let alpha_response = h
+        .client
+        .post(format!("{}/sessions/alpha/start", h.base_url))
+        .send()
+        .await
+        .expect("alpha start request");
+    assert_eq!(
+        alpha_response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    let ok_script = write_script("#!/bin/sh\nexit 0\n");
+    set_env_var("SCMUX_TMUXP_BIN", ok_script.to_string_lossy().as_ref());
+
+    let beta_response = h
+        .client
+        .post(format!("{}/sessions/beta/start", h.base_url))
+        .send()
+        .await
+        .expect("beta start request");
+    restore_env_var("SCMUX_TMUXP_BIN", prev);
+
+    assert_eq!(beta_response.status(), reqwest::StatusCode::OK);
+    let beta_body: Value = beta_response.json().await.expect("beta json");
+    assert_eq!(beta_body["ok"], true);
 }
 
 #[tokio::test]
@@ -445,6 +521,57 @@ exit 1
         marker_log.contains("kill\n"),
         "expected tmux hard-stop after grace timeout, got: {marker_log:?}"
     );
+}
+
+#[tokio::test]
+async fn t_rb_03_stop_error_path_does_not_issue_bulk_stop() {
+    let h = ApiHarness::new().await;
+    h.create_session("alpha").await;
+    h.create_session("beta").await;
+
+    let _guard = env_lock().lock().await;
+    let marker = tempfile::NamedTempFile::new().expect("marker file");
+    let marker_path = marker.path().to_string_lossy().to_string();
+
+    let script = write_script(&format!(
+        r#"#!/bin/sh
+if [ "$1" = "list-sessions" ]; then
+  echo "alpha"
+  echo "beta"
+  exit 0
+fi
+if [ "$1" = "kill-session" ]; then
+  echo "$3" >> "{marker_path}"
+  if [ "$3" = "alpha" ]; then
+    echo "forced failure" 1>&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 1
+"#,
+    ));
+    let prev_tmux = set_env_var("SCMUX_TMUX_BIN", script.to_string_lossy().as_ref());
+
+    let response = h
+        .client
+        .post(format!("{}/sessions/alpha/stop", h.base_url))
+        .send()
+        .await
+        .expect("stop alpha request");
+    restore_env_var("SCMUX_TMUX_BIN", prev_tmux);
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+
+    let marker_log = std::fs::read_to_string(marker.path()).expect("read marker");
+    let attempts = marker_log
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(attempts, vec!["alpha"]);
 }
 
 #[tokio::test]
@@ -706,6 +833,166 @@ async fn t_ed_03_running_crew_blocks_roster_patch() {
     assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["code"], "running_edit_forbidden");
+}
+
+#[tokio::test]
+async fn t_ed_09_starting_runtime_blocks_roster_patch() {
+    let h = ApiHarness::new().await;
+    let armada_id = h.create_armada("Run").await;
+    let fleet_id = h.create_fleet(armada_id, "Fleet").await;
+
+    let create = h
+        .client
+        .post(format!("{}/editor/crews", h.base_url))
+        .json(&json!({
+            "crew_name": "crew-starting",
+            "crew_ulid": "01JCREWSTARTING00000000000",
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["a.md"]
+                }
+            ],
+            "variants": [
+                {
+                    "host_id": h.state.host_id,
+                    "root_path": test_root_path("crew-starting")
+                }
+            ],
+            "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
+        }))
+        .send()
+        .await
+        .expect("create crew-starting");
+    assert_eq!(create.status(), reqwest::StatusCode::OK);
+
+    let crew_id: i64 = {
+        let db_conn = h.state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT id FROM crews WHERE crew_name = 'crew-starting'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("crew id")
+    };
+    {
+        let mut runtime = h.state.runtime.lock().expect("runtime lock");
+        runtime.mark_starting("crew-starting");
+    }
+
+    let response = h
+        .client
+        .patch(format!("{}/editor/crews/{}", h.base_url, crew_id))
+        .json(&json!({
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["updated.md"]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("patch crew-starting");
+
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["code"], "running_edit_forbidden");
+}
+
+#[tokio::test]
+async fn t_ed_10_roster_patch_blocked_when_lifecycle_action_in_progress() {
+    let h = ApiHarness::new().await;
+    h.create_session("crew-action").await;
+    let armada_id = h.create_armada("Action").await;
+    let fleet_id = h.create_fleet(armada_id, "Fleet").await;
+
+    let create = h
+        .client
+        .post(format!("{}/editor/crews", h.base_url))
+        .json(&json!({
+            "crew_name": "crew-action",
+            "crew_ulid": "01JCREWACTION000000000000",
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["a.md"]
+                }
+            ],
+            "variants": [
+                {
+                    "host_id": h.state.host_id,
+                    "root_path": test_root_path("crew-action")
+                }
+            ],
+            "placement": { "armada_id": armada_id, "fleet_id": fleet_id }
+        }))
+        .send()
+        .await
+        .expect("create crew-action");
+    assert_eq!(create.status(), reqwest::StatusCode::OK);
+
+    let crew_id: i64 = {
+        let db_conn = h.state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT id FROM crews WHERE crew_name = 'crew-action'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("crew id")
+    };
+
+    let _guard = env_lock().lock().await;
+    let slow_script = write_script("#!/bin/sh\nsleep 1\nexit 0\n");
+    let prev = set_env_var("SCMUX_TMUXP_BIN", slow_script.to_string_lossy().as_ref());
+
+    let start_client = h.client.clone();
+    let start_url = format!("{}/sessions/crew-action/start", h.base_url);
+    let start_task = tokio::spawn(async move {
+        start_client
+            .post(start_url)
+            .send()
+            .await
+            .expect("start request")
+    });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let patch_response = h
+        .client
+        .patch(format!("{}/editor/crews/{}", h.base_url, crew_id))
+        .json(&json!({
+            "members": [
+                {
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["updated.md"]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("patch request");
+
+    let start_response = start_task.await.expect("join start");
+    restore_env_var("SCMUX_TMUXP_BIN", prev);
+    assert_eq!(start_response.status(), reqwest::StatusCode::OK);
+
+    assert_eq!(patch_response.status(), reqwest::StatusCode::CONFLICT);
+    let patch_body: Value = patch_response.json().await.expect("patch json");
+    assert_eq!(patch_body["code"], "action_in_progress");
 }
 
 #[tokio::test]

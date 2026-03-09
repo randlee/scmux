@@ -8,9 +8,10 @@ use axum::{
 };
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tower_http::cors::CorsLayer;
 
 use crate::atm::ShutdownTarget;
@@ -69,6 +70,7 @@ const REACT_JS: &[u8] = include_bytes!("../assets/react.min.js");
 const REACT_DOM_JS: &[u8] = include_bytes!("../assets/react-dom.min.js");
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_STOP_GRACE_SECS: u64 = 10;
+static SESSION_ACTIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -373,6 +375,19 @@ struct DashboardConfigResponse {
     hosts: Vec<HostSummary>,
     default_terminal: String,
     poll_interval_ms: u64,
+}
+
+struct SessionActionLease {
+    session_name: String,
+}
+
+impl Drop for SessionActionLease {
+    fn drop(&mut self) {
+        let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+        if let Ok(mut held) = lock.lock() {
+            held.remove(&self.session_name);
+        }
+    }
 }
 
 async fn serve_dashboard_asset(
@@ -736,6 +751,7 @@ async fn start_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _action_lease = acquire_session_action(&name, "start")?;
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -799,6 +815,7 @@ async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _action_lease = acquire_session_action(&name, "stop")?;
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -1298,9 +1315,11 @@ async fn patch_crew_bundle(
     Path(id): Path<i64>,
     Json(req): Json<PatchCrewBundleRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut _roster_action_lease: Option<SessionActionLease> = None;
     let editing_roster = req.members.is_some() || req.variants.is_some();
     if editing_roster {
         if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
+            _roster_action_lease = Some(acquire_session_action(&crew_name, "edit crew roster")?);
             let is_running = {
                 let runtime = state.runtime.lock().expect("runtime lock");
                 runtime
@@ -1657,6 +1676,31 @@ fn from_atm_runtime(entry: AtmRuntimeSummary) -> SessionAtmSummary {
         state: entry.state,
         last_transition: entry.last_transition,
     }
+}
+
+fn acquire_session_action(
+    session_name: &str,
+    action: &str,
+) -> Result<SessionActionLease, (StatusCode, Json<ErrorResponse>)> {
+    let key = session_name.trim().to_string();
+    let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut held = lock
+        .lock()
+        .map_err(|_| internal_error("failed to lock session action map".to_string()))?;
+    if held.contains(&key) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                ok: false,
+                code: "action_in_progress".to_string(),
+                message: format!(
+                    "cannot {action} session '{session_name}': another lifecycle action is in progress"
+                ),
+            }),
+        ));
+    }
+    held.insert(key.clone());
+    Ok(SessionActionLease { session_name: key })
 }
 
 fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
