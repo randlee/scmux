@@ -37,6 +37,12 @@ pub struct ArmadaPatch {
 }
 
 #[derive(Debug, Clone)]
+pub struct CloneArmadaRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewFleet {
     pub armada_id: i64,
     pub name: String,
@@ -48,6 +54,13 @@ pub struct FleetPatch {
     pub armada_id: Option<i64>,
     pub name: Option<String>,
     pub color: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloneFleetRequest {
+    pub armada_id: Option<i64>,
+    pub name: String,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +251,35 @@ pub fn patch_armada(
     Ok(true)
 }
 
+pub fn clone_armada(
+    conn: &Connection,
+    source_armada_id: i64,
+    request: &CloneArmadaRequest,
+) -> Result<i64, WriteError> {
+    let source_description: Option<String> = conn
+        .query_row(
+            "SELECT description FROM armadas WHERE id = ?1",
+            params![source_armada_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_write_error)?
+        .ok_or(WriteError::NotFound)?;
+
+    let description = if request.description.is_some() {
+        request.description.clone()
+    } else {
+        source_description
+    };
+
+    conn.execute(
+        "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
+        params![request.name, description],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
+}
+
 pub fn create_fleet(conn: &Connection, fleet: &NewFleet) -> Result<i64, WriteError> {
     ensure_armada_exists(conn, fleet.armada_id)?;
     conn.execute(
@@ -305,6 +347,39 @@ pub fn patch_fleet(
     Ok(true)
 }
 
+pub fn clone_fleet(
+    conn: &Connection,
+    source_fleet_id: i64,
+    request: &CloneFleetRequest,
+) -> Result<i64, WriteError> {
+    let source_row: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT armada_id, color FROM fleets WHERE id = ?1",
+            params![source_fleet_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(map_write_error)?;
+    let Some((source_armada_id, source_color)) = source_row else {
+        return Err(WriteError::NotFound);
+    };
+
+    let armada_id = request.armada_id.unwrap_or(source_armada_id);
+    ensure_armada_exists(conn, armada_id)?;
+    let color = if request.color.is_some() {
+        request.color.clone()
+    } else {
+        source_color
+    };
+
+    conn.execute(
+        "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
+        params![armada_id, request.name, color],
+    )
+    .map_err(map_write_error)?;
+    Ok(conn.last_insert_rowid())
+}
+
 pub fn create_flotilla(conn: &Connection, flotilla: &NewFlotilla) -> Result<i64, WriteError> {
     ensure_fleet_exists(conn, flotilla.fleet_id)?;
     conn.execute(
@@ -367,6 +442,8 @@ pub fn patch_flotilla(
 
 pub fn create_crew_bundle(conn: &Connection, bundle: &NewCrewBundle) -> Result<i64, WriteError> {
     validate_captain_count(&bundle.members)?;
+    validate_startup_prompts_non_empty(&bundle.members)?;
+    validate_variants_non_empty(&bundle.variants)?;
 
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
     validate_placement(&tx, &bundle.placement)?;
@@ -405,6 +482,10 @@ pub fn patch_crew_bundle(
 ) -> Result<bool, WriteError> {
     if let Some(members) = patch.members.as_ref() {
         validate_captain_count(members)?;
+        validate_startup_prompts_non_empty(members)?;
+    }
+    if let Some(variants) = patch.variants.as_ref() {
+        validate_variants_non_empty(variants)?;
     }
 
     let tx = conn.unchecked_transaction().map_err(map_write_error)?;
@@ -732,6 +813,34 @@ fn validate_captain_count(members: &[CrewMemberInput]) -> Result<(), WriteError>
     if captain_count != 1 {
         return Err(WriteError::Validation(
             "crew must have exactly one captain".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_startup_prompts_non_empty(members: &[CrewMemberInput]) -> Result<(), WriteError> {
+    for member in members {
+        let parsed: serde_json::Value = serde_json::from_str(&member.startup_prompts_json)
+            .map_err(|err| {
+                WriteError::Validation(format!("invalid startup_prompts_json: {err}"))
+            })?;
+        let prompts = parsed.as_array().ok_or_else(|| {
+            WriteError::Validation("startup_prompts must be an array".to_string())
+        })?;
+        if prompts.is_empty() {
+            return Err(WriteError::Validation(format!(
+                "member '{}' must include at least one startup prompt",
+                member.member_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_variants_non_empty(variants: &[CrewVariantInput]) -> Result<(), WriteError> {
+    if variants.is_empty() {
+        return Err(WriteError::Validation(
+            "crew must include at least one variant".to_string(),
         ));
     }
     Ok(())
