@@ -78,6 +78,7 @@ struct HealthResponse {
     sessions_running: i64,
     host_id: i64,
     atm_available: bool,
+    atm_socket_available: bool,
     ci_available: CiAvailability,
     pollers: PollerStates,
     recent_errors: Vec<String>,
@@ -437,6 +438,7 @@ async fn health(
     let db_path = state.db_path.clone();
     let host_id = state.host_id;
     let atm_available = state.atm_available.load(Ordering::Relaxed);
+    let atm_socket_available = crate::atm::atm_socket_available(state.as_ref());
     let ci_available = CiAvailability {
         gh: state.ci_tools.gh_available,
         az: state.ci_tools.az_available,
@@ -475,6 +477,7 @@ async fn health(
         sessions_running,
         host_id,
         atm_available,
+        atm_socket_available,
         ci_available,
         pollers: PollerStates {
             tmux: health_state.tmux,

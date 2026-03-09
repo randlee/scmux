@@ -115,7 +115,7 @@ fn insert_session(
             project: Some("integration".to_string()),
             host_id: state.host_id,
             config_json: format!(
-                r#"{{"session_name":"{name}","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
+                r#"{{"session_name":"{name}","root_path":"/tmp","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
             ),
             cron_schedule,
             auto_start,
@@ -282,7 +282,7 @@ async fn t_i_06_invalid_cron_does_not_attempt_start() {
                     name,
                     state.host_id,
                     format!(
-                        r#"{{"session_name":"{}","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#,
+                        r#"{{"session_name":"{}","root_path":"/tmp","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#,
                         name
                     )
                 ],
@@ -593,7 +593,7 @@ async fn t_wg_01_definition_writer_create_path_mutates_sqlite() {
                 project: Some("writer-gate".to_string()),
                 host_id: state.host_id,
                 config_json: format!(
-                    r#"{{"session_name":"{name}","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
+                    r#"{{"session_name":"{name}","root_path":"/tmp","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
                 ),
                 cron_schedule: None,
                 auto_start: false,
@@ -683,7 +683,7 @@ async fn t_wg_03_unapproved_project_write_is_rejected() {
             name: name.clone(),
             project: Some("writer-gate".to_string()),
             host_id: state.host_id,
-            config_json: format!(r#"{{"session_name":"{name}","panes":[]}}"#),
+            config_json: format!(r#"{{"session_name":"{name}","root_path":"/tmp","panes":[]}}"#),
             cron_schedule: None,
             auto_start: false,
             github_repo: None,

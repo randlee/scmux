@@ -169,6 +169,27 @@ pub async fn send_shutdown_messages(
     Ok(0)
 }
 
+pub(crate) fn atm_socket_available(state: &AppState) -> bool {
+    if !state.config.atm.enabled {
+        return false;
+    }
+
+    let socket_path = resolve_socket_path(state);
+    if !socket_path.exists() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn resolve_socket_path(state: &AppState) -> PathBuf {
     if let Some(path) = state
         .config
