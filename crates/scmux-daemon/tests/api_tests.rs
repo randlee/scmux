@@ -106,6 +106,7 @@ impl ApiHarness {
             "project": "demo",
             "config_json": {
                 "session_name": name,
+                "root_path": "/tmp",
                 "panes": [
                     { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
                 ]
@@ -850,7 +851,25 @@ async fn t_ed_05_import_discovery_creates_crew_bundle() {
             "session_name": "external-session",
             "armada_id": armada_id,
             "fleet_id": fleet_id,
-            "root_path": "/tmp/external-session"
+            "root_path": "/tmp/external-session",
+            "member_intents": [
+                {
+                    "pane_name": "team-lead",
+                    "member_id": "team-lead",
+                    "role": "captain",
+                    "ai_provider": "claude",
+                    "model": "claude-opus",
+                    "startup_prompts": ["prompts/lead.md"]
+                },
+                {
+                    "pane_name": "arch-cmux",
+                    "member_id": "arch-cmux",
+                    "role": "mate",
+                    "ai_provider": "codex",
+                    "model": "codex-high",
+                    "startup_prompts": ["prompts/arch.md"]
+                }
+            ]
         }))
         .send()
         .await
@@ -879,6 +898,7 @@ async fn t_ed_05_import_discovery_creates_crew_bundle() {
 #[tokio::test]
 async fn t_rt_01_runtime_crews_and_unregistered_discovery_endpoints() {
     let h = ApiHarness::new().await;
+    h.create_session("legacy-defined").await;
     let armada_id = h.create_armada("Runtime").await;
     let fleet_id = h.create_fleet(armada_id, "Fleet").await;
     let root = tempfile::tempdir().expect("temp root");
@@ -935,6 +955,16 @@ async fn t_rt_01_runtime_crews_and_unregistered_discovery_endpoints() {
                 current_command: "bash".to_string(),
             }],
         );
+        live.insert(
+            "legacy-defined".to_string(),
+            vec![PaneInfo {
+                index: 0,
+                name: "legacy".to_string(),
+                status: "idle".to_string(),
+                last_activity: "now".to_string(),
+                current_command: "bash".to_string(),
+            }],
+        );
         runtime.apply_tmux_snapshot(
             &Vec::new(),
             &live,
@@ -977,6 +1007,7 @@ async fn t_rt_01_runtime_crews_and_unregistered_discovery_endpoints() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"unregistered".to_string()));
     assert!(!names.contains(&"crew-runtime".to_string()));
+    assert!(!names.contains(&"legacy-defined".to_string()));
 }
 
 #[tokio::test]
@@ -1015,6 +1046,39 @@ async fn t_lc_07_start_rejects_invalid_crew_variant_binding() {
         .expect("start request");
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
+    assert_eq!(body["code"], "invalid_crew_variant_binding");
+}
+
+#[tokio::test]
+async fn t_lc_08_start_rejects_missing_root_path_when_no_crew_variant() {
+    let h = ApiHarness::new().await;
+    let response = h
+        .client
+        .post(format!("{}/sessions", h.base_url))
+        .json(&json!({
+            "name": "missing-root",
+            "project": "demo",
+            "config_json": {
+                "session_name": "missing-root",
+                "panes": [
+                    { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
+                ]
+            },
+            "auto_start": false
+        }))
+        .send()
+        .await
+        .expect("create session");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let start = h
+        .client
+        .post(format!("{}/sessions/missing-root/start", h.base_url))
+        .send()
+        .await
+        .expect("start session");
+    assert_eq!(start.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = start.json().await.expect("json");
     assert_eq!(body["code"], "invalid_crew_variant_binding");
 }
 

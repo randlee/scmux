@@ -8,7 +8,7 @@ use axum::{
 };
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -309,6 +309,17 @@ struct ImportDiscoveryRequest {
     repo_url: Option<String>,
     branch_ref: Option<String>,
     root_path: String,
+    member_intents: Vec<ImportDiscoveryMemberIntent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ImportDiscoveryMemberIntent {
+    pane_name: String,
+    member_id: String,
+    role: String,
+    ai_provider: String,
+    model: String,
+    startup_prompts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -798,6 +809,8 @@ async fn start_session(
         if let Err(message) = validate_crew_variant_binding(&binding, state.host_id) {
             return Err(bad_request("invalid_crew_variant_binding", message));
         }
+    } else if let Err(message) = validate_config_root_path_binding(&definition.config_json) {
+        return Err(bad_request("invalid_crew_variant_binding", message));
     }
 
     {
@@ -1578,14 +1591,26 @@ async fn get_unregistered_discovery(
         let runtime = state.runtime.lock().expect("runtime lock");
         runtime.discovery_rows()
     };
-    let registered_crew_names = tokio::task::spawn_blocking({
+    let registered_names = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
         move || -> anyhow::Result<HashSet<String>> {
             let db_conn = state.db.lock().expect("db lock");
-            let mut stmt = db_conn.prepare("SELECT crew_name FROM crews")?;
-            let mapped = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            let values = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(values.into_iter().collect::<HashSet<_>>())
+            let mut names = HashSet::new();
+
+            let mut crew_stmt = db_conn.prepare("SELECT crew_name FROM crews")?;
+            let crew_rows = crew_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for name in crew_rows.collect::<rusqlite::Result<Vec<_>>>()? {
+                names.insert(name);
+            }
+
+            let mut session_stmt =
+                db_conn.prepare("SELECT name FROM sessions WHERE enabled = 1")?;
+            let session_rows = session_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for name in session_rows.collect::<rusqlite::Result<Vec<_>>>()? {
+                names.insert(name);
+            }
+
+            Ok(names)
         }
     })
     .await
@@ -1594,7 +1619,7 @@ async fn get_unregistered_discovery(
 
     let rows = discovery_rows
         .into_iter()
-        .filter(|row| !registered_crew_names.contains(&row.name))
+        .filter(|row| !registered_names.contains(&row.name))
         .collect::<Vec<_>>();
     Ok(Json(rows))
 }
@@ -1740,7 +1765,7 @@ async fn import_discovery_session(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| generate_import_crew_ulid(&crew_name));
 
-    let members = map_discovery_members(&row.panes);
+    let members = map_discovery_members(&row.panes, &req.member_intents)?;
     let bundle = definition_writer::NewCrewBundle {
         crew_name: crew_name.clone(),
         crew_ulid,
@@ -1861,6 +1886,29 @@ fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_config_root_path_binding(config_json: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|err| format!("config_json is not valid JSON: {err}"))?;
+    let root_path = value
+        .get("root_path")
+        .and_then(|raw| raw.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "config_json.root_path is required when no crew variant binding is defined".to_string()
+        })?;
+    let path = FsPath::new(root_path);
+    if !path.exists() {
+        return Err(format!("config_json.root_path does not exist: {root_path}"));
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "config_json.root_path is not a directory: {root_path}"
+        ));
+    }
+    Ok(())
+}
+
 async fn fetch_preferred_crew_variant_binding(
     state: Arc<AppState>,
     crew_name: &str,
@@ -1970,44 +2018,87 @@ fn sanitize_identifier(value: &str) -> String {
 
 fn map_discovery_members(
     panes: &[crate::tmux::PaneInfo],
-) -> Vec<definition_writer::CrewMemberInput> {
-    let mut used = HashSet::new();
-    panes
-        .iter()
-        .enumerate()
-        .map(|(idx, pane)| {
-            let base = sanitize_identifier(&pane.name);
-            let mut candidate = if base.is_empty() {
-                format!("member-{}", idx + 1)
-            } else {
-                base.clone()
-            };
-            let mut serial = 2u32;
-            while !used.insert(candidate.clone()) {
-                let root = if base.is_empty() {
-                    format!("member-{}", idx + 1)
-                } else {
-                    base.clone()
-                };
-                candidate = format!("{root}-{serial}");
-                serial += 1;
-            }
+    intents: &[ImportDiscoveryMemberIntent],
+) -> Result<Vec<definition_writer::CrewMemberInput>, (StatusCode, Json<ErrorResponse>)> {
+    if intents.is_empty() {
+        return Err(bad_request(
+            "missing_member_intents",
+            "member_intents is required and must map each discovered pane".to_string(),
+        ));
+    }
 
-            let (role, ai_provider, model) = if idx == 0 {
-                ("captain", "claude", "claude-opus")
-            } else {
-                ("mate", "codex", "codex-high")
-            };
+    let mut intent_by_pane: HashMap<String, &ImportDiscoveryMemberIntent> = HashMap::new();
+    for intent in intents {
+        let pane_name = intent.pane_name.trim().to_string();
+        if pane_name.is_empty() {
+            return Err(bad_request(
+                "invalid_member_intent",
+                "member_intents[].pane_name is required".to_string(),
+            ));
+        }
+        if intent.startup_prompts.is_empty() {
+            return Err(bad_request(
+                "invalid_startup_prompts",
+                format!(
+                    "member intent for pane '{}' must include startup_prompts",
+                    pane_name
+                ),
+            ));
+        }
+        if intent_by_pane.insert(pane_name.clone(), intent).is_some() {
+            return Err(bad_request(
+                "duplicate_member_intent",
+                format!("duplicate member intent for pane '{}'", pane_name),
+            ));
+        }
+    }
 
-            definition_writer::CrewMemberInput {
-                member_id: candidate,
-                role: role.to_string(),
-                ai_provider: ai_provider.to_string(),
-                model: model.to_string(),
-                startup_prompts_json: "[]".to_string(),
-            }
-        })
-        .collect::<Vec<_>>()
+    let mut members = Vec::with_capacity(panes.len());
+    for pane in panes {
+        let intent = intent_by_pane.get(&pane.name).ok_or_else(|| {
+            bad_request(
+                "missing_member_intent",
+                format!(
+                    "no member intent provided for discovered pane '{}'",
+                    pane.name
+                ),
+            )
+        })?;
+
+        let startup_prompts_json =
+            serde_json::to_string(&intent.startup_prompts).map_err(|_| {
+                bad_request(
+                    "invalid_startup_prompts",
+                    format!(
+                        "startup_prompts for pane '{}' could not be serialized",
+                        pane.name
+                    ),
+                )
+            })?;
+        if intent.member_id.trim().is_empty()
+            || intent.role.trim().is_empty()
+            || intent.ai_provider.trim().is_empty()
+            || intent.model.trim().is_empty()
+        {
+            return Err(bad_request(
+                "invalid_member_intent",
+                format!(
+                    "member intent for pane '{}' must include member_id, role, ai_provider, and model",
+                    pane.name
+                ),
+            ));
+        }
+
+        members.push(definition_writer::CrewMemberInput {
+            member_id: intent.member_id.trim().to_string(),
+            role: intent.role.trim().to_string(),
+            ai_provider: intent.ai_provider.trim().to_string(),
+            model: intent.model.trim().to_string(),
+            startup_prompts_json,
+        });
+    }
+
+    Ok(members)
 }
 
 fn extract_shutdown_targets(config_json: &str) -> Vec<ShutdownTarget> {
