@@ -1312,20 +1312,11 @@ async fn patch_crew_bundle(
     Path(id): Path<i64>,
     Json(req): Json<PatchCrewBundleRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut _roster_action_lease: Option<SessionActionLease> = None;
     let editing_roster = req.members.is_some() || req.variants.is_some();
     if editing_roster {
         if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
-            if is_session_action_in_progress(&crew_name) {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        ok: false,
-                        code: "action_in_progress".to_string(),
-                        message: "crew lifecycle action in progress; roster edit blocked"
-                            .to_string(),
-                    }),
-                ));
-            }
+            _roster_action_lease = Some(acquire_session_action(&crew_name, "edit crew roster")?);
             let is_running = {
                 let runtime = state.runtime.lock().expect("runtime lock");
                 runtime
@@ -1707,14 +1698,6 @@ fn acquire_session_action(
     }
     held.insert(key.clone());
     Ok(SessionActionLease { session_name: key })
-}
-
-fn is_session_action_in_progress(session_name: &str) -> bool {
-    let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
-    match lock.lock() {
-        Ok(held) => held.contains(session_name),
-        Err(_) => true,
-    }
 }
 
 fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
