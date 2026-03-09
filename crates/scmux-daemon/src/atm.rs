@@ -158,7 +158,6 @@ pub async fn send_shutdown_messages(
     if targets.is_empty() {
         return Ok(0);
     }
-
     let configured_targets = targets
         .iter()
         .map(|target| format!("{}@{}", target.agent, target.team))
