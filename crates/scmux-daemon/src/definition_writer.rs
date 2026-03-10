@@ -112,6 +112,7 @@ pub struct NewCrewBundle {
 
 #[derive(Debug, Clone, Default)]
 pub struct CrewBundlePatch {
+    pub crew_name: Option<String>,
     pub crew_ulid: Option<String>,
     pub members: Option<Vec<CrewMemberInput>>,
     pub variants: Option<Vec<CrewVariantInput>>,
@@ -195,12 +196,15 @@ pub fn ensure_local_host(conn: &Connection) -> Result<i64, WriteError> {
 
 pub fn create_armada(conn: &Connection, armada: &NewArmada) -> Result<i64, WriteError> {
     let _guard = WriteGuard(());
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    tx.execute(
         "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
         params![armada.name, armada.description],
     )
     .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
+    let armada_id = tx.last_insert_rowid();
+    tx.commit().map_err(map_write_error)?;
+    Ok(armada_id)
 }
 
 pub fn patch_armada(
@@ -209,7 +213,8 @@ pub fn patch_armada(
     patch: &ArmadaPatch,
 ) -> Result<bool, WriteError> {
     let _guard = WriteGuard(());
-    let exists: Option<i64> = conn
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    let exists: Option<i64> = tx
         .query_row(
             "SELECT id FROM armadas WHERE id = ?1",
             params![armada_id],
@@ -235,6 +240,7 @@ pub fn patch_armada(
         });
     }
     if set_parts.is_empty() {
+        tx.commit().map_err(map_write_error)?;
         return Ok(true);
     }
 
@@ -248,8 +254,9 @@ pub fn patch_armada(
     sql.push_str(" WHERE id = ?");
     values.push(SqlValue::Integer(armada_id));
 
-    conn.execute(&sql, rusqlite::params_from_iter(values))
+    tx.execute(&sql, rusqlite::params_from_iter(values))
         .map_err(map_write_error)?;
+    tx.commit().map_err(map_write_error)?;
     Ok(true)
 }
 
@@ -259,7 +266,8 @@ pub fn clone_armada(
     request: &CloneArmadaRequest,
 ) -> Result<i64, WriteError> {
     let _guard = WriteGuard(());
-    let source_description: Option<String> = conn
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    let source_description: Option<String> = tx
         .query_row(
             "SELECT description FROM armadas WHERE id = ?1",
             params![source_armada_id],
@@ -275,23 +283,28 @@ pub fn clone_armada(
         source_description
     };
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO armadas (name, description) VALUES (?1, ?2)",
         params![request.name, description],
     )
     .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
+    let clone_id = tx.last_insert_rowid();
+    tx.commit().map_err(map_write_error)?;
+    Ok(clone_id)
 }
 
 pub fn create_fleet(conn: &Connection, fleet: &NewFleet) -> Result<i64, WriteError> {
     let _guard = WriteGuard(());
-    ensure_armada_exists(conn, fleet.armada_id)?;
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    ensure_armada_exists(&tx, fleet.armada_id)?;
+    tx.execute(
         "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
         params![fleet.armada_id, fleet.name, fleet.color],
     )
     .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
+    let fleet_id = tx.last_insert_rowid();
+    tx.commit().map_err(map_write_error)?;
+    Ok(fleet_id)
 }
 
 pub fn patch_fleet(
@@ -300,7 +313,8 @@ pub fn patch_fleet(
     patch: &FleetPatch,
 ) -> Result<bool, WriteError> {
     let _guard = WriteGuard(());
-    let exists: Option<i64> = conn
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    let exists: Option<i64> = tx
         .query_row(
             "SELECT id FROM fleets WHERE id = ?1",
             params![fleet_id],
@@ -313,7 +327,7 @@ pub fn patch_fleet(
     }
 
     if let Some(armada_id) = patch.armada_id {
-        ensure_armada_exists(conn, armada_id)?;
+        ensure_armada_exists(&tx, armada_id)?;
     }
 
     let mut set_parts: Vec<&str> = Vec::new();
@@ -334,6 +348,7 @@ pub fn patch_fleet(
         });
     }
     if set_parts.is_empty() {
+        tx.commit().map_err(map_write_error)?;
         return Ok(true);
     }
 
@@ -347,8 +362,9 @@ pub fn patch_fleet(
     sql.push_str(" WHERE id = ?");
     values.push(SqlValue::Integer(fleet_id));
 
-    conn.execute(&sql, rusqlite::params_from_iter(values))
+    tx.execute(&sql, rusqlite::params_from_iter(values))
         .map_err(map_write_error)?;
+    tx.commit().map_err(map_write_error)?;
     Ok(true)
 }
 
@@ -358,7 +374,8 @@ pub fn clone_fleet(
     request: &CloneFleetRequest,
 ) -> Result<i64, WriteError> {
     let _guard = WriteGuard(());
-    let source_row: Option<(i64, Option<String>)> = conn
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    let source_row: Option<(i64, Option<String>)> = tx
         .query_row(
             "SELECT armada_id, color FROM fleets WHERE id = ?1",
             params![source_fleet_id],
@@ -371,30 +388,35 @@ pub fn clone_fleet(
     };
 
     let armada_id = request.armada_id.unwrap_or(source_armada_id);
-    ensure_armada_exists(conn, armada_id)?;
+    ensure_armada_exists(&tx, armada_id)?;
     let color = if request.color.is_some() {
         request.color.clone()
     } else {
         source_color
     };
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO fleets (armada_id, name, color) VALUES (?1, ?2, ?3)",
         params![armada_id, request.name, color],
     )
     .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
+    let clone_id = tx.last_insert_rowid();
+    tx.commit().map_err(map_write_error)?;
+    Ok(clone_id)
 }
 
 pub fn create_flotilla(conn: &Connection, flotilla: &NewFlotilla) -> Result<i64, WriteError> {
     let _guard = WriteGuard(());
-    ensure_fleet_exists(conn, flotilla.fleet_id)?;
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    ensure_fleet_exists(&tx, flotilla.fleet_id)?;
+    tx.execute(
         "INSERT INTO flotillas (fleet_id, name) VALUES (?1, ?2)",
         params![flotilla.fleet_id, flotilla.name],
     )
     .map_err(map_write_error)?;
-    Ok(conn.last_insert_rowid())
+    let flotilla_id = tx.last_insert_rowid();
+    tx.commit().map_err(map_write_error)?;
+    Ok(flotilla_id)
 }
 
 pub fn patch_flotilla(
@@ -403,7 +425,8 @@ pub fn patch_flotilla(
     patch: &FlotillaPatch,
 ) -> Result<bool, WriteError> {
     let _guard = WriteGuard(());
-    let exists: Option<i64> = conn
+    let tx = conn.unchecked_transaction().map_err(map_write_error)?;
+    let exists: Option<i64> = tx
         .query_row(
             "SELECT id FROM flotillas WHERE id = ?1",
             params![flotilla_id],
@@ -416,7 +439,7 @@ pub fn patch_flotilla(
     }
 
     if let Some(fleet_id) = patch.fleet_id {
-        ensure_fleet_exists(conn, fleet_id)?;
+        ensure_fleet_exists(&tx, fleet_id)?;
     }
 
     let mut set_parts: Vec<&str> = Vec::new();
@@ -430,6 +453,7 @@ pub fn patch_flotilla(
         values.push(SqlValue::Text(name.clone()));
     }
     if set_parts.is_empty() {
+        tx.commit().map_err(map_write_error)?;
         return Ok(true);
     }
 
@@ -443,8 +467,9 @@ pub fn patch_flotilla(
     sql.push_str(" WHERE id = ?");
     values.push(SqlValue::Integer(flotilla_id));
 
-    conn.execute(&sql, rusqlite::params_from_iter(values))
+    tx.execute(&sql, rusqlite::params_from_iter(values))
         .map_err(map_write_error)?;
+    tx.commit().map_err(map_write_error)?;
     Ok(true)
 }
 
@@ -490,6 +515,11 @@ pub fn patch_crew_bundle(
     patch: &CrewBundlePatch,
 ) -> Result<bool, WriteError> {
     let _guard = WriteGuard(());
+    if patch.crew_name.is_some() {
+        return Err(WriteError::Forbidden(
+            "crew rename is forbidden".to_string(),
+        ));
+    }
     if let Some(members) = patch.members.as_ref() {
         validate_captain_count(members)?;
         validate_startup_prompts_non_empty(members)?;
@@ -790,8 +820,8 @@ fn validate_placement(
     Ok(())
 }
 
-fn ensure_armada_exists(conn: &Connection, armada_id: i64) -> Result<(), WriteError> {
-    let exists: bool = conn
+fn ensure_armada_exists(tx: &rusqlite::Transaction<'_>, armada_id: i64) -> Result<(), WriteError> {
+    let exists: bool = tx
         .query_row(
             "SELECT COUNT(*) > 0 FROM armadas WHERE id = ?1",
             params![armada_id],
@@ -804,8 +834,8 @@ fn ensure_armada_exists(conn: &Connection, armada_id: i64) -> Result<(), WriteEr
     Ok(())
 }
 
-fn ensure_fleet_exists(conn: &Connection, fleet_id: i64) -> Result<(), WriteError> {
-    let exists: bool = conn
+fn ensure_fleet_exists(tx: &rusqlite::Transaction<'_>, fleet_id: i64) -> Result<(), WriteError> {
+    let exists: bool = tx
         .query_row(
             "SELECT COUNT(*) > 0 FROM fleets WHERE id = ?1",
             params![fleet_id],

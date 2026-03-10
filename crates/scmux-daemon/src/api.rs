@@ -293,6 +293,7 @@ struct CreateCrewBundleRequest {
 
 #[derive(Debug, Deserialize, Default)]
 struct PatchCrewBundleRequest {
+    crew_name: Option<String>,
     crew_ulid: Option<String>,
     members: Option<Vec<CrewMemberPayload>>,
     variants: Option<Vec<CrewVariantPayload>>,
@@ -326,6 +327,7 @@ struct ImportDiscoveryRequest {
     repo_url: Option<String>,
     branch_ref: Option<String>,
     root_path: String,
+    #[serde(default)]
     member_intents: Vec<ImportDiscoveryMemberIntent>,
 }
 
@@ -828,22 +830,20 @@ async fn start_session(
         )
     })?;
 
-    if let Err(message) = validate_start_config(&definition.config_json, &name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                ok: false,
-                code: "invalid_config".to_string(),
-                message,
-            }),
-        ));
-    }
-    if let Some(binding) = fetch_preferred_crew_variant_binding(Arc::clone(&state), &name).await? {
+    let start_root_path = if let Some(binding) =
+        fetch_preferred_crew_variant_binding(Arc::clone(&state), &name).await?
+    {
         if let Err(message) = validate_crew_variant_binding(&binding, state.host_id) {
             return Err(bad_request("invalid_crew_variant_binding", message));
         }
-    } else if let Err(message) = validate_config_root_path_binding(&definition.config_json) {
-        return Err(bad_request("invalid_crew_variant_binding", message));
+        binding.root_path
+    } else {
+        validate_config_root_path_binding(&definition.config_json)
+            .map_err(|message| bad_request("invalid_crew_variant_binding", message))?
+    };
+
+    if let Err(message) = validate_start_config(&definition.config_json, &name, &start_root_path) {
+        return Err(bad_request("invalid_config", message));
     }
 
     {
@@ -1376,8 +1376,19 @@ async fn patch_crew_bundle(
     Path(id): Path<i64>,
     Json(req): Json<PatchCrewBundleRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.crew_name.is_some() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                ok: false,
+                code: "crew_rename_forbidden".to_string(),
+                message: "crew rename is forbidden".to_string(),
+            }),
+        ));
+    }
+
     let mut _roster_action_lease: Option<SessionActionLease> = None;
-    let editing_roster = req.members.is_some() || req.variants.is_some();
+    let editing_roster = req.members.is_some() || req.variants.is_some() || req.crew_ulid.is_some();
     if editing_roster {
         if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
             _roster_action_lease = Some(acquire_session_action(&crew_name, "edit crew roster")?);
@@ -1426,6 +1437,7 @@ async fn patch_crew_bundle(
         .transpose()?;
 
     let patch = definition_writer::CrewBundlePatch {
+        crew_name: req.crew_name,
         crew_ulid: req.crew_ulid,
         members,
         variants,
@@ -1987,7 +1999,11 @@ fn acquire_session_action(
     Ok(SessionActionLease { session_name: key })
 }
 
-fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
+fn validate_start_config(
+    config_json: &str,
+    name: &str,
+    start_root_path: &str,
+) -> Result<(), String> {
     let value: serde_json::Value = serde_json::from_str(config_json)
         .map_err(|err| format!("config_json is not valid JSON: {err}"))?;
     let session_name = value
@@ -2004,10 +2020,11 @@ fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
     if panes.is_empty() {
         return Err("config_json.panes[] must contain at least one pane".to_string());
     }
+    validate_startup_prompt_paths(panes, FsPath::new(start_root_path))?;
     Ok(())
 }
 
-fn validate_config_root_path_binding(config_json: &str) -> Result<(), String> {
+fn validate_config_root_path_binding(config_json: &str) -> Result<String, String> {
     let value: serde_json::Value = serde_json::from_str(config_json)
         .map_err(|err| format!("config_json is not valid JSON: {err}"))?;
     let root_path = value
@@ -2027,7 +2044,82 @@ fn validate_config_root_path_binding(config_json: &str) -> Result<(), String> {
             "config_json.root_path is not a directory: {root_path}"
         ));
     }
+    Ok(root_path.to_string())
+}
+
+fn validate_startup_prompt_paths(
+    panes: &[serde_json::Value],
+    start_root_path: &FsPath,
+) -> Result<(), String> {
+    for pane in panes {
+        let pane_name = pane
+            .get("name")
+            .and_then(|raw| raw.as_str())
+            .unwrap_or("unnamed-pane");
+        for prompt in extract_startup_prompt_paths(pane, pane_name)? {
+            let prompt_path = FsPath::new(&prompt);
+            let resolved = if prompt_path.is_absolute() {
+                prompt_path.to_path_buf()
+            } else {
+                start_root_path.join(prompt_path)
+            };
+            if !resolved.exists() || !resolved.is_file() {
+                return Err(format!(
+                    "startup prompt path for pane '{pane_name}' could not be resolved: {}",
+                    resolved.display()
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+fn extract_startup_prompt_paths(
+    pane: &serde_json::Value,
+    pane_name: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(raw) = pane.get("startup_prompts_json") {
+        if let Some(encoded) = raw.as_str() {
+            let parsed: serde_json::Value = serde_json::from_str(encoded).map_err(|err| {
+                format!("pane '{pane_name}' startup_prompts_json is not valid JSON: {err}")
+            })?;
+            let prompts = parsed.as_array().ok_or_else(|| {
+                format!("pane '{pane_name}' startup_prompts_json must decode to an array")
+            })?;
+            return parse_prompt_array(prompts, pane_name);
+        }
+        let prompts = raw.as_array().ok_or_else(|| {
+            format!("pane '{pane_name}' startup_prompts_json must be a JSON string or array")
+        })?;
+        return parse_prompt_array(prompts, pane_name);
+    }
+
+    if let Some(raw) = pane.get("startup_prompts") {
+        let prompts = raw
+            .as_array()
+            .ok_or_else(|| format!("pane '{pane_name}' startup_prompts must be an array"))?;
+        return parse_prompt_array(prompts, pane_name);
+    }
+
+    Ok(Vec::new())
+}
+
+fn parse_prompt_array(
+    values: &[serde_json::Value],
+    pane_name: &str,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        let prompt = value
+            .as_str()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| {
+                format!("pane '{pane_name}' startup prompts must be non-empty strings")
+            })?;
+        out.push(prompt.to_string());
+    }
+    Ok(out)
 }
 
 async fn fetch_preferred_crew_variant_binding(
@@ -2141,13 +2233,6 @@ fn map_discovery_members(
     panes: &[crate::tmux::PaneInfo],
     intents: &[ImportDiscoveryMemberIntent],
 ) -> Result<Vec<definition_writer::CrewMemberInput>, (StatusCode, Json<ErrorResponse>)> {
-    if intents.is_empty() {
-        return Err(bad_request(
-            "missing_member_intents",
-            "member_intents is required and must map each discovered pane".to_string(),
-        ));
-    }
-
     let mut intent_by_pane: HashMap<String, &ImportDiscoveryMemberIntent> = HashMap::new();
     for intent in intents {
         let pane_name = intent.pane_name.trim().to_string();
@@ -2175,51 +2260,92 @@ fn map_discovery_members(
     }
 
     let mut members = Vec::with_capacity(panes.len());
-    for pane in panes {
-        let intent = intent_by_pane.get(&pane.name).ok_or_else(|| {
+    let mut used_member_ids = HashSet::new();
+    for (idx, pane) in panes.iter().enumerate() {
+        if let Some(intent) = intent_by_pane.get(&pane.name) {
+            let startup_prompts_json =
+                serde_json::to_string(&intent.startup_prompts).map_err(|_| {
+                    bad_request(
+                        "invalid_startup_prompts",
+                        format!(
+                            "startup_prompts for pane '{}' could not be serialized",
+                            pane.name
+                        ),
+                    )
+                })?;
+            if intent.member_id.trim().is_empty()
+                || intent.role.trim().is_empty()
+                || intent.ai_provider.trim().is_empty()
+                || intent.model.trim().is_empty()
+            {
+                return Err(bad_request(
+                    "invalid_member_intent",
+                    format!(
+                        "member intent for pane '{}' must include member_id, role, ai_provider, and model",
+                        pane.name
+                    ),
+                ));
+            }
+
+            let member_id = intent.member_id.trim().to_string();
+            if !used_member_ids.insert(member_id.clone()) {
+                return Err(bad_request(
+                    "duplicate_member_id",
+                    format!("duplicate member_id '{}' in import payload", member_id),
+                ));
+            }
+
+            members.push(definition_writer::CrewMemberInput {
+                member_id,
+                role: intent.role.trim().to_string(),
+                ai_provider: intent.ai_provider.trim().to_string(),
+                model: intent.model.trim().to_string(),
+                startup_prompts_json,
+            });
+            continue;
+        }
+
+        let stub_member_id = next_stub_member_id(&pane.name, idx, &mut used_member_ids);
+        let startup_prompts_json = serde_json::to_string(&vec![
+            "TODO: map startup prompt for imported pane".to_string(),
+        ])
+        .map_err(|_| {
             bad_request(
-                "missing_member_intent",
+                "invalid_startup_prompts",
                 format!(
-                    "no member intent provided for discovered pane '{}'",
+                    "startup_prompts for pane '{}' could not be serialized",
                     pane.name
                 ),
             )
         })?;
-
-        let startup_prompts_json =
-            serde_json::to_string(&intent.startup_prompts).map_err(|_| {
-                bad_request(
-                    "invalid_startup_prompts",
-                    format!(
-                        "startup_prompts for pane '{}' could not be serialized",
-                        pane.name
-                    ),
-                )
-            })?;
-        if intent.member_id.trim().is_empty()
-            || intent.role.trim().is_empty()
-            || intent.ai_provider.trim().is_empty()
-            || intent.model.trim().is_empty()
-        {
-            return Err(bad_request(
-                "invalid_member_intent",
-                format!(
-                    "member intent for pane '{}' must include member_id, role, ai_provider, and model",
-                    pane.name
-                ),
-            ));
-        }
-
         members.push(definition_writer::CrewMemberInput {
-            member_id: intent.member_id.trim().to_string(),
-            role: intent.role.trim().to_string(),
-            ai_provider: intent.ai_provider.trim().to_string(),
-            model: intent.model.trim().to_string(),
+            member_id: stub_member_id,
+            role: "unknown".to_string(),
+            ai_provider: "unknown".to_string(),
+            model: "unknown".to_string(),
             startup_prompts_json,
         });
     }
 
     Ok(members)
+}
+
+fn next_stub_member_id(pane_name: &str, pane_index: usize, used: &mut HashSet<String>) -> String {
+    let base = sanitize_identifier(pane_name);
+    let prefix = if base.is_empty() { "pane" } else { &base };
+    let mut candidate = format!("unmapped-{prefix}");
+    if used.insert(candidate.clone()) {
+        return candidate;
+    }
+
+    let mut counter = pane_index + 1;
+    loop {
+        candidate = format!("unmapped-{prefix}-{counter}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        counter += 1;
+    }
 }
 
 fn extract_shutdown_targets(config_json: &str) -> Vec<ShutdownTarget> {
