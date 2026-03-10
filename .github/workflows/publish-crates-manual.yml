@@ -1,0 +1,29 @@
+name: Publish Crates (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to publish from (tag, branch, or SHA)'
+        required: true
+        default: 'v0.6.0'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crates.io packages
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo publish -p scmux-daemon
+          echo "Waiting 60s for crates.io indexing..."
+          sleep 60
+          cargo publish -p scmux
