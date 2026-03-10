@@ -204,6 +204,8 @@ pub fn get_host(conn: &Connection, host_id: i64) -> anyhow::Result<Option<HostDe
     Ok(row)
 }
 
+// Persistent write helpers are crate-visible for module organization, but gated by
+// `definition_writer::WriteGuard`, which cannot be constructed outside definition_writer.
 pub(crate) fn create_session(
     _guard: &crate::definition_writer::WriteGuard,
     conn: &Connection,
@@ -460,6 +462,80 @@ fn migrate(conn: &Connection) -> Result<()> {
           BEGIN
             UPDATE sessions SET updated_at = datetime('now') WHERE id = OLD.id;
           END;
+
+        CREATE TABLE IF NOT EXISTS armadas (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS fleets (
+            id          INTEGER PRIMARY KEY,
+            armada_id   INTEGER NOT NULL REFERENCES armadas(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL,
+            color       TEXT,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (armada_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS flotillas (
+            id          INTEGER PRIMARY KEY,
+            fleet_id    INTEGER NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (fleet_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS crews (
+            id          INTEGER PRIMARY KEY,
+            crew_name   TEXT NOT NULL UNIQUE,
+            crew_ulid   TEXT NOT NULL UNIQUE,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS crew_members (
+            id                   INTEGER PRIMARY KEY,
+            crew_id              INTEGER NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+            member_id            TEXT NOT NULL,
+            role                 TEXT NOT NULL,
+            ai_provider          TEXT NOT NULL,
+            model                TEXT NOT NULL,
+            startup_prompts_json TEXT NOT NULL,
+            created_at           DATETIME NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (crew_id, member_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS crew_variants (
+            id          INTEGER PRIMARY KEY,
+            crew_id     INTEGER NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+            host_id     INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+            repo_url    TEXT,
+            branch_ref  TEXT,
+            root_path   TEXT NOT NULL,
+            config_json TEXT,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (crew_id, host_id, repo_url, branch_ref, root_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS crew_refs (
+            id          INTEGER PRIMARY KEY,
+            crew_id     INTEGER NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+            armada_id   INTEGER NOT NULL REFERENCES armadas(id) ON DELETE CASCADE,
+            fleet_id    INTEGER NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
+            flotilla_id INTEGER REFERENCES flotillas(id) ON DELETE SET NULL,
+            alias_name  TEXT,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_fleets_armada         ON fleets (armada_id);
+        CREATE INDEX IF NOT EXISTS idx_flotillas_fleet       ON flotillas (fleet_id);
+        CREATE INDEX IF NOT EXISTS idx_crew_members_crew     ON crew_members (crew_id);
+        CREATE INDEX IF NOT EXISTS idx_crew_variants_crew    ON crew_variants (crew_id);
+        CREATE INDEX IF NOT EXISTS idx_crew_refs_crew        ON crew_refs (crew_id);
+        CREATE INDEX IF NOT EXISTS idx_crew_refs_armada      ON crew_refs (armada_id);
+        CREATE INDEX IF NOT EXISTS idx_crew_refs_fleet       ON crew_refs (fleet_id);
+        CREATE INDEX IF NOT EXISTS idx_crew_refs_flotilla    ON crew_refs (flotilla_id);
 
         DROP TABLE IF EXISTS session_status;
         DROP TABLE IF EXISTS session_ci;

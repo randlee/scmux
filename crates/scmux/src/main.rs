@@ -80,7 +80,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Doctor => {
             let health = client.health().await.map_err(map_client_error)?;
-            output::print_doctor(&health);
+            let runtime_crews = client.list_runtime_crews().await.ok();
+            let unregistered = client.list_unregistered_discovery().await.ok();
+            output::print_doctor(&health, runtime_crews.as_deref(), unregistered.as_deref());
         }
     }
 

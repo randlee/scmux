@@ -76,7 +76,7 @@ fn insert_ci_session(
             project: Some("ci".to_string()),
             host_id: state.host_id,
             config_json: format!(
-                r#"{{"session_name":"{name}","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
+                r#"{{"session_name":"{name}","root_path":"/tmp","panes":[{{"name":"agent","command":"sleep 1","atm_agent":"agent","atm_team":"scmux-dev"}}]}}"#
             ),
             cron_schedule: None,
             auto_start: false,
