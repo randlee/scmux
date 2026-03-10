@@ -3,7 +3,9 @@ use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -305,6 +307,10 @@ fn request_id() -> String {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+fn atm_bin() -> String {
+    std::env::var("SCMUX_ATM_BIN").unwrap_or_else(|_| "atm".to_string())
 }
 
 #[cfg(unix)]
