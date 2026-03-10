@@ -114,6 +114,7 @@ impl E2eHarness {
             "project": "e2e",
             "config_json": {
                 "session_name": name,
+                "root_path": "/tmp",
                 "panes": [
                     { "name": "agent", "command": "sleep 1", "atm_agent": "agent", "atm_team": "scmux-dev" }
                 ]

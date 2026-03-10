@@ -3,13 +3,15 @@ use axum::{
     http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tower_http::cors::CorsLayer;
 
 use crate::atm::ShutdownTarget;
@@ -32,6 +34,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/dashboard-config.json", get(get_dashboard_config))
         .route("/discovery", get(get_discovery))
+        .route("/runtime/crews", get(list_runtime_crews))
+        .route(
+            "/runtime/discovery/unregistered",
+            get(get_unregistered_discovery),
+        )
         .route("/sessions", get(list_sessions).post(create_session))
         .route(
             "/sessions/:name",
@@ -40,6 +47,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/:name/start", post(start_session))
         .route("/sessions/:name/stop", post(stop_session))
         .route("/sessions/:name/jump", post(jump_session))
+        .route("/editor/state", get(get_editor_state))
+        .route("/editor/armadas", post(create_armada))
+        .route("/editor/armadas/:id", axum::routing::patch(patch_armada))
+        .route("/editor/armadas/:id/clone", post(clone_armada))
+        .route("/editor/fleets", post(create_fleet))
+        .route("/editor/fleets/:id", axum::routing::patch(patch_fleet))
+        .route("/editor/fleets/:id/clone", post(clone_fleet))
+        .route("/editor/flotillas", post(create_flotilla))
+        .route(
+            "/editor/flotillas/:id",
+            axum::routing::patch(patch_flotilla),
+        )
+        .route("/editor/crews", post(create_crew_bundle))
+        .route("/editor/crews/:id", axum::routing::patch(patch_crew_bundle))
+        .route("/editor/crews/:id/clone", post(clone_crew_bundle))
+        .route("/editor/crew-refs/:id/move", post(move_crew_ref))
+        .route("/editor/crew-refs/:id", delete(unlink_crew_ref))
+        .route("/editor/import-discovery", post(import_discovery_session))
         .layer(CorsLayer::permissive())
         .layer(from_fn_with_state(middleware_state, touch_last_api_access))
         .with_state(state)
@@ -51,6 +76,7 @@ const REACT_JS: &[u8] = include_bytes!("../assets/react.min.js");
 const REACT_DOM_JS: &[u8] = include_bytes!("../assets/react-dom.min.js");
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 15;
 const DEFAULT_STOP_GRACE_SECS: u64 = 10;
+static SESSION_ACTIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -60,6 +86,7 @@ struct HealthResponse {
     sessions_running: i64,
     host_id: i64,
     atm_available: bool,
+    atm_socket_available: bool,
     ci_available: CiAvailability,
     pollers: PollerStates,
     recent_errors: Vec<String>,
@@ -178,6 +205,214 @@ struct PatchHostRequest {
     api_port: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateArmadaRequest {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchArmadaRequest {
+    name: Option<String>,
+    description: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneArmadaRequest {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFleetRequest {
+    armada_id: i64,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchFleetRequest {
+    armada_id: Option<i64>,
+    name: Option<String>,
+    color: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneFleetRequest {
+    armada_id: Option<i64>,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFlotillaRequest {
+    fleet_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchFlotillaRequest {
+    fleet_id: Option<i64>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrewMemberPayload {
+    member_id: String,
+    role: String,
+    ai_provider: String,
+    model: String,
+    startup_prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrewVariantPayload {
+    host_id: i64,
+    repo_url: Option<String>,
+    branch_ref: Option<String>,
+    root_path: String,
+    config_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CrewPlacementPayload {
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCrewBundleRequest {
+    crew_name: String,
+    crew_ulid: String,
+    members: Vec<CrewMemberPayload>,
+    variants: Vec<CrewVariantPayload>,
+    placement: CrewPlacementPayload,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PatchCrewBundleRequest {
+    crew_name: Option<String>,
+    crew_ulid: Option<String>,
+    members: Option<Vec<CrewMemberPayload>>,
+    variants: Option<Vec<CrewVariantPayload>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneCrewBundleRequest {
+    crew_name: String,
+    crew_ulid: String,
+    placement: CrewPlacementPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct MoveCrewRefRequest {
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportDiscoveryRequest {
+    session_name: String,
+    crew_name: Option<String>,
+    crew_ulid: Option<String>,
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<String>,
+    host_id: Option<i64>,
+    repo_url: Option<String>,
+    branch_ref: Option<String>,
+    root_path: String,
+    #[serde(default)]
+    member_intents: Vec<ImportDiscoveryMemberIntent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ImportDiscoveryMemberIntent {
+    pane_name: String,
+    member_id: String,
+    role: String,
+    ai_provider: String,
+    model: String,
+    startup_prompts: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeCrewSummary {
+    crew_id: i64,
+    crew_name: String,
+    crew_ulid: String,
+    host_id: i64,
+    root_path: String,
+    repo_url: Option<String>,
+    branch_ref: Option<String>,
+    status: String,
+    discovered: bool,
+    pane_count: usize,
+    binding_valid: bool,
+    binding_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CrewVariantBinding {
+    host_id: i64,
+    root_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorStateResponse {
+    armadas: Vec<EditorArmada>,
+    fleets: Vec<EditorFleet>,
+    flotillas: Vec<EditorFlotilla>,
+    crews: Vec<EditorCrew>,
+    crew_refs: Vec<EditorCrewRef>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorArmada {
+    id: i64,
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorFleet {
+    id: i64,
+    armada_id: i64,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorFlotilla {
+    id: i64,
+    fleet_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorCrew {
+    id: i64,
+    crew_name: String,
+    crew_ulid: String,
+    member_count: i64,
+    variant_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EditorCrewRef {
+    id: i64,
+    crew_id: i64,
+    armada_id: i64,
+    fleet_id: i64,
+    flotilla_id: Option<i64>,
+    alias_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct HostSummary {
     id: i64,
@@ -196,6 +431,19 @@ struct DashboardConfigResponse {
     hosts: Vec<HostSummary>,
     default_terminal: String,
     poll_interval_ms: u64,
+}
+
+struct SessionActionLease {
+    session_name: String,
+}
+
+impl Drop for SessionActionLease {
+    fn drop(&mut self) {
+        let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+        if let Ok(mut held) = lock.lock() {
+            held.remove(&self.session_name);
+        }
+    }
 }
 
 async fn serve_dashboard_asset(
@@ -261,6 +509,7 @@ async fn health(
     let db_path = state.db_path.clone();
     let host_id = state.host_id;
     let atm_available = state.atm_available.load(Ordering::Relaxed);
+    let atm_socket_available = crate::atm::atm_socket_available(state.as_ref());
     let ci_available = CiAvailability {
         gh: state.ci_tools.gh_available,
         az: state.ci_tools.az_available,
@@ -299,6 +548,7 @@ async fn health(
         sessions_running,
         host_id,
         atm_available,
+        atm_socket_available,
         ci_available,
         pollers: PollerStates {
             tmux: health_state.tmux,
@@ -557,6 +807,7 @@ async fn start_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _action_lease = acquire_session_action(&name, "start")?;
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -579,15 +830,20 @@ async fn start_session(
         )
     })?;
 
-    if let Err(message) = validate_start_config(&definition.config_json, &name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                ok: false,
-                code: "invalid_config".to_string(),
-                message,
-            }),
-        ));
+    let start_root_path = if let Some(binding) =
+        fetch_preferred_crew_variant_binding(Arc::clone(&state), &name).await?
+    {
+        if let Err(message) = validate_crew_variant_binding(&binding, state.host_id) {
+            return Err(bad_request("invalid_crew_variant_binding", message));
+        }
+        binding.root_path
+    } else {
+        validate_config_root_path_binding(&definition.config_json)
+            .map_err(|message| bad_request("invalid_crew_variant_binding", message))?
+    };
+
+    if let Err(message) = validate_start_config(&definition.config_json, &name, &start_root_path) {
+        return Err(bad_request("invalid_config", message));
     }
 
     {
@@ -620,6 +876,7 @@ async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _action_lease = acquire_session_action(&name, "stop")?;
     let definition = {
         let state = Arc::clone(&state);
         let name = name.clone();
@@ -850,6 +1107,558 @@ async fn delete_host(
     }
 }
 
+async fn create_armada(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateArmadaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let armada = definition_writer::NewArmada {
+        name: req.name.clone(),
+        description: req.description,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_armada(&db_conn, &armada)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_armada task".to_string()))?;
+
+    match result {
+        Ok(id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("armada '{id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_armada(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchArmadaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::ArmadaPatch {
+        name: req.name,
+        description: req.description,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_armada(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_armada task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("armada '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("armada '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn clone_armada(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneArmadaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request = definition_writer::CloneArmadaRequest {
+        name: req.name,
+        description: req.description,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::clone_armada(&db_conn, id, &request)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join clone_armada task".to_string()))?;
+
+    match result {
+        Ok(clone_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("armada cloned to '{clone_id}'"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn create_fleet(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateFleetRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let fleet = definition_writer::NewFleet {
+        armada_id: req.armada_id,
+        name: req.name.clone(),
+        color: req.color,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_fleet(&db_conn, &fleet)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_fleet task".to_string()))?;
+
+    match result {
+        Ok(id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("fleet '{id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_fleet(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchFleetRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::FleetPatch {
+        armada_id: req.armada_id,
+        name: req.name,
+        color: req.color,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_fleet(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_fleet task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("fleet '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("fleet '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn clone_fleet(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneFleetRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request = definition_writer::CloneFleetRequest {
+        armada_id: req.armada_id,
+        name: req.name,
+        color: req.color,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::clone_fleet(&db_conn, id, &request)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join clone_fleet task".to_string()))?;
+
+    match result {
+        Ok(clone_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("fleet cloned to '{clone_id}'"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn create_flotilla(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateFlotillaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let flotilla = definition_writer::NewFlotilla {
+        fleet_id: req.fleet_id,
+        name: req.name.clone(),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_flotilla(&db_conn, &flotilla)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_flotilla task".to_string()))?;
+
+    match result {
+        Ok(id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("flotilla '{id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_flotilla(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchFlotillaRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::FlotillaPatch {
+        fleet_id: req.fleet_id,
+        name: req.name,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_flotilla(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_flotilla task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("flotilla '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("flotilla '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn create_crew_bundle(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateCrewBundleRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let members = req
+        .members
+        .iter()
+        .map(map_member_payload)
+        .collect::<Result<Vec<_>, _>>()?;
+    let variants = req
+        .variants
+        .iter()
+        .map(map_variant_payload)
+        .collect::<Result<Vec<_>, _>>()?;
+    let placement = map_placement_payload(&req.placement);
+
+    let bundle = definition_writer::NewCrewBundle {
+        crew_name: req.crew_name,
+        crew_ulid: req.crew_ulid,
+        members,
+        variants,
+        placement,
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::create_crew_bundle(&db_conn, &bundle)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join create_crew_bundle task".to_string()))?;
+
+    match result {
+        Ok(crew_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew '{crew_id}' created"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn patch_crew_bundle(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchCrewBundleRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.crew_name.is_some() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                ok: false,
+                code: "crew_rename_forbidden".to_string(),
+                message: "crew rename is forbidden".to_string(),
+            }),
+        ));
+    }
+
+    let mut _roster_action_lease: Option<SessionActionLease> = None;
+    let editing_roster = req.members.is_some() || req.variants.is_some() || req.crew_ulid.is_some();
+    if editing_roster {
+        if let Some(crew_name) = fetch_crew_name(Arc::clone(&state), id).await? {
+            _roster_action_lease = Some(acquire_session_action(&crew_name, "edit crew roster")?);
+            let is_running = {
+                let runtime = state.runtime.lock().expect("runtime lock");
+                runtime
+                    .session(&crew_name)
+                    .is_some_and(|entry| entry.status != "stopped")
+                    || runtime
+                        .discovery_rows()
+                        .iter()
+                        .any(|row| row.name == crew_name)
+            };
+            if is_running {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse {
+                        ok: false,
+                        code: "running_edit_forbidden".to_string(),
+                        message: "running crew roster/prompt edits are not allowed".to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+
+    let members = req
+        .members
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .map(map_member_payload)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let variants = req
+        .variants
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .map(map_variant_payload)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+
+    let patch = definition_writer::CrewBundlePatch {
+        crew_name: req.crew_name,
+        crew_ulid: req.crew_ulid,
+        members,
+        variants,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::patch_crew_bundle(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join patch_crew_bundle task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew '{id}' updated"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("crew '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn clone_crew_bundle(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneCrewBundleRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request = definition_writer::CloneCrewRequest {
+        crew_name: req.crew_name,
+        crew_ulid: req.crew_ulid,
+        placement: map_placement_payload(&req.placement),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::clone_crew(&db_conn, id, &request)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join clone_crew_bundle task".to_string()))?;
+
+    match result {
+        Ok(new_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew cloned to '{new_id}'"),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn move_crew_ref(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(req): Json<MoveCrewRefRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let patch = definition_writer::MoveCrewRefPatch {
+        armada_id: req.armada_id,
+        fleet_id: req.fleet_id,
+        flotilla_id: req.flotilla_id,
+        alias_name: req.alias_name,
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::move_crew_ref(&db_conn, id, &patch)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join move_crew_ref task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew ref '{id}' moved"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("crew ref '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn unlink_crew_ref(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        definition_writer::unlink_crew_ref(&db_conn, id)
+    })
+    .await
+    .map_err(|_| internal_error("failed to join unlink_crew_ref task".to_string()))?;
+
+    match result {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("crew ref '{id}' unlinked"),
+        })),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                code: "not_found".to_string(),
+                message: format!("crew ref '{id}' not found"),
+            }),
+        )),
+        Err(err) => Err(map_write_error(err)),
+    }
+}
+
+async fn get_editor_state(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<EditorStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<EditorStateResponse> {
+        let db_conn = state.db.lock().expect("db lock");
+
+        let armadas = {
+            let mut stmt =
+                db_conn.prepare("SELECT id, name, description FROM armadas ORDER BY name")?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorArmada {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let fleets = {
+            let mut stmt =
+                db_conn.prepare("SELECT id, armada_id, name, color FROM fleets ORDER BY name")?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorFleet {
+                    id: r.get(0)?,
+                    armada_id: r.get(1)?,
+                    name: r.get(2)?,
+                    color: r.get(3)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let flotillas = {
+            let mut stmt = db_conn.prepare("SELECT id, fleet_id, name FROM flotillas ORDER BY name")?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorFlotilla {
+                    id: r.get(0)?,
+                    fleet_id: r.get(1)?,
+                    name: r.get(2)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let crews = {
+            let mut stmt = db_conn.prepare(
+                "SELECT c.id, c.crew_name, c.crew_ulid,
+                        (SELECT COUNT(*) FROM crew_members cm WHERE cm.crew_id = c.id) AS member_count,
+                        (SELECT COUNT(*) FROM crew_variants cv WHERE cv.crew_id = c.id) AS variant_count
+                 FROM crews c
+                 ORDER BY c.crew_name",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorCrew {
+                    id: r.get(0)?,
+                    crew_name: r.get(1)?,
+                    crew_ulid: r.get(2)?,
+                    member_count: r.get(3)?,
+                    variant_count: r.get(4)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let crew_refs = {
+            let mut stmt = db_conn.prepare(
+                "SELECT id, crew_id, armada_id, fleet_id, flotilla_id, alias_name
+                 FROM crew_refs
+                 ORDER BY armada_id, fleet_id, id",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(EditorCrewRef {
+                    id: r.get(0)?,
+                    crew_id: r.get(1)?,
+                    armada_id: r.get(2)?,
+                    fleet_id: r.get(3)?,
+                    flotilla_id: r.get(4)?,
+                    alias_name: r.get(5)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        Ok(EditorStateResponse {
+            armadas,
+            fleets,
+            flotillas,
+            crews,
+            crew_refs,
+        })
+    })
+    .await
+    .map_err(|_| internal_error("failed to join get_editor_state task".to_string()))?;
+
+    match result {
+        Ok(body) => Ok(Json(body)),
+        Err(err) => Err(internal_error(format!(
+            "failed to load editor state: {err}"
+        ))),
+    }
+}
+
 async fn get_dashboard_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DashboardConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -881,6 +1690,229 @@ async fn get_discovery(
         runtime.discovery_rows()
     };
     Json(rows)
+}
+
+async fn get_unregistered_discovery(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::runtime::DiscoverySession>>, (StatusCode, Json<ErrorResponse>)> {
+    let discovery_rows = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime.discovery_rows()
+    };
+    let registered_names = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || -> anyhow::Result<HashSet<String>> {
+            let db_conn = state.db.lock().expect("db lock");
+            let mut names = HashSet::new();
+
+            let mut crew_stmt = db_conn.prepare("SELECT crew_name FROM crews")?;
+            let crew_rows = crew_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for name in crew_rows.collect::<rusqlite::Result<Vec<_>>>()? {
+                names.insert(name);
+            }
+
+            let mut session_stmt =
+                db_conn.prepare("SELECT name FROM sessions WHERE enabled = 1")?;
+            let session_rows = session_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for name in session_rows.collect::<rusqlite::Result<Vec<_>>>()? {
+                names.insert(name);
+            }
+
+            Ok(names)
+        }
+    })
+    .await
+    .map_err(|_| internal_error("failed to join get_unregistered_discovery task".to_string()))?
+    .map_err(|err| internal_error(format!("failed to list registered crews: {err}")))?;
+
+    let rows = discovery_rows
+        .into_iter()
+        .filter(|row| !registered_names.contains(&row.name))
+        .collect::<Vec<_>>();
+    Ok(Json(rows))
+}
+
+async fn list_runtime_crews(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<RuntimeCrewSummary>>, (StatusCode, Json<ErrorResponse>)> {
+    #[derive(Debug)]
+    struct CrewVariantRow {
+        crew_id: i64,
+        crew_name: String,
+        crew_ulid: String,
+        host_id: i64,
+        repo_url: Option<String>,
+        branch_ref: Option<String>,
+        root_path: String,
+    }
+
+    let variant_rows = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || -> anyhow::Result<Vec<CrewVariantRow>> {
+            let db_conn = state.db.lock().expect("db lock");
+            let mut stmt = db_conn.prepare(
+                "SELECT c.id, c.crew_name, c.crew_ulid, cv.host_id, cv.repo_url, cv.branch_ref, cv.root_path
+                 FROM crews c
+                 JOIN crew_variants cv ON cv.crew_id = c.id
+                 ORDER BY c.crew_name, cv.id",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok(CrewVariantRow {
+                    crew_id: r.get(0)?,
+                    crew_name: r.get(1)?,
+                    crew_ulid: r.get(2)?,
+                    host_id: r.get(3)?,
+                    repo_url: r.get(4)?,
+                    branch_ref: r.get(5)?,
+                    root_path: r.get(6)?,
+                })
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)
+        }
+    })
+    .await
+    .map_err(|_| internal_error("failed to join list_runtime_crews task".to_string()))?
+    .map_err(|err| internal_error(format!("failed to list crew variants: {err}")))?;
+
+    let rows = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        let discovery_rows = runtime.discovery_rows();
+        variant_rows
+            .into_iter()
+            .map(|row| {
+                let discovery = discovery_rows
+                    .iter()
+                    .find(|item| item.name == row.crew_name);
+                let status = runtime
+                    .session(&row.crew_name)
+                    .map(|entry| entry.status.clone())
+                    .or_else(|| discovery.map(|item| derive_discovery_status(&item.panes)))
+                    .unwrap_or_else(|| "stopped".to_string());
+                let binding = CrewVariantBinding {
+                    host_id: row.host_id,
+                    root_path: row.root_path.clone(),
+                };
+                let binding_error = validate_crew_variant_binding(&binding, state.host_id).err();
+                RuntimeCrewSummary {
+                    crew_id: row.crew_id,
+                    crew_name: row.crew_name,
+                    crew_ulid: row.crew_ulid,
+                    host_id: row.host_id,
+                    root_path: row.root_path,
+                    repo_url: row.repo_url,
+                    branch_ref: row.branch_ref,
+                    status,
+                    discovered: discovery.is_some(),
+                    pane_count: discovery.map(|item| item.panes.len()).unwrap_or(0),
+                    binding_valid: binding_error.is_none(),
+                    binding_error,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Ok(Json(rows))
+}
+
+async fn import_discovery_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ImportDiscoveryRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let session_name = req.session_name.trim().to_string();
+    if session_name.is_empty() {
+        return Err(bad_request(
+            "invalid_session_name",
+            "session_name is required".to_string(),
+        ));
+    }
+    let root_path = req.root_path.trim().to_string();
+    if root_path.is_empty() {
+        return Err(bad_request(
+            "invalid_root_path",
+            "root_path is required".to_string(),
+        ));
+    }
+
+    let discovery = {
+        let runtime = state.runtime.lock().expect("runtime lock");
+        runtime.discovery_rows()
+    };
+    let row = discovery
+        .into_iter()
+        .find(|item| item.name == session_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    ok: false,
+                    code: "discovery_not_found".to_string(),
+                    message: format!("discovered session '{session_name}' not found"),
+                }),
+            )
+        })?;
+    if row.panes.is_empty() {
+        return Err(bad_request(
+            "empty_discovery_session",
+            "cannot import a discovered session with zero panes".to_string(),
+        ));
+    }
+
+    let host_id = req.host_id.unwrap_or(state.host_id);
+    let crew_name = req
+        .crew_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&session_name)
+        .to_string();
+    let crew_ulid = req
+        .crew_ulid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| generate_import_crew_ulid(&crew_name));
+
+    let members = map_discovery_members(&row.panes, &req.member_intents)?;
+    let bundle = definition_writer::NewCrewBundle {
+        crew_name: crew_name.clone(),
+        crew_ulid,
+        members,
+        variants: vec![definition_writer::CrewVariantInput {
+            host_id,
+            repo_url: req.repo_url,
+            branch_ref: req.branch_ref,
+            root_path: root_path.clone(),
+            config_json: None,
+        }],
+        placement: definition_writer::CrewPlacementInput {
+            armada_id: req.armada_id,
+            fleet_id: req.fleet_id,
+            flotilla_id: req.flotilla_id,
+            alias_name: req.alias_name,
+        },
+    };
+
+    let created = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || {
+            let db_conn = state.db.lock().expect("db lock");
+            definition_writer::create_crew_bundle(&db_conn, &bundle)
+        }
+    })
+    .await
+    .map_err(|_| internal_error("failed to join import_discovery_session task".to_string()))?;
+
+    match created {
+        Ok(crew_id) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!(
+                "imported discovered session '{}' into crew '{}' (id={})",
+                session_name, crew_name, crew_id
+            ),
+        })),
+        Err(err) => Err(map_write_error(err)),
+    }
 }
 
 async fn fetch_hosts(state: Arc<AppState>) -> anyhow::Result<Vec<HostSummary>> {
@@ -942,7 +1974,36 @@ fn from_atm_runtime(entry: AtmRuntimeSummary) -> SessionAtmSummary {
     }
 }
 
-fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
+fn acquire_session_action(
+    session_name: &str,
+    action: &str,
+) -> Result<SessionActionLease, (StatusCode, Json<ErrorResponse>)> {
+    let key = session_name.trim().to_string();
+    let lock = SESSION_ACTIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut held = lock
+        .lock()
+        .map_err(|_| internal_error("failed to lock session action map".to_string()))?;
+    if held.contains(&key) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                ok: false,
+                code: "action_in_progress".to_string(),
+                message: format!(
+                    "cannot {action} session '{session_name}': another lifecycle action is in progress"
+                ),
+            }),
+        ));
+    }
+    held.insert(key.clone());
+    Ok(SessionActionLease { session_name: key })
+}
+
+fn validate_start_config(
+    config_json: &str,
+    name: &str,
+    start_root_path: &str,
+) -> Result<(), String> {
     let value: serde_json::Value = serde_json::from_str(config_json)
         .map_err(|err| format!("config_json is not valid JSON: {err}"))?;
     let session_name = value
@@ -959,7 +2020,332 @@ fn validate_start_config(config_json: &str, name: &str) -> Result<(), String> {
     if panes.is_empty() {
         return Err("config_json.panes[] must contain at least one pane".to_string());
     }
+    validate_startup_prompt_paths(panes, FsPath::new(start_root_path))?;
     Ok(())
+}
+
+fn validate_config_root_path_binding(config_json: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|err| format!("config_json is not valid JSON: {err}"))?;
+    let root_path = value
+        .get("root_path")
+        .and_then(|raw| raw.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "config_json.root_path is required when no crew variant binding is defined".to_string()
+        })?;
+    let path = FsPath::new(root_path);
+    if !path.exists() {
+        return Err(format!("config_json.root_path does not exist: {root_path}"));
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "config_json.root_path is not a directory: {root_path}"
+        ));
+    }
+    Ok(root_path.to_string())
+}
+
+fn validate_startup_prompt_paths(
+    panes: &[serde_json::Value],
+    start_root_path: &FsPath,
+) -> Result<(), String> {
+    for pane in panes {
+        let pane_name = pane
+            .get("name")
+            .and_then(|raw| raw.as_str())
+            .unwrap_or("unnamed-pane");
+        for prompt in extract_startup_prompt_paths(pane, pane_name)? {
+            let prompt_path = FsPath::new(&prompt);
+            let resolved = if prompt_path.is_absolute() {
+                prompt_path.to_path_buf()
+            } else {
+                start_root_path.join(prompt_path)
+            };
+            if !resolved.exists() || !resolved.is_file() {
+                return Err(format!(
+                    "startup prompt path for pane '{pane_name}' could not be resolved: {}",
+                    resolved.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extract_startup_prompt_paths(
+    pane: &serde_json::Value,
+    pane_name: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(raw) = pane.get("startup_prompts_json") {
+        if let Some(encoded) = raw.as_str() {
+            let parsed: serde_json::Value = serde_json::from_str(encoded).map_err(|err| {
+                format!("pane '{pane_name}' startup_prompts_json is not valid JSON: {err}")
+            })?;
+            let prompts = parsed.as_array().ok_or_else(|| {
+                format!("pane '{pane_name}' startup_prompts_json must decode to an array")
+            })?;
+            return parse_prompt_array(prompts, pane_name);
+        }
+        let prompts = raw.as_array().ok_or_else(|| {
+            format!("pane '{pane_name}' startup_prompts_json must be a JSON string or array")
+        })?;
+        return parse_prompt_array(prompts, pane_name);
+    }
+
+    if let Some(raw) = pane.get("startup_prompts") {
+        let prompts = raw
+            .as_array()
+            .ok_or_else(|| format!("pane '{pane_name}' startup_prompts must be an array"))?;
+        return parse_prompt_array(prompts, pane_name);
+    }
+
+    Ok(Vec::new())
+}
+
+fn parse_prompt_array(
+    values: &[serde_json::Value],
+    pane_name: &str,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        let prompt = value
+            .as_str()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| {
+                format!("pane '{pane_name}' startup prompts must be non-empty strings")
+            })?;
+        out.push(prompt.to_string());
+    }
+    Ok(out)
+}
+
+async fn fetch_preferred_crew_variant_binding(
+    state: Arc<AppState>,
+    crew_name: &str,
+) -> Result<Option<CrewVariantBinding>, (StatusCode, Json<ErrorResponse>)> {
+    let crew_name = crew_name.to_string();
+    let host_id = state.host_id;
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT cv.host_id, cv.root_path
+                 FROM crews c
+                 JOIN crew_variants cv ON cv.crew_id = c.id
+                 WHERE c.crew_name = ?1
+                 ORDER BY CASE WHEN cv.host_id = ?2 THEN 0 ELSE 1 END, cv.id
+                 LIMIT 1",
+                rusqlite::params![crew_name, host_id],
+                |r| {
+                    Ok(CrewVariantBinding {
+                        host_id: r.get(0)?,
+                        root_path: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+    })
+    .await
+    .map_err(|_| {
+        internal_error("failed to join fetch_preferred_crew_variant_binding task".to_string())
+    })?;
+
+    result.map_err(|_| internal_error("failed to read crew variant binding".to_string()))
+}
+
+fn validate_crew_variant_binding(
+    binding: &CrewVariantBinding,
+    daemon_host_id: i64,
+) -> Result<(), String> {
+    if binding.host_id != daemon_host_id {
+        return Err(format!(
+            "crew variant host_id {} does not match local daemon host_id {}",
+            binding.host_id, daemon_host_id
+        ));
+    }
+    let root_path = binding.root_path.trim();
+    if root_path.is_empty() {
+        return Err("crew variant root_path is required".to_string());
+    }
+    let path = FsPath::new(root_path);
+    if !path.exists() {
+        return Err(format!(
+            "crew variant root_path does not exist: {root_path}"
+        ));
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "crew variant root_path is not a directory: {root_path}"
+        ));
+    }
+    Ok(())
+}
+
+fn derive_discovery_status(panes: &[crate::tmux::PaneInfo]) -> String {
+    if panes.is_empty() {
+        return "stopped".to_string();
+    }
+    let any_active = panes.iter().any(|pane| {
+        matches!(
+            pane.status.to_ascii_lowercase().as_str(),
+            "active" | "running" | "stuck"
+        )
+    });
+    if any_active {
+        "running".to_string()
+    } else {
+        "idle".to_string()
+    }
+}
+
+fn generate_import_crew_ulid(crew_name: &str) -> String {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let label = sanitize_identifier(crew_name);
+    format!(
+        "import-{}-{}",
+        if label.is_empty() { "crew" } else { &label },
+        suffix
+    )
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn map_discovery_members(
+    panes: &[crate::tmux::PaneInfo],
+    intents: &[ImportDiscoveryMemberIntent],
+) -> Result<Vec<definition_writer::CrewMemberInput>, (StatusCode, Json<ErrorResponse>)> {
+    let mut intent_by_pane: HashMap<String, &ImportDiscoveryMemberIntent> = HashMap::new();
+    for intent in intents {
+        let pane_name = intent.pane_name.trim().to_string();
+        if pane_name.is_empty() {
+            return Err(bad_request(
+                "invalid_member_intent",
+                "member_intents[].pane_name is required".to_string(),
+            ));
+        }
+        if intent.startup_prompts.is_empty() {
+            return Err(bad_request(
+                "invalid_startup_prompts",
+                format!(
+                    "member intent for pane '{}' must include startup_prompts",
+                    pane_name
+                ),
+            ));
+        }
+        if intent_by_pane.insert(pane_name.clone(), intent).is_some() {
+            return Err(bad_request(
+                "duplicate_member_intent",
+                format!("duplicate member intent for pane '{}'", pane_name),
+            ));
+        }
+    }
+
+    let mut members = Vec::with_capacity(panes.len());
+    let mut used_member_ids = HashSet::new();
+    for (idx, pane) in panes.iter().enumerate() {
+        if let Some(intent) = intent_by_pane.get(&pane.name) {
+            let startup_prompts_json =
+                serde_json::to_string(&intent.startup_prompts).map_err(|_| {
+                    bad_request(
+                        "invalid_startup_prompts",
+                        format!(
+                            "startup_prompts for pane '{}' could not be serialized",
+                            pane.name
+                        ),
+                    )
+                })?;
+            if intent.member_id.trim().is_empty()
+                || intent.role.trim().is_empty()
+                || intent.ai_provider.trim().is_empty()
+                || intent.model.trim().is_empty()
+            {
+                return Err(bad_request(
+                    "invalid_member_intent",
+                    format!(
+                        "member intent for pane '{}' must include member_id, role, ai_provider, and model",
+                        pane.name
+                    ),
+                ));
+            }
+
+            let member_id = intent.member_id.trim().to_string();
+            if !used_member_ids.insert(member_id.clone()) {
+                return Err(bad_request(
+                    "duplicate_member_id",
+                    format!("duplicate member_id '{}' in import payload", member_id),
+                ));
+            }
+
+            members.push(definition_writer::CrewMemberInput {
+                member_id,
+                role: intent.role.trim().to_string(),
+                ai_provider: intent.ai_provider.trim().to_string(),
+                model: intent.model.trim().to_string(),
+                startup_prompts_json,
+            });
+            continue;
+        }
+
+        let stub_member_id = next_stub_member_id(&pane.name, idx, &mut used_member_ids);
+        let startup_prompts_json = serde_json::to_string(&vec![
+            "TODO: map startup prompt for imported pane".to_string(),
+        ])
+        .map_err(|_| {
+            bad_request(
+                "invalid_startup_prompts",
+                format!(
+                    "startup_prompts for pane '{}' could not be serialized",
+                    pane.name
+                ),
+            )
+        })?;
+        members.push(definition_writer::CrewMemberInput {
+            member_id: stub_member_id,
+            role: "unknown".to_string(),
+            ai_provider: "unknown".to_string(),
+            model: "unknown".to_string(),
+            startup_prompts_json,
+        });
+    }
+
+    Ok(members)
+}
+
+fn next_stub_member_id(pane_name: &str, pane_index: usize, used: &mut HashSet<String>) -> String {
+    let base = sanitize_identifier(pane_name);
+    let prefix = if base.is_empty() { "pane" } else { &base };
+    let mut candidate = format!("unmapped-{prefix}");
+    if used.insert(candidate.clone()) {
+        return candidate;
+    }
+
+    let mut counter = pane_index + 1;
+    loop {
+        candidate = format!("unmapped-{prefix}-{counter}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        counter += 1;
+    }
 }
 
 fn extract_shutdown_targets(config_json: &str) -> Vec<ShutdownTarget> {
@@ -984,6 +2370,84 @@ fn extract_shutdown_targets(config_json: &str) -> Vec<ShutdownTarget> {
             })
         })
         .collect::<Vec<_>>()
+}
+
+fn map_member_payload(
+    payload: &CrewMemberPayload,
+) -> Result<definition_writer::CrewMemberInput, (StatusCode, Json<ErrorResponse>)> {
+    let startup_prompts_json = serde_json::to_string(&payload.startup_prompts).map_err(|_| {
+        bad_request(
+            "invalid_startup_prompts",
+            "startup_prompts could not be serialized".to_string(),
+        )
+    })?;
+
+    Ok(definition_writer::CrewMemberInput {
+        member_id: payload.member_id.clone(),
+        role: payload.role.clone(),
+        ai_provider: payload.ai_provider.clone(),
+        model: payload.model.clone(),
+        startup_prompts_json,
+    })
+}
+
+fn map_variant_payload(
+    payload: &CrewVariantPayload,
+) -> Result<definition_writer::CrewVariantInput, (StatusCode, Json<ErrorResponse>)> {
+    if payload.root_path.trim().is_empty() {
+        return Err(bad_request(
+            "invalid_root_path",
+            "root_path is required".to_string(),
+        ));
+    }
+
+    let config_json = payload
+        .config_json
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| {
+            bad_request(
+                "invalid_variant_config",
+                "invalid variant config_json".to_string(),
+            )
+        })?;
+
+    Ok(definition_writer::CrewVariantInput {
+        host_id: payload.host_id,
+        repo_url: payload.repo_url.clone(),
+        branch_ref: payload.branch_ref.clone(),
+        root_path: payload.root_path.clone(),
+        config_json,
+    })
+}
+
+fn map_placement_payload(payload: &CrewPlacementPayload) -> definition_writer::CrewPlacementInput {
+    definition_writer::CrewPlacementInput {
+        armada_id: payload.armada_id,
+        fleet_id: payload.fleet_id,
+        flotilla_id: payload.flotilla_id,
+        alias_name: payload.alias_name.clone(),
+    }
+}
+
+async fn fetch_crew_name(
+    state: Arc<AppState>,
+    crew_id: i64,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_conn = state.db.lock().expect("db lock");
+        db_conn
+            .query_row(
+                "SELECT crew_name FROM crews WHERE id = ?1",
+                rusqlite::params![crew_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+    })
+    .await
+    .map_err(|_| internal_error("failed to join fetch_crew_name task".to_string()))?;
+    result.map_err(|_| internal_error("failed to read crew name".to_string()))
 }
 
 fn map_write_error(err: definition_writer::WriteError) -> (StatusCode, Json<ErrorResponse>) {

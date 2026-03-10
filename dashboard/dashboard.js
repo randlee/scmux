@@ -50,6 +50,7 @@ const STATUS_DOT = {
 };
 const DEFAULT_BASE_URL = "http://localhost:7878";
 const DEFAULT_POLL_MS = 15_000;
+const FLOTILLA_V1_ENABLED = false;
 function daemonBaseUrl() {
   if (typeof window === "undefined") {
     return DEFAULT_BASE_URL;
@@ -895,6 +896,729 @@ function DiscoveryView({
     colSpan: 4
   }, "no panes reported")))))));
 }
+function makeCrewUlid() {
+  return `01J${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 12).toUpperCase()}`;
+}
+function OrganizationEditorModal({
+  baseUrl,
+  open,
+  onClose,
+  onSaved
+}) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [successMessage, setSuccessMessage] = useState(null);
+  const [state, setState] = useState({
+    armadas: [],
+    fleets: [],
+    flotillas: [],
+    crews: [],
+    crew_refs: []
+  });
+  const [armadaName, setArmadaName] = useState("");
+  const [fleetName, setFleetName] = useState("");
+  const [fleetColor, setFleetColor] = useState("#3b82f6");
+  const [newCrewName, setNewCrewName] = useState("");
+  const [newCrewUlid, setNewCrewUlid] = useState(makeCrewUlid());
+  const [captainModel, setCaptainModel] = useState("claude-opus");
+  const [mateModel, setMateModel] = useState("codex-high");
+  const [newRootPath, setNewRootPath] = useState("/tmp/scmux");
+  const [selectedArmadaId, setSelectedArmadaId] = useState(null);
+  const [selectedFleetId, setSelectedFleetId] = useState(null);
+  const [selectedFlotillaId, setSelectedFlotillaId] = useState(null);
+  const loadState = async () => {
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(`${baseUrl}/editor/state`);
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.message || `HTTP ${response.status}`);
+      }
+      setState({
+        armadas: Array.isArray(body.armadas) ? body.armadas : [],
+        fleets: Array.isArray(body.fleets) ? body.fleets : [],
+        flotillas: Array.isArray(body.flotillas) ? body.flotillas : [],
+        crews: Array.isArray(body.crews) ? body.crews : [],
+        crew_refs: Array.isArray(body.crew_refs) ? body.crew_refs : []
+      });
+    } catch (error) {
+      setErrorMessage(`Failed to load editor state: ${String(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    loadState();
+  }, [open]);
+  useEffect(() => {
+    if (!selectedArmadaId && state.armadas.length) {
+      setSelectedArmadaId(state.armadas[0].id);
+    }
+  }, [state.armadas, selectedArmadaId]);
+  useEffect(() => {
+    const fleetsForArmada = state.fleets.filter(fleet => fleet.armada_id === selectedArmadaId);
+    if (!fleetsForArmada.length) {
+      setSelectedFleetId(null);
+      return;
+    }
+    if (!fleetsForArmada.some(fleet => fleet.id === selectedFleetId)) {
+      setSelectedFleetId(fleetsForArmada[0].id);
+    }
+  }, [state.fleets, selectedArmadaId, selectedFleetId]);
+  useEffect(() => {
+    const flotillasForFleet = state.flotillas.filter(item => item.fleet_id === selectedFleetId);
+    if (!flotillasForFleet.length) {
+      setSelectedFlotillaId(null);
+      return;
+    }
+    if (!flotillasForFleet.some(item => item.id === selectedFlotillaId)) {
+      setSelectedFlotillaId(flotillasForFleet[0].id);
+    }
+  }, [state.flotillas, selectedFleetId, selectedFlotillaId]);
+  if (!open) {
+    return null;
+  }
+  const fleetsForSelectedArmada = state.fleets.filter(fleet => fleet.armada_id === selectedArmadaId);
+  const flotillasForSelectedFleet = state.flotillas.filter(item => item.fleet_id === selectedFleetId);
+  const hasPlacement = Number.isFinite(selectedArmadaId) && Number.isFinite(selectedFleetId);
+  const submitJson = async (url, method, payload, successText) => {
+    setSaving(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.message || body.code || `HTTP ${response.status}`);
+      }
+      setSuccessMessage(successText || body.message || "Saved");
+      await loadState();
+      if (onSaved) {
+        onSaved(successText || body.message || "Saved");
+      }
+      return true;
+    } catch (error) {
+      setErrorMessage(String(error));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+  const createArmada = async () => {
+    if (!armadaName.trim()) {
+      setErrorMessage("Armada name is required.");
+      return;
+    }
+    const ok = await submitJson(`${baseUrl}/editor/armadas`, "POST", {
+      name: armadaName.trim()
+    }, `Armada created: ${armadaName.trim()}`);
+    if (ok) {
+      setArmadaName("");
+    }
+  };
+  const cloneArmada = async (armadaId, sourceName) => {
+    const copyName = `${sourceName}-clone`;
+    await submitJson(`${baseUrl}/editor/armadas/${armadaId}/clone`, "POST", {
+      name: copyName
+    }, `Cloned armada to ${copyName}`);
+  };
+  const createFleet = async () => {
+    if (!fleetName.trim()) {
+      setErrorMessage("Fleet name is required.");
+      return;
+    }
+    if (!selectedArmadaId) {
+      setErrorMessage("Create/select an Armada before creating a Fleet.");
+      return;
+    }
+    const ok = await submitJson(`${baseUrl}/editor/fleets`, "POST", {
+      armada_id: selectedArmadaId,
+      name: fleetName.trim(),
+      color: fleetColor
+    }, `Fleet created: ${fleetName.trim()}`);
+    if (ok) {
+      setFleetName("");
+    }
+  };
+  const cloneFleet = async (fleetId, sourceName, sourceArmadaId, sourceColor) => {
+    const copyName = `${sourceName}-clone`;
+    await submitJson(`${baseUrl}/editor/fleets/${fleetId}/clone`, "POST", {
+      armada_id: selectedArmadaId || sourceArmadaId,
+      name: copyName,
+      color: sourceColor || null
+    }, `Cloned fleet to ${copyName}`);
+  };
+  const createCrew = async () => {
+    if (!newCrewName.trim()) {
+      setErrorMessage("Crew name is required.");
+      return;
+    }
+    if (!hasPlacement) {
+      setErrorMessage("Crew placement is unresolved. Select Armada and Fleet.");
+      return;
+    }
+    const payload = {
+      crew_name: newCrewName.trim(),
+      crew_ulid: newCrewUlid.trim() || makeCrewUlid(),
+      members: [{
+        member_id: "team-lead",
+        role: "captain",
+        ai_provider: "claude",
+        model: captainModel.trim() || "claude-opus",
+        startup_prompts: ["prompts/arch-startup.md", "prompts/pm-startup.md"]
+      }, {
+        member_id: "arch-cmux",
+        role: "mate",
+        ai_provider: "codex",
+        model: mateModel.trim() || "codex-high",
+        startup_prompts: ["prompts/arch-cmux-startup.md"]
+      }],
+      variants: [{
+        host_id: 1,
+        root_path: newRootPath.trim() || "/tmp/scmux"
+      }],
+      placement: {
+        armada_id: selectedArmadaId,
+        fleet_id: selectedFleetId,
+        flotilla_id: FLOTILLA_V1_ENABLED ? selectedFlotillaId : null
+      }
+    };
+    const ok = await submitJson(`${baseUrl}/editor/crews`, "POST", payload, `Crew created: ${newCrewName.trim()}`);
+    if (ok) {
+      setNewCrewName("");
+      setNewCrewUlid(makeCrewUlid());
+    }
+  };
+  const moveRef = async (refRow, nextArmadaId, nextFleetId) => {
+    if (!nextArmadaId || !nextFleetId) {
+      setErrorMessage("Move requires target armada and fleet.");
+      return;
+    }
+    await submitJson(`${baseUrl}/editor/crew-refs/${refRow.id}/move`, "POST", {
+      armada_id: Number(nextArmadaId),
+      fleet_id: Number(nextFleetId),
+      flotilla_id: null
+    }, `Moved crew ref ${refRow.id}`);
+  };
+  const cloneCrew = async (crewId, crewName) => {
+    const copyName = `${crewName}-clone`;
+    await submitJson(`${baseUrl}/editor/crews/${crewId}/clone`, "POST", {
+      crew_name: copyName,
+      crew_ulid: makeCrewUlid(),
+      placement: {
+        armada_id: selectedArmadaId,
+        fleet_id: selectedFleetId,
+        flotilla_id: FLOTILLA_V1_ENABLED ? selectedFlotillaId : null
+      }
+    }, `Cloned crew to ${copyName}`);
+  };
+  const unlinkRef = async refId => {
+    setSaving(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    try {
+      const response = await fetch(`${baseUrl}/editor/crew-refs/${refId}`, {
+        method: "DELETE"
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.message || `HTTP ${response.status}`);
+      }
+      setSuccessMessage(body.message || `Unlinked ref ${refId}`);
+      await loadState();
+      if (onSaved) {
+        onSaved(body.message || `Unlinked ref ${refId}`);
+      }
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.8)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 230
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "min(1100px, 96vw)",
+      maxHeight: "92vh",
+      overflowY: "auto",
+      background: "#0d1117",
+      border: "1px solid #1e2535",
+      borderRadius: 10,
+      padding: 16,
+      display: "grid",
+      gap: 14
+    },
+    onClick: event => event.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "#475569",
+      letterSpacing: "0.1em"
+    }
+  }, "ORGANIZATION EDITOR"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "#cbd5e1"
+    }
+  }, "Armada / Fleet", FLOTILLA_V1_ENABLED ? " / Flotilla" : "", " / Crew")), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      background: "transparent",
+      color: "#94a3b8",
+      padding: "6px 10px",
+      cursor: "pointer"
+    }
+  }, "Close")), !FLOTILLA_V1_ENABLED && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#f59e0b"
+    }
+  }, "Flotilla is currently behind feature flag. UI operates at Armada/Fleet scope."), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "#64748b"
+    }
+  }, "Loading editor state...") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: "1px solid #1e2535",
+      borderRadius: 8,
+      padding: 10,
+      display: "grid",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#93c5fd"
+    }
+  }, "Armada Editor"), /*#__PURE__*/React.createElement("input", {
+    value: armadaName,
+    onChange: event => setArmadaName(event.target.value),
+    placeholder: "Armada name",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: createArmada,
+    disabled: saving,
+    style: {
+      border: "none",
+      background: "#2563eb",
+      color: "#fff",
+      borderRadius: 5,
+      padding: "6px 8px",
+      cursor: "pointer",
+      fontSize: 11
+    }
+  }, "+ Create Armada"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 130,
+      overflowY: "auto",
+      borderTop: "1px solid #131820",
+      paddingTop: 6
+    }
+  }, state.armadas.map(armada => /*#__PURE__*/React.createElement("div", {
+    key: armada.id,
+    style: {
+      fontSize: 11,
+      color: "#94a3b8",
+      padding: "2px 0",
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, armada.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#475569"
+    }
+  }, "#", armada.id)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => cloneArmada(armada.id, armada.name),
+    disabled: saving,
+    style: {
+      border: "1px solid #1e2535",
+      background: "#1e293b",
+      color: "#cbd5e1",
+      borderRadius: 5,
+      padding: "2px 7px",
+      cursor: "pointer",
+      fontSize: 10
+    }
+  }, "Clone"))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: "1px solid #1e2535",
+      borderRadius: 8,
+      padding: 10,
+      display: "grid",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#93c5fd"
+    }
+  }, "Fleet Editor"), /*#__PURE__*/React.createElement("select", {
+    value: selectedArmadaId || "",
+    onChange: event => setSelectedArmadaId(Number(event.target.value)),
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Select armada"), state.armadas.map(armada => /*#__PURE__*/React.createElement("option", {
+    key: armada.id,
+    value: armada.id
+  }, armada.name))), /*#__PURE__*/React.createElement("input", {
+    value: fleetName,
+    onChange: event => setFleetName(event.target.value),
+    placeholder: "Fleet name",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: fleetColor,
+    onChange: event => setFleetColor(event.target.value),
+    placeholder: "#3b82f6",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: createFleet,
+    disabled: saving || !selectedArmadaId,
+    style: {
+      border: "none",
+      background: "#0ea5e9",
+      color: "#fff",
+      borderRadius: 5,
+      padding: "6px 8px",
+      cursor: "pointer",
+      fontSize: 11
+    }
+  }, "+ Create Fleet"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 130,
+      overflowY: "auto",
+      borderTop: "1px solid #131820",
+      paddingTop: 6
+    }
+  }, fleetsForSelectedArmada.map(fleet => /*#__PURE__*/React.createElement("div", {
+    key: fleet.id,
+    style: {
+      fontSize: 11,
+      color: "#94a3b8",
+      padding: "2px 0",
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, fleet.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: fleet.color || "#64748b"
+    }
+  }, fleet.color || "")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => cloneFleet(fleet.id, fleet.name, fleet.armada_id, fleet.color),
+    disabled: saving,
+    style: {
+      border: "1px solid #1e2535",
+      background: "#1e293b",
+      color: "#cbd5e1",
+      borderRadius: 5,
+      padding: "2px 7px",
+      cursor: "pointer",
+      fontSize: 10
+    }
+  }, "Clone"))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: "1px solid #1e2535",
+      borderRadius: 8,
+      padding: 10,
+      display: "grid",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#93c5fd"
+    }
+  }, "Crew Editor"), /*#__PURE__*/React.createElement("input", {
+    value: newCrewName,
+    onChange: event => setNewCrewName(event.target.value),
+    placeholder: "Crew name",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: newCrewUlid,
+    onChange: event => setNewCrewUlid(event.target.value),
+    placeholder: "Crew ULID",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: newRootPath,
+    onChange: event => setNewRootPath(event.target.value),
+    placeholder: "root path",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: captainModel,
+    onChange: event => setCaptainModel(event.target.value),
+    placeholder: "Captain model",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: mateModel,
+    onChange: event => setMateModel(event.target.value),
+    placeholder: "Mate model",
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  })), FLOTILLA_V1_ENABLED && /*#__PURE__*/React.createElement("select", {
+    value: selectedFlotillaId || "",
+    onChange: event => setSelectedFlotillaId(Number(event.target.value)),
+    style: {
+      background: "#060810",
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      color: "#cbd5e1",
+      padding: "7px 9px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "No flotilla"), flotillasForSelectedFleet.map(item => /*#__PURE__*/React.createElement("option", {
+    key: item.id,
+    value: item.id
+  }, item.name))), !hasPlacement && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#f59e0b"
+    }
+  }, "Placement unresolved: create/select Armada and Fleet first."), /*#__PURE__*/React.createElement("button", {
+    onClick: createCrew,
+    disabled: saving || !hasPlacement,
+    style: {
+      border: "none",
+      background: "#16a34a",
+      color: "#fff",
+      borderRadius: 5,
+      padding: "6px 8px",
+      cursor: "pointer",
+      fontSize: 11
+    }
+  }, "+ Create Crew"))), errorMessage && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "#f87171",
+      fontSize: 11
+    }
+  }, errorMessage), successMessage && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "#34d399",
+      fontSize: 11
+    }
+  }, successMessage), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: "1px solid #131820",
+      paddingTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#93c5fd",
+      marginBottom: 8
+    }
+  }, "Crew Placement Controls"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 8
+    }
+  }, state.crew_refs.map(refRow => {
+    const crew = state.crews.find(item => item.id === refRow.crew_id);
+    const armada = state.armadas.find(item => item.id === refRow.armada_id);
+    const fleet = state.fleets.find(item => item.id === refRow.fleet_id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: refRow.id,
+      style: {
+        border: "1px solid #1e2535",
+        borderRadius: 6,
+        padding: 8,
+        display: "grid",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: "#cbd5e1"
+      }
+    }, crew?.crew_name || `crew-${refRow.crew_id}`, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: "#64748b"
+      }
+    }, "ref#", refRow.id)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: "#64748b"
+      }
+    }, armada?.name || "unknown", " / ", fleet?.name || "unknown")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("select", {
+      id: `move-armada-${refRow.id}`,
+      defaultValue: refRow.armada_id,
+      style: {
+        background: "#060810",
+        border: "1px solid #1e2535",
+        borderRadius: 5,
+        color: "#cbd5e1",
+        padding: "5px 8px",
+        fontSize: 11
+      }
+    }, state.armadas.map(item => /*#__PURE__*/React.createElement("option", {
+      key: item.id,
+      value: item.id
+    }, item.name))), /*#__PURE__*/React.createElement("select", {
+      id: `move-fleet-${refRow.id}`,
+      defaultValue: refRow.fleet_id,
+      style: {
+        background: "#060810",
+        border: "1px solid #1e2535",
+        borderRadius: 5,
+        color: "#cbd5e1",
+        padding: "5px 8px",
+        fontSize: 11
+      }
+    }, state.fleets.map(item => /*#__PURE__*/React.createElement("option", {
+      key: item.id,
+      value: item.id
+    }, item.name))), /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        const armadaValue = Number(document.getElementById(`move-armada-${refRow.id}`)?.value);
+        const fleetValue = Number(document.getElementById(`move-fleet-${refRow.id}`)?.value);
+        moveRef(refRow, armadaValue, fleetValue);
+      },
+      style: {
+        border: "1px solid #1e2535",
+        background: "#1e3a8a",
+        color: "#bfdbfe",
+        borderRadius: 5,
+        padding: "5px 8px",
+        cursor: "pointer",
+        fontSize: 11
+      }
+    }, "Move"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => cloneCrew(refRow.crew_id, crew?.crew_name || `crew-${refRow.crew_id}`),
+      style: {
+        border: "1px solid #1e2535",
+        background: "#312e81",
+        color: "#c7d2fe",
+        borderRadius: 5,
+        padding: "5px 8px",
+        cursor: "pointer",
+        fontSize: 11
+      }
+    }, "Clone Crew"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => unlinkRef(refRow.id),
+      style: {
+        border: "1px solid #1e2535",
+        background: "#3f1d1d",
+        color: "#fca5a5",
+        borderRadius: 5,
+        padding: "5px 8px",
+        cursor: "pointer",
+        fontSize: 11
+      }
+    }, "Unlink")));
+  })))));
+}
 function JumpModal({
   baseUrl,
   defaultTerminal,
@@ -1477,6 +2201,7 @@ function Dashboard() {
   const [search, setSearch] = useState("");
   const [jumpTarget, setJumpTarget] = useState(null);
   const [editorTarget, setEditorTarget] = useState(null);
+  const [orgEditorOpen, setOrgEditorOpen] = useState(false);
   const [hosts, setHosts] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [discoveryRows, setDiscoveryRows] = useState([]);
@@ -1712,6 +2437,18 @@ function Dashboard() {
       flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOrgEditorOpen(true),
+    style: {
+      border: "1px solid #1e2535",
+      borderRadius: 5,
+      background: "#111827",
+      color: "#93c5fd",
+      padding: "5px 10px",
+      fontSize: 10,
+      cursor: "pointer",
+      letterSpacing: "0.05em"
+    }
+  }, "Org Editor"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setEditorTarget({
       mode: "create"
     }),
@@ -1898,6 +2635,13 @@ function Dashboard() {
       setEditorTarget(null);
       setActionMessage(message);
       await refresh();
+    }
+  }), /*#__PURE__*/React.createElement(OrganizationEditorModal, {
+    baseUrl: baseUrl,
+    open: orgEditorOpen,
+    onClose: () => setOrgEditorOpen(false),
+    onSaved: message => {
+      setActionMessage(message);
     }
   }), hosts.length === 0 && !loading && /*#__PURE__*/React.createElement("div", {
     style: {
