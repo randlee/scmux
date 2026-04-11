@@ -1,13 +1,171 @@
 #!/usr/bin/env zsh
-# rmux — TOML-driven tmux session launcher
+# rmux — TOML-driven tmux session launcher + runtime agent spawner
 # Reads [rmux] section from .atm.toml (or --config) and .env in CWD,
 # then creates a named tmux session with multiple windows and panes.
 #
 # Install: cp scripts/rmux ~/.local/bin/rmux && chmod +x ~/.local/bin/rmux
 # Usage:   rmux [--config <path>] [--dry-run] [-v] [-h]
 #          rmux launch <pane-name> [--config <path>] [--dry-run] [-v]
+#          rmux codex|claude|sonnet|haiku|opus|gemini <name> [OPTIONS]
 
 setopt ERR_EXIT PIPE_FAIL NO_UNSET
+
+# ── Spawn subcommand ──────────────────────────────────────────────────
+# Detect: first arg is a known agent type and second arg is a name
+typeset -a KNOWN_AGENT_TYPES
+KNOWN_AGENT_TYPES=(codex claude sonnet haiku opus gemini)
+
+if [[ $# -ge 2 && ${KNOWN_AGENT_TYPES[(I)$1]} -gt 0 ]]; then
+  SPAWN_TYPE="$1"
+  SPAWN_NAME="$2"
+  shift 2
+
+  SPAWN_CONFIG=".atm.toml"
+  SPAWN_TEAM=""
+  SPAWN_MODEL=""
+  SPAWN_WINDOW="spare"
+  SPAWN_DRY_RUN=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config)  SPAWN_CONFIG="$2"; shift 2 ;;
+      --team)    SPAWN_TEAM="$2";   shift 2 ;;
+      --model)   SPAWN_MODEL="$2";  shift 2 ;;
+      --window)  SPAWN_WINDOW="$2"; shift 2 ;;
+      --dry-run) SPAWN_DRY_RUN=true; shift ;;
+      *) echo "rmux: unknown spawn option '$1'" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ ! -f "$SPAWN_CONFIG" ]]; then
+    echo "rmux: config not found: $SPAWN_CONFIG" >&2; exit 1
+  fi
+
+  SPAWN_JSON=$(python3 -c "
+import json, sys
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+with open(sys.argv[1], 'rb') as f:
+    data = tomllib.load(f)
+rmux = data.get('rmux') or {}
+core = data.get('core') or {}
+print(json.dumps({'session': rmux.get('session', 'default'), 'team': core.get('default_team', '')}))
+" "$SPAWN_CONFIG") || exit 1
+
+  SPAWN_SESSION=$(echo "$SPAWN_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['session'])")
+  [[ -z "$SPAWN_TEAM" ]] && SPAWN_TEAM=$(echo "$SPAWN_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['team'])")
+  [[ -z "$SPAWN_TEAM" && -n "${ATM_TEAM:-}" ]] && SPAWN_TEAM="$ATM_TEAM"
+
+  if [[ -z "$SPAWN_TEAM" ]]; then
+    echo "rmux: cannot determine ATM_TEAM — set [core] default_team in .atm.toml or pass --team" >&2; exit 1
+  fi
+
+  SPAWN_DIR="${SPAWN_CONFIG:h}"
+  [[ "$SPAWN_DIR" == "." ]] && SPAWN_DIR="$(pwd)"
+  SPAWN_ENV_FILE="${SPAWN_DIR}/.env"
+
+  # Resolve model for claude agents
+  case "$SPAWN_TYPE" in
+    codex|gemini) ;;
+    claude|sonnet) [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="sonnet" ;;
+    haiku)         [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="haiku" ;;
+    opus)          [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="opus" ;;
+  esac
+
+  # Read parent session ID from team config
+  PARENT_SESSION_ID=""
+  TEAM_CONFIG="${HOME}/.claude/teams/${SPAWN_TEAM}/config.json"
+  if [[ -f "$TEAM_CONFIG" ]]; then
+    PARENT_SESSION_ID=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(open(sys.argv[1]).read())
+    print(d.get('leadSessionId', ''))
+except Exception:
+    print('')
+" "$TEAM_CONFIG" 2>/dev/null || true)
+  fi
+
+  SPAWN_CLAUDE_BIN=$(whence -p claude 2>/dev/null || echo "claude")
+
+  # Build init + agent command
+  SPAWN_INIT_CMD="cd ${(q)SPAWN_DIR}"
+  if [[ -f "$SPAWN_ENV_FILE" ]]; then
+    SPAWN_INIT_CMD="${SPAWN_INIT_CMD}; set -a; source ${(q)SPAWN_ENV_FILE}; set +a; hash -r"
+  fi
+  SPAWN_INIT_CMD="${SPAWN_INIT_CMD}; export ATM_IDENTITY=${(q)SPAWN_NAME}; export ATM_TEAM=${(q)SPAWN_TEAM}"
+
+  case "$SPAWN_TYPE" in
+    codex)
+      SPAWN_FULL_CMD="codex --yolo"
+      ;;
+    gemini)
+      SPAWN_FULL_CMD="gemini"
+      ;;
+    claude|sonnet|haiku|opus)
+      SPAWN_FULL_CMD="${SPAWN_CLAUDE_BIN} --model ${SPAWN_MODEL}"
+      SPAWN_FULL_CMD+=" --dangerously-skip-permissions"
+      SPAWN_FULL_CMD+=" --teammate-mode tmux"
+      SPAWN_FULL_CMD+=" --agent-id ${(q)SPAWN_NAME}@${(q)SPAWN_TEAM}"
+      SPAWN_FULL_CMD+=" --agent-name ${(q)SPAWN_NAME}"
+      SPAWN_FULL_CMD+=" --team-name ${(q)SPAWN_TEAM}"
+      if [[ -n "$PARENT_SESSION_ID" ]]; then
+        SPAWN_FULL_CMD+=" --parent-session-id ${(q)PARENT_SESSION_ID}"
+      fi
+      ;;
+  esac
+
+  if $SPAWN_DRY_RUN; then
+    echo "=== rmux spawn dry-run ==="
+    echo "  session: $SPAWN_SESSION"
+    echo "  window:  $SPAWN_WINDOW"
+    echo "  pane:    $SPAWN_NAME"
+    echo "  type:    $SPAWN_TYPE"
+    echo "  team:    $SPAWN_TEAM"
+    [[ -n "$SPAWN_MODEL" ]] && echo "  model:   $SPAWN_MODEL"
+    [[ -n "$PARENT_SESSION_ID" ]] && echo "  parent:  $PARENT_SESSION_ID"
+    echo "  init:    $SPAWN_INIT_CMD"
+    echo "  cmd:     $SPAWN_FULL_CMD"
+    exit 0
+  fi
+
+  if ! tmux has-session -t "$SPAWN_SESSION" 2>/dev/null; then
+    echo "rmux: session '$SPAWN_SESSION' not running — start it with: rmux" >&2; exit 1
+  fi
+
+  # Create spare window if needed
+  SPARE_IS_NEW=false
+  if ! tmux list-windows -t "$SPAWN_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$SPAWN_WINDOW"; then
+    tmux new-window -t "${SPAWN_SESSION}:" -n "$SPAWN_WINDOW"
+    SPARE_IS_NEW=true
+  fi
+
+  typeset SPAWN_PANE_ID
+  if $SPARE_IS_NEW; then
+    SPAWN_PANE_ID=$(tmux list-panes -t "${SPAWN_SESSION}:${SPAWN_WINDOW}" -F '#{pane_id}' | head -1)
+  else
+    SPAWN_PANE_ID=$(tmux split-window -t "${SPAWN_SESSION}:${SPAWN_WINDOW}" -P -F '#{pane_id}')
+  fi
+
+  tmux select-pane -t "$SPAWN_PANE_ID" -T "$SPAWN_NAME" || true
+
+  tmux set-buffer -- "$SPAWN_INIT_CMD"
+  tmux paste-buffer -t "$SPAWN_PANE_ID"
+  tmux send-keys -t "$SPAWN_PANE_ID" Enter
+
+  tmux set-buffer -- "$SPAWN_FULL_CMD"
+  tmux paste-buffer -t "$SPAWN_PANE_ID"
+  tmux send-keys -t "$SPAWN_PANE_ID" Enter
+
+  if command -v atm &>/dev/null; then
+    atm teams add-member "$SPAWN_TEAM" "$SPAWN_NAME" --agent-type "$SPAWN_NAME" --pane-id "$SPAWN_PANE_ID" 2>/dev/null || true
+  fi
+
+  echo "Spawned '${SPAWN_NAME}' (${SPAWN_TYPE}) in ${SPAWN_SESSION}:${SPAWN_WINDOW} pane ${SPAWN_PANE_ID}"
+  exit 0
+fi
 
 # ── Defaults ──────────────────────────────────────────────────────────
 CONFIG_FILE=".atm.toml"
@@ -21,6 +179,7 @@ usage() {
   cat <<'EOF'
 Usage: rmux [OPTIONS]
        rmux launch <pane-name> [OPTIONS]
+       rmux <agent-type> <name> [OPTIONS]
 
 Create a tmux session from [rmux] config in .atm.toml, or launch a
 single agent pane into an existing session.
@@ -30,12 +189,19 @@ Commands:
   launch <pane-name>  Launch a single pane by name into the running session.
                       If the pane exists (by title), re-use it.
                       If the pane is missing, create it in the correct window.
+  codex|claude|sonnet|haiku|opus|gemini <name>
+                      Spawn a new agent in the spare window of the running session.
 
 Options:
   --config <path>   Path to TOML config (default: .atm.toml in CWD)
   --dry-run         Print planned tmux commands without executing
   -v, --verbose     Log each tmux command to stderr
   -h, --help        Show this help
+
+Spawn options:
+  --team <name>     Override ATM_TEAM (default: [core] default_team)
+  --model <name>    Override model (claude agents only)
+  --window <name>   Target window name (default: spare)
 EOF
   exit 0
 }
