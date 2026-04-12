@@ -1,3 +1,34 @@
 [core]
 default_team = "scmux-dev"
 identity = "team-lead"
+
+[plugins.gh_monitor]
+team = "scmux-dev"
+repo = "randlee/scmux"
+notify_target = ["team-lead@scmux-dev"]
+
+# ── rmux: tmux session launcher ──────────────────────────────────────
+[rmux]
+session = "scmux-dev"
+
+[[rmux.windows]]
+name = "agents"
+layout = "even-horizontal"
+
+[[rmux.windows.panes]]
+name = "team-lead"
+model = "sonnet"
+env = { ATM_IDENTITY = "team-lead", ATM_TEAM = "scmux-dev" }
+
+[[rmux.windows.panes]]
+name = "arch-ctm"
+command = "codex --yolo"
+env = { ATM_IDENTITY = "arch-ctm", ATM_TEAM = "scmux-dev" }
+
+[[rmux.windows]]
+name = "monitoring"
+layout = "even-vertical"
+
+[[rmux.windows.panes]]
+name = "logs"
+command = "tail -f /tmp/atm.log"
