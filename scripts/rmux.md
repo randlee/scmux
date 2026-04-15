@@ -323,6 +323,30 @@ tmux attach -t myteam
 
 ---
 
+## Configurations on Disk
+
+All `.atm.toml` files with `[rmux]` sections currently configured on this machine:
+
+| Path | Session | Team(s) | Agents |
+|------|---------|---------|--------|
+| `~/Documents/github/agent-team-mail/.atm.toml` | `atm-dev` | atm-dev, schook, scterm, sc-compose, sc-observability | team-lead, arch-ctm, quality-mgr, arch-ctask, chook, cterm, comp, cobs |
+| `~/Documents/github/scmux/.atm.toml` | `scmux-dev` | scmux-dev | team-lead, arch-ctm |
+| `~/Documents/github-radiant/data-sourcegenerators/.atm.toml` | `src-gen` | src-gen | team-lead (gen), arch-data, arch-ann, quality-mgr |
+| `~/Documents/github-radiant/unsafe/.atm.toml` | `unsafe-dev` | unsafe-dev | team-lead, cus, arch-math, arch-ann |
+| `~/Documents/github-radiant/io/.atm.toml` | `io-dev` | io-dev | team-lead, arch-cio, arch-udp, cin, arch-in |
+| `~/Documents/github-radiant/XCore/.atm.toml` | `nuget-x` | nuget-x | team-lead, cx, arch-ann |
+| `~/Documents/p3-documentation/.atm.toml` | `p3-doc` | p3-doc | arch-p3, codex-p3, qa-p3, nuget-p3 |
+
+To launch any session:
+```bash
+cd <path containing .atm.toml>
+rmux
+# or from anywhere:
+rmux --config <path-to-.atm.toml>
+```
+
+---
+
 ## Tips
 
 **Preview before launching:**
