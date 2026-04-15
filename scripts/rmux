@@ -99,7 +99,7 @@ except Exception:
 
   case "$SPAWN_TYPE" in
     codex)
-      SPAWN_FULL_CMD="codex --yolo"
+      SPAWN_FULL_CMD="codex -c features.codex_hooks=true --yolo"
       ;;
     gemini)
       SPAWN_FULL_CMD="gemini"
