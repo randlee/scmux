@@ -121,9 +121,9 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo publish -p scmux-daemon --locked
+          cargo publish -p scmux-daemon
           sleep 60
-          cargo publish -p scmux --locked
+          cargo publish -p scmux
 
   update-homebrew:
     needs: [release]

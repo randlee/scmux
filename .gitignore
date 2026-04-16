@@ -23,6 +23,7 @@ target
 # Temporary / scratch files (not committed)
 .tmp/
 .temp/
+.prompts/
 
 # macOS
 .DS_Store
