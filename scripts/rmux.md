@@ -216,6 +216,46 @@ env = { ATM_IDENTITY = "quality-mgr", ATM_TEAM = "schook" }
 
 ---
 
+## ATM Post-Send Hooks
+
+ATM doesn't push notifications to Codex agents — hooks bridge that gap by running a shell command after every `atm send`.
+
+### Basic hook (fires for all sends)
+
+```toml
+[hooks.post_send]
+command = "tmux send-keys -t 'atm-dev:1.0' '' && sleep 0.5 && tmux send-keys -t 'atm-dev:1.0' 'atm read' Enter"
+```
+
+### Targeted hook (fires only when sending to a specific agent)
+
+```toml
+[hooks.post_send]
+targets = ["comp"]           # omit to fire for all sends
+command = "tmux send-keys -t <pane> '' && sleep 0.5 && tmux send-keys -t <pane> 'atm read' Enter"
+```
+
+### Per-agent hook (named subsection)
+
+```toml
+[hooks.post_send.comp]
+command = "tmux send-keys -t 'atm-dev:1.0' '' && sleep 0.5 && tmux send-keys -t 'atm-dev:1.0' '' Enter"
+```
+
+**Field reference:**
+
+| Field | Description |
+|-------|-------------|
+| `targets` | Agent name(s) that trigger this hook. Omit to fire on all sends |
+| `command` | Shell command to run — typically a tmux nudge so Codex polls its inbox |
+
+**Key points:**
+- `[hooks.post_send]` fires after `atm send` completes
+- The nudge pattern (send empty keys, sleep, send `atm read`) works around Codex not having a push listener
+- Replace `atm-dev:1.0` with the actual tmux target for the Codex pane (`session:window.pane`)
+
+---
+
 ## How agent identity works
 
 rmux distinguishes two roles based on `ATM_IDENTITY`:
