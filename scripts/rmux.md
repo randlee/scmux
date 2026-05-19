@@ -377,6 +377,10 @@ All `.atm.toml` files with `[rmux]` sections currently configured on this machin
 | `~/Documents/github-radiant/XCore/.atm.toml` | `nuget-x` | nuget-x | team-lead, cx, arch-ann |
 | `~/Documents/p3-documentation/.atm.toml` | `p3-doc` | p3-doc | arch-p3, codex-p3, qa-p3, nuget-p3 |
 | `~/Documents/github/raptor/.atm.toml` | `raptor` | raptor | team-lead, crap, quality-mgr |
+| `~/Documents/develop/CreateBranchForAllRepos/.atm.toml` | `nuget-int` | nuget-int | team-lead, cnug, qa |
+| `~/Documents/github/sc-lint/.atm.toml` | `sc-lint` | sc-lint | team-lead, clint, quality-mgr |
+| `~/Documents/github/roslyn-lint/.atm.toml` | `roslyn-lint` | roslyn-lint | team-lead, crl, quality-mgr |
+| `~/Documents/github-radiant/sequencing/.atm.toml` | `sequencing` | sequencing | team-lead, cseq, quality-mgr |
 
 To launch any session:
 ```bash
