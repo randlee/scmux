@@ -1876,6 +1876,7 @@ async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
     let _guard = env_lock().lock().await;
     let script = write_script("#!/bin/sh\nexit 0\n");
     let prev = set_env_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().as_ref());
+    let prev_iterm = set_env_var("SCMUX_ITERM_INSTALLED", "1");
 
     let response = h
         .client
@@ -1885,6 +1886,7 @@ async fn t_a_09_post_sessions_name_jump_returns_ok_true_when_iterm2_launched() {
         .await
         .expect("jump request");
     restore_env_var("SCMUX_OSASCRIPT_BIN", prev);
+    restore_env_var("SCMUX_ITERM_INSTALLED", prev_iterm);
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let body: Value = response.json().await.expect("json");

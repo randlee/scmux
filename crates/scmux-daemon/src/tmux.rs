@@ -160,7 +160,14 @@ pub async fn jump_session(
             }
         };
         let escaped_command = apple_script_escape(&command);
-        if terminal.eq_ignore_ascii_case("iterm2") {
+        // AppleScript against iTerm2 only compiles when iTerm2 is installed
+        // (a missing app means a missing scripting dictionary, surfacing as a
+        // bare osascript syntax error), and any Apple Event sent from a
+        // launchd daemon additionally needs a TCC Automation grant. Try
+        // iTerm2 only when it is actually installed; otherwise (or on
+        // failure) fall back to opening a .command file via LaunchServices,
+        // which sends no Apple Events and needs no grant.
+        if terminal.eq_ignore_ascii_case("iterm2") && iterm2_installed() {
             let script = format!(
                 "tell application \"iTerm2\"\n  create window with default profile\n  tell current session of current window\n    write text \"{escaped_command}\"\n  end tell\nend tell"
             );
@@ -168,33 +175,77 @@ pub async fn jump_session(
             if iterm.status.success() {
                 return Ok("launched iTerm2".to_string());
             }
+        }
 
-            let terminal_script = format!(
-                "tell application \"Terminal\"\n  activate\n  do script \"{escaped_command}\"\nend tell"
-            );
-            let fallback = run_applescript(&terminal_script).await?;
-            if fallback.status.success() {
-                return Ok("launched Terminal (iTerm2 unavailable)".to_string());
+        match launch_via_command_file(&destination.session, &command).await {
+            Ok(()) => Ok("launched Terminal".to_string()),
+            Err(open_err) => {
+                // Last resort: classic AppleScript path (works when the user
+                // has granted the daemon Automation access to Terminal).
+                let script = format!(
+                    "tell application \"Terminal\"\n  activate\n  do script \"{escaped_command}\"\nend tell"
+                );
+                let output = run_applescript(&script).await?;
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "failed to launch Terminal via .command file ({open_err}) and via AppleScript ({})",
+                        applescript_error(&output, "Terminal")
+                    );
+                }
+                Ok("launched Terminal (AppleScript)".to_string())
             }
-            anyhow::bail!(
-                "failed to launch iTerm2 ({}) and Terminal fallback ({})",
-                applescript_error(&iterm, "iTerm2"),
-                applescript_error(&fallback, "Terminal")
-            );
         }
-
-        let script = format!(
-            "tell application \"Terminal\"\n  activate\n  do script \"{escaped_command}\"\nend tell"
-        );
-        let output = run_applescript(&script).await?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "failed to launch Terminal ({})",
-                applescript_error(&output, "Terminal")
-            );
-        }
-        Ok("launched Terminal".to_string())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn iterm2_installed() -> bool {
+    // Test/ops override: "1"/"0" forces the answer without touching the disk.
+    if let Ok(forced) = std::env::var("SCMUX_ITERM_INSTALLED") {
+        return forced == "1";
+    }
+    if std::path::Path::new("/Applications/iTerm.app").exists() {
+        return true;
+    }
+    match std::env::var("HOME") {
+        Ok(home) => std::path::Path::new(&format!("{home}/Applications/iTerm.app")).exists(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_bin() -> String {
+    std::env::var("SCMUX_OPEN_BIN").unwrap_or_else(|_| "/usr/bin/open".to_string())
+}
+
+/// Launch Terminal by opening an executable `.command` file through
+/// LaunchServices. Unlike `osascript`, `open` sends no Apple Events, so it
+/// works from a launchd daemon without any TCC Automation grant.
+#[cfg(target_os = "macos")]
+async fn launch_via_command_file(session: &str, command: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let safe_name: String = session
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let dir = std::env::temp_dir().join("scmux-jump");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("attach-{safe_name}.command"));
+
+    let mut file = std::fs::File::create(&path)?;
+    writeln!(file, "#!/bin/zsh")?;
+    writeln!(file, "exec {command}")?;
+    drop(file);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+
+    let out = Command::new(open_bin()).arg(&path).output().await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        anyhow::bail!("open {} failed: {stderr}", path.display());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -498,12 +549,14 @@ exit 1
     async fn host_qualified_jump_emits_ssh_before_tmux_attach() {
         let _guard = with_env_lock();
         let output = tempfile::NamedTempFile::new().expect("output file");
+        // Capture the launched .command file's contents instead of Apple Events.
         let script = write_script(&format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\ncat \"$1\" > '{}'\n",
             output.path().display()
         ));
         // SAFETY: test-only env mutation under global lock.
-        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_OPEN_BIN", script.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_ITERM_INSTALLED", "0") };
 
         jump_session(
             HostTarget::Local,
@@ -514,8 +567,9 @@ exit 1
         .expect("jump command");
 
         // SAFETY: test teardown under global lock.
-        unsafe { std::env::remove_var("SCMUX_OSASCRIPT_BIN") };
-        let args = std::fs::read_to_string(output.path()).expect("captured osascript args");
+        unsafe { std::env::remove_var("SCMUX_OPEN_BIN") };
+        unsafe { std::env::remove_var("SCMUX_ITERM_INSTALLED") };
+        let args = std::fs::read_to_string(output.path()).expect("captured .command contents");
         assert!(args.contains("ssh aidwlead@scmux-remote-test.invalid tmux attach -t aidw-dev"));
         assert!(!args.contains("tmux attach -t aidw-dev@aidwlead@"));
     }
@@ -529,12 +583,14 @@ exit 1
     async fn local_jump_uses_operating_system_without_ssh() {
         let _guard = with_env_lock();
         let output = tempfile::NamedTempFile::new().expect("output file");
+        // Capture the launched .command file's contents instead of Apple Events.
         let script = write_script(&format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\ncat \"$1\" > '{}'\n",
             output.path().display()
         ));
         // SAFETY: test-only env mutation under global lock.
-        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_OPEN_BIN", script.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_ITERM_INSTALLED", "0") };
 
         jump_session(
             HostTarget::Remote {
@@ -548,8 +604,9 @@ exit 1
         .expect("local jump command");
 
         // SAFETY: test teardown under global lock.
-        unsafe { std::env::remove_var("SCMUX_OSASCRIPT_BIN") };
-        let args = std::fs::read_to_string(output.path()).expect("captured osascript args");
+        unsafe { std::env::remove_var("SCMUX_OPEN_BIN") };
+        unsafe { std::env::remove_var("SCMUX_ITERM_INSTALLED") };
+        let args = std::fs::read_to_string(output.path()).expect("captured .command contents");
         assert!(args.contains("tmux attach -t hitl-dev"));
         assert!(!args.contains("ssh "));
     }
@@ -563,17 +620,18 @@ exit 1
     async fn missing_iterm_falls_back_to_terminal_without_networking() {
         let _guard = with_env_lock();
         let output = tempfile::NamedTempFile::new().expect("output file");
+        // iTerm2 forced absent: jump must go straight to the .command file
+        // path (no Apple Events at all). The fake osascript would fail loudly
+        // if it were ever invoked.
+        let osascript = write_script("#!/bin/sh\necho 'osascript must not run' 1>&2; exit 1\n");
         let script = write_script(&format!(
-            r#"#!/bin/sh
-case "$2" in
-  *iTerm2*) echo "iTerm2 not installed" 1>&2; exit 1 ;;
-esac
-printf '%s\n' "$@" > '{}'
-"#,
+            "#!/bin/sh\ncat \"$1\" > '{}'\n",
             output.path().display()
         ));
         // SAFETY: test-only env mutation under global lock.
-        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", osascript.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_OPEN_BIN", script.to_string_lossy().to_string()) };
+        unsafe { std::env::set_var("SCMUX_ITERM_INSTALLED", "0") };
 
         let message = jump_session(HostTarget::Local, "hitl-dev@local", "iterm2")
             .await
@@ -581,9 +639,10 @@ printf '%s\n' "$@" > '{}'
 
         // SAFETY: test teardown under global lock.
         unsafe { std::env::remove_var("SCMUX_OSASCRIPT_BIN") };
-        assert_eq!(message, "launched Terminal (iTerm2 unavailable)");
-        let args = std::fs::read_to_string(output.path()).expect("captured osascript args");
-        assert!(args.contains("tell application \"Terminal\""));
+        unsafe { std::env::remove_var("SCMUX_OPEN_BIN") };
+        unsafe { std::env::remove_var("SCMUX_ITERM_INSTALLED") };
+        assert_eq!(message, "launched Terminal");
+        let args = std::fs::read_to_string(output.path()).expect("captured .command contents");
         assert!(args.contains("tmux attach -t hitl-dev"));
         assert!(!args.contains("ssh "));
     }
