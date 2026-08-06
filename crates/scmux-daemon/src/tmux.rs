@@ -11,10 +11,16 @@ pub struct PaneInfo {
     pub current_command: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostTarget {
     Local,
     Remote { user: String, host: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JumpDestination {
+    session: String,
+    host: HostTarget,
 }
 
 /// Returns set of live tmux session names mapped to their panes.
@@ -128,7 +134,7 @@ pub async fn jump_session(
     session: &str,
     terminal: &str,
 ) -> anyhow::Result<String> {
-    if !terminal.eq_ignore_ascii_case("iterm2") {
+    if !terminal.eq_ignore_ascii_case("iterm2") && !terminal.eq_ignore_ascii_case("terminal") {
         anyhow::bail!("unsupported terminal '{terminal}'");
     }
 
@@ -141,8 +147,9 @@ pub async fn jump_session(
 
     #[cfg(target_os = "macos")]
     {
-        let escaped_session = shell_escape(session);
-        let command = match host {
+        let destination = resolve_jump_destination(host, session, &local_host_aliases());
+        let escaped_session = shell_escape(&destination.session);
+        let command = match destination.host {
             HostTarget::Local => format!("tmux attach -t {escaped_session}"),
             HostTarget::Remote { user, host } => {
                 format!(
@@ -152,28 +159,145 @@ pub async fn jump_session(
                 )
             }
         };
-        let script = format!(
-            "tell application \"iTerm2\"\n  create window with default profile\n  tell current session of current window\n    write text \"{}\"\n  end tell\nend tell",
-            apple_script_escape(&command)
-        );
+        let escaped_command = apple_script_escape(&command);
+        if terminal.eq_ignore_ascii_case("iterm2") {
+            let script = format!(
+                "tell application \"iTerm2\"\n  create window with default profile\n  tell current session of current window\n    write text \"{escaped_command}\"\n  end tell\nend tell"
+            );
+            let iterm = run_applescript(&script).await?;
+            if iterm.status.success() {
+                return Ok("launched iTerm2".to_string());
+            }
 
-        let out = Command::new(osascript_bin())
-            .args(["-e", script.as_str()])
-            .output()
-            .await?;
-
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let message = if err.is_empty() {
-                "osascript failed to launch iTerm2".to_string()
-            } else {
-                format!("osascript failed: {err}")
-            };
-            anyhow::bail!(message);
+            let terminal_script = format!(
+                "tell application \"Terminal\"\n  activate\n  do script \"{escaped_command}\"\nend tell"
+            );
+            let fallback = run_applescript(&terminal_script).await?;
+            if fallback.status.success() {
+                return Ok("launched Terminal (iTerm2 unavailable)".to_string());
+            }
+            anyhow::bail!(
+                "failed to launch iTerm2 ({}) and Terminal fallback ({})",
+                applescript_error(&iterm, "iTerm2"),
+                applescript_error(&fallback, "Terminal")
+            );
         }
 
-        Ok("launched iTerm2".to_string())
+        let script = format!(
+            "tell application \"Terminal\"\n  activate\n  do script \"{escaped_command}\"\nend tell"
+        );
+        let output = run_applescript(&script).await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "failed to launch Terminal ({})",
+                applescript_error(&output, "Terminal")
+            );
+        }
+        Ok("launched Terminal".to_string())
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn run_applescript(script: &str) -> anyhow::Result<std::process::Output> {
+    Ok(Command::new(osascript_bin())
+        .args(["-e", script])
+        .output()
+        .await?)
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_error(output: &std::process::Output, application: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("osascript could not launch {application}")
+    } else {
+        stderr
+    }
+}
+
+/// Resolve an optional host-qualified team name.
+///
+/// Supported forms are `<session>@local` and `<session>@<ssh-user>@<host>`.
+/// The qualifier is routing metadata only and is removed from the tmux session
+/// name. Unqualified names retain the host selected from the scmux registry.
+fn resolve_jump_destination(
+    configured_host: HostTarget,
+    qualified_name: &str,
+    local_aliases: &[String],
+) -> JumpDestination {
+    if let Some(session) = qualified_name.strip_suffix("@local") {
+        if !session.is_empty() && !session.contains('@') {
+            return JumpDestination {
+                session: session.to_string(),
+                host: HostTarget::Local,
+            };
+        }
+    }
+
+    if let Some((session_and_user, host)) = qualified_name.rsplit_once('@') {
+        if let Some((session, user)) = session_and_user.rsplit_once('@') {
+            if !session.is_empty() && !user.is_empty() && !host.is_empty() {
+                let host_target = if host_matches_local(host, local_aliases) {
+                    HostTarget::Local
+                } else {
+                    HostTarget::Remote {
+                        user: user.to_string(),
+                        host: host.to_string(),
+                    }
+                };
+                return JumpDestination {
+                    session: session.to_string(),
+                    host: host_target,
+                };
+            }
+        }
+    }
+
+    JumpDestination {
+        session: qualified_name.to_string(),
+        host: configured_host,
+    }
+}
+
+fn local_host_aliases() -> Vec<String> {
+    let mut aliases = ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !hostname.is_empty() {
+                aliases.push(hostname);
+            }
+        }
+    }
+    aliases
+}
+
+fn host_matches_local(host: &str, local_aliases: &[String]) -> bool {
+    let literal = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if matches!(
+        literal.as_str(),
+        "local" | "localhost" | "127.0.0.1" | "::1"
+    ) {
+        return true;
+    }
+    let expected = normalized_host(host);
+    local_aliases
+        .iter()
+        .any(|alias| normalized_host(alias) == expected)
+}
+
+fn normalized_host(host: &str) -> String {
+    host.trim()
+        .trim_end_matches('.')
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn tmux_bin() -> String {
@@ -198,6 +322,79 @@ fn shell_escape(input: &str) -> String {
         return input.to_string();
     }
     format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod jump_tests {
+    use super::*;
+
+    fn remote() -> HostTarget {
+        HostTarget::Remote {
+            user: "configured-user".to_string(),
+            host: "configured-host".to_string(),
+        }
+    }
+
+    #[test]
+    fn unqualified_name_retains_configured_host() {
+        let destination = resolve_jump_destination(remote(), "aidw-dev", &[]);
+        assert_eq!(destination.session, "aidw-dev");
+        assert!(matches!(
+            destination.host,
+            HostTarget::Remote { ref user, ref host }
+                if user == "configured-user" && host == "configured-host"
+        ));
+    }
+
+    #[test]
+    fn local_qualifier_selects_local_host_and_strips_routing_suffix() {
+        let destination = resolve_jump_destination(remote(), "hitl-dev@local", &[]);
+        assert_eq!(destination.session, "hitl-dev");
+        assert!(matches!(destination.host, HostTarget::Local));
+    }
+
+    #[test]
+    fn remote_qualifier_builds_ssh_target_and_strips_routing_suffix() {
+        let destination = resolve_jump_destination(
+            HostTarget::Local,
+            "aidw-dev@aidwlead@HITL2",
+            &["Radiant-MTP-MacBook-Pro.local".to_string()],
+        );
+        assert_eq!(destination.session, "aidw-dev");
+        assert!(matches!(
+            destination.host,
+            HostTarget::Remote { ref user, ref host }
+                if user == "aidwlead" && host == "HITL2"
+        ));
+    }
+
+    #[test]
+    fn computer_id_matching_current_hostname_skips_ssh() {
+        let destination = resolve_jump_destination(
+            remote(),
+            "aidw-dev@aidwlead@HITL2",
+            &["hitl2.local".to_string()],
+        );
+        assert_eq!(destination.session, "aidw-dev");
+        assert!(matches!(destination.host, HostTarget::Local));
+    }
+
+    #[test]
+    fn loopback_computer_ids_never_use_ssh() {
+        for computer_id in ["local", "localhost", "127.0.0.1", "::1"] {
+            let name = format!("aidw-dev@aidwlead@{computer_id}");
+            let destination = resolve_jump_destination(remote(), &name, &[]);
+            assert_eq!(destination.session, "aidw-dev");
+            assert!(matches!(destination.host, HostTarget::Local));
+        }
+    }
+
+    #[test]
+    fn malformed_qualifier_remains_a_legacy_session_name() {
+        let destination = resolve_jump_destination(HostTarget::Local, "aidw-dev@HITL2", &[]);
+        assert_eq!(destination.session, "aidw-dev@HITL2");
+        assert!(matches!(destination.host, HostTarget::Local));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -290,5 +487,104 @@ exit 1
 
         // SAFETY: test teardown under global lock.
         unsafe { std::env::remove_var("SCMUX_TMUX_BIN") };
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test-only process environment is serialized across the awaited launch"
+    )]
+    async fn host_qualified_jump_emits_ssh_before_tmux_attach() {
+        let _guard = with_env_lock();
+        let output = tempfile::NamedTempFile::new().expect("output file");
+        let script = write_script(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            output.path().display()
+        ));
+        // SAFETY: test-only env mutation under global lock.
+        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().to_string()) };
+
+        jump_session(
+            HostTarget::Local,
+            "aidw-dev@aidwlead@scmux-remote-test.invalid",
+            "iterm2",
+        )
+        .await
+        .expect("jump command");
+
+        // SAFETY: test teardown under global lock.
+        unsafe { std::env::remove_var("SCMUX_OSASCRIPT_BIN") };
+        let args = std::fs::read_to_string(output.path()).expect("captured osascript args");
+        assert!(args.contains("ssh aidwlead@scmux-remote-test.invalid tmux attach -t aidw-dev"));
+        assert!(!args.contains("tmux attach -t aidw-dev@aidwlead@"));
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test-only process environment is serialized across the awaited launch"
+    )]
+    async fn local_jump_uses_operating_system_without_ssh() {
+        let _guard = with_env_lock();
+        let output = tempfile::NamedTempFile::new().expect("output file");
+        let script = write_script(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            output.path().display()
+        ));
+        // SAFETY: test-only env mutation under global lock.
+        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().to_string()) };
+
+        jump_session(
+            HostTarget::Remote {
+                user: "unused".to_string(),
+                host: "unused".to_string(),
+            },
+            "hitl-dev@unused@localhost",
+            "iterm2",
+        )
+        .await
+        .expect("local jump command");
+
+        // SAFETY: test teardown under global lock.
+        unsafe { std::env::remove_var("SCMUX_OSASCRIPT_BIN") };
+        let args = std::fs::read_to_string(output.path()).expect("captured osascript args");
+        assert!(args.contains("tmux attach -t hitl-dev"));
+        assert!(!args.contains("ssh "));
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test-only process environment is serialized across the awaited launch"
+    )]
+    async fn missing_iterm_falls_back_to_terminal_without_networking() {
+        let _guard = with_env_lock();
+        let output = tempfile::NamedTempFile::new().expect("output file");
+        let script = write_script(&format!(
+            r#"#!/bin/sh
+case "$2" in
+  *iTerm2*) echo "iTerm2 not installed" 1>&2; exit 1 ;;
+esac
+printf '%s\n' "$@" > '{}'
+"#,
+            output.path().display()
+        ));
+        // SAFETY: test-only env mutation under global lock.
+        unsafe { std::env::set_var("SCMUX_OSASCRIPT_BIN", script.to_string_lossy().to_string()) };
+
+        let message = jump_session(HostTarget::Local, "hitl-dev@local", "iterm2")
+            .await
+            .expect("Terminal fallback");
+
+        // SAFETY: test teardown under global lock.
+        unsafe { std::env::remove_var("SCMUX_OSASCRIPT_BIN") };
+        assert_eq!(message, "launched Terminal (iTerm2 unavailable)");
+        let args = std::fs::read_to_string(output.path()).expect("captured osascript args");
+        assert!(args.contains("tell application \"Terminal\""));
+        assert!(args.contains("tmux attach -t hitl-dev"));
+        assert!(!args.contains("ssh "));
     }
 }

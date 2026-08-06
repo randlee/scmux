@@ -358,6 +358,65 @@ async fn t_lc_01_post_sessions_name_start_launches_tmux_from_config() {
 }
 
 #[tokio::test]
+async fn t_lc_10_external_launcher_is_visible_and_owns_stop_lifecycle() {
+    let h = ApiHarness::new().await;
+    let script = write_script("#!/bin/sh\nexit 0\n");
+    let root_path = h._tmp.path().to_string_lossy().to_string();
+    let response = h
+        .client
+        .post(format!("{}/sessions", h.base_url))
+        .json(&json!({
+            "name": "external-team",
+            "project": "demo",
+            "config_json": {
+                "session_name": "external-team",
+                "root_path": root_path,
+                "launch": {"command": [script.to_string_lossy(), "{team_name}"]},
+                "panes": [{"name": "agent"}]
+            },
+            "auto_start": false
+        }))
+        .send()
+        .await
+        .expect("create external session");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let sessions: Vec<Value> = h
+        .client
+        .get(format!("{}/sessions", h.base_url))
+        .send()
+        .await
+        .expect("list sessions")
+        .json()
+        .await
+        .expect("session JSON");
+    assert_eq!(sessions[0]["launch_mode"], "external");
+
+    let start = h
+        .client
+        .post(format!("{}/sessions/external-team/start", h.base_url))
+        .send()
+        .await
+        .expect("start external session");
+    assert_eq!(start.status(), reqwest::StatusCode::OK);
+    let start_body: Value = start.json().await.expect("start JSON");
+    assert_eq!(
+        start_body["message"],
+        "session 'external-team' started via external"
+    );
+
+    let stop = h
+        .client
+        .post(format!("{}/sessions/external-team/stop", h.base_url))
+        .send()
+        .await
+        .expect("stop external session");
+    assert_eq!(stop.status(), reqwest::StatusCode::CONFLICT);
+    let stop_body: Value = stop.json().await.expect("stop JSON");
+    assert_eq!(stop_body["code"], "external_lifecycle");
+}
+
+#[tokio::test]
 async fn t_lc_07_start_rejects_invalid_crew_variant_binding() {
     let h = ApiHarness::new().await;
     h.create_session("crew-invalid").await;
