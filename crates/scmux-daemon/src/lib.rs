@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod definition_writer;
 pub mod hosts;
+pub mod launcher;
 pub mod logging;
 pub mod runtime;
 mod start_cycle;
