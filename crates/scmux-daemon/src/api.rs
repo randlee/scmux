@@ -27,6 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/react.min.js", get(react_js))
         .route("/react-dom.min.js", get(react_dom_js))
         .route("/health", get(health))
+        .route("/api/clients", get(api_clients))
         .route("/hosts", get(list_hosts).post(create_host))
         .route(
             "/hosts/:id",
@@ -560,6 +561,33 @@ async fn health(
         recent_errors: health_state.recent_errors,
         db_path,
         version: env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+#[derive(Serialize)]
+struct ApiClientsResponse {
+    active: bool,
+    last_poll: String,
+}
+
+async fn api_clients(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiClientsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let last_access_millis = state.last_api_access.load(Ordering::Relaxed);
+    let current_millis = state.monotonic_millis();
+    let elapsed_millis = current_millis.saturating_sub(last_access_millis);
+
+    // Poll interval is 15s, so 2x window is 30s (30000ms)
+    let window_millis = DEFAULT_POLL_INTERVAL_SECS * 2 * 1000;
+    let active = elapsed_millis < window_millis;
+
+    // Convert monotonic millis to UTC timestamp
+    let last_poll_instant = state.started_at + std::time::Duration::from_millis(last_access_millis);
+    let last_poll_utc = chrono::Utc::now() - (std::time::Instant::now() - last_poll_instant);
+
+    Ok(Json(ApiClientsResponse {
+        active,
+        last_poll: last_poll_utc.to_rfc3339(),
     }))
 }
 
