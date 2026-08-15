@@ -55,6 +55,9 @@ Adds a new agent pane to the running session's `spare` window (created if it doe
 
 ```bash
 rmux codex   my-agent          # spawn codex --yolo pane named my-agent
+rmux luna    my-agent          # spawn codex --model luna pane
+rmux terra   my-agent          # spawn codex --model terra pane
+rmux sol     my-agent          # spawn codex --model sol pane
 rmux sonnet  my-agent          # spawn claude --model sonnet pane
 rmux haiku   my-agent          # spawn claude --model haiku pane
 rmux opus    my-agent          # spawn claude --model opus pane
@@ -66,7 +69,7 @@ rmux gemini  my-agent          # spawn gemini pane
 ```
 --config <path>   Config file to read (default: .atm.toml in CWD)
 --team <name>     Override ATM_TEAM
---model <name>    Override model for claude agents
+--model <name>    Override model for codex, claude, or hermes agents
 --window <name>   Target window name (default: spare)
 --dry-run         Preview without executing
 ```
@@ -75,6 +78,10 @@ rmux gemini  my-agent          # spawn gemini pane
 ```bash
 # From inside a schook pane — spawns into schook's spare window
 rmux codex spare-dev
+
+# Select a Codex model directly, or override it explicitly
+rmux luna reviewer
+rmux codex reviewer --model terra
 
 # Override team and window
 rmux sonnet reviewer --team schook --window overflow

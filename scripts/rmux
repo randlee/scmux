@@ -6,7 +6,7 @@
 # Install: cp scripts/rmux ~/.local/bin/rmux && chmod +x ~/.local/bin/rmux
 # Usage:   rmux [--config <path>] [--dry-run] [-v] [-h]
 #          rmux launch <pane-name> [--config <path>] [--dry-run] [-v]
-#          rmux codex|claude|sonnet|haiku|opus|gemini|hermes <name> [OPTIONS]
+#          rmux codex|luna|terra|sol|claude|sonnet|haiku|opus|gemini|hermes <name> [OPTIONS]
 
 setopt ERR_EXIT PIPE_FAIL NO_UNSET
 
@@ -16,7 +16,7 @@ trap '(( $? )) && echo "rmux: error — run with -v for details" >&2' EXIT
 # ── Spawn subcommand ──────────────────────────────────────────────────
 # Detect: first arg is a known agent type and second arg is a name
 typeset -a KNOWN_AGENT_TYPES
-KNOWN_AGENT_TYPES=(codex claude sonnet haiku opus gemini hermes)
+KNOWN_AGENT_TYPES=(codex luna terra sol claude sonnet haiku opus gemini hermes)
 
 if [[ $# -ge 2 && ${KNOWN_AGENT_TYPES[(I)$1]} -gt 0 ]]; then
   SPAWN_TYPE="$1"
@@ -69,9 +69,12 @@ print(json.dumps({'session': rmux.get('session', 'default'), 'team': core.get('d
   [[ "$SPAWN_DIR" == "." ]] && SPAWN_DIR="$(pwd)"
   SPAWN_ENV_FILE="${SPAWN_DIR}/.env"
 
-  # Resolve model for claude agents
+  # Resolve the model implied by model-specific agent aliases.
   case "$SPAWN_TYPE" in
     codex|gemini) ;;
+    luna)          [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="luna" ;;
+    terra)         [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="terra" ;;
+    sol)           [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="sol" ;;
     claude|sonnet) [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="sonnet" ;;
     haiku)         [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="haiku" ;;
     opus)          [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="opus" ;;
@@ -102,8 +105,11 @@ except Exception:
   SPAWN_INIT_CMD="${SPAWN_INIT_CMD}; export ATM_IDENTITY=${(q)SPAWN_NAME}; export ATM_TEAM=${(q)SPAWN_TEAM}"
 
   case "$SPAWN_TYPE" in
-    codex)
+    codex|luna|terra|sol)
       SPAWN_FULL_CMD="codex -c features.codex_hooks=true --yolo"
+      if [[ -n "$SPAWN_MODEL" ]]; then
+        SPAWN_FULL_CMD+=" --model ${(q)SPAWN_MODEL}"
+      fi
       ;;
     gemini)
       SPAWN_FULL_CMD="gemini"
@@ -199,7 +205,7 @@ Commands:
   launch <pane-name>  Launch a single pane by name into the running session.
                       If the pane exists (by title), re-use it.
                       If the pane is missing, create it in the correct window.
-  codex|claude|sonnet|haiku|opus|gemini|hermes <name>
+  codex|luna|terra|sol|claude|sonnet|haiku|opus|gemini|hermes <name>
                       Spawn a new agent in the spare window of the running session.
 
 Options:
@@ -210,7 +216,7 @@ Options:
 
 Spawn options:
   --team <name>     Override ATM_TEAM (default: [core] default_team)
-  --model <name>    Override model (claude and hermes agents)
+  --model <name>    Override model (codex, claude, and hermes agents)
   --window <name>   Target window name (default: spare)
 EOF
   exit 0
