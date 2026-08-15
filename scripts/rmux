@@ -149,7 +149,16 @@ except Exception:
   esac
 
   if [[ -n "$SPAWN_PROMPT_PATH" ]]; then
-    SPAWN_FULL_CMD+=' "$(command cat -- "$RMUX_AGENT_PROMPT_FILE")"'
+    case "$SPAWN_TYPE" in
+      codex|luna|terra|sol)
+        # Agent prompts commonly begin with YAML frontmatter (`---`), which
+        # Codex would otherwise parse as another option.
+        SPAWN_FULL_CMD+=' -- "$(command cat -- "$RMUX_AGENT_PROMPT_FILE")"'
+        ;;
+      *)
+        SPAWN_FULL_CMD+=' "$(command cat -- "$RMUX_AGENT_PROMPT_FILE")"'
+        ;;
+    esac
   fi
 
   if $SPAWN_DRY_RUN; then

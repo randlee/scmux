@@ -98,7 +98,8 @@ Agent identity is set via `ATM_IDENTITY=<name>` and `ATM_TEAM=<team>` env vars. 
 
 `--prompt <path>` requires a readable text file. `rmux` resolves the path before
 launching and passes the file contents as the agent's initial prompt; it does not
-pass the pathname itself as a task.
+pass the pathname itself as a task. For Codex, `rmux` inserts `--` before that
+text so YAML-frontmatter prompts beginning with `---` cannot be parsed as flags.
 
 ---
 
