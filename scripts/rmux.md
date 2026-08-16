@@ -70,7 +70,6 @@ rmux gemini  my-agent          # spawn gemini pane
 --config <path>   Config file to read (default: .atm.toml in CWD)
 --team <name>     Override ATM_TEAM
 --model <name>    Override model for codex, claude, or hermes agents
---prompt <path>   Read the initial agent prompt from a text file
 --window <name>   Target window name (default: spare)
 --dry-run         Preview without executing
 ```
@@ -84,9 +83,6 @@ rmux codex spare-dev
 rmux luna reviewer
 rmux codex reviewer --model terra
 
-# Give the agent the contents of a durable prompt file as its initial task
-rmux luna publisher --prompt .claude/agents/publisher.md
-
 # Override team and window
 rmux sonnet reviewer --team schook --window overflow
 
@@ -95,11 +91,6 @@ rmux haiku triage --dry-run
 ```
 
 Agent identity is set via `ATM_IDENTITY=<name>` and `ATM_TEAM=<team>` env vars. Claude agents additionally receive `--agent-id`, `--agent-name`, `--team-name`, and `--parent-session-id` flags for team communication.
-
-`--prompt <path>` requires a readable text file. `rmux` resolves the path before
-launching and passes the file contents as the agent's initial prompt; it does not
-pass the pathname itself as a task. For Codex, `rmux` inserts `--` before that
-text so YAML-frontmatter prompts beginning with `---` cannot be parsed as flags.
 
 ---
 

@@ -26,7 +26,6 @@ if [[ $# -ge 2 && ${KNOWN_AGENT_TYPES[(I)$1]} -gt 0 ]]; then
   SPAWN_CONFIG=".atm.toml"
   SPAWN_TEAM=""
   SPAWN_MODEL=""
-  SPAWN_PROMPT_PATH=""
   SPAWN_WINDOW="spare"
   SPAWN_DRY_RUN=false
 
@@ -35,7 +34,6 @@ if [[ $# -ge 2 && ${KNOWN_AGENT_TYPES[(I)$1]} -gt 0 ]]; then
       --config)  SPAWN_CONFIG="$2"; shift 2 ;;
       --team)    SPAWN_TEAM="$2";   shift 2 ;;
       --model)   SPAWN_MODEL="$2";  shift 2 ;;
-      --prompt)  SPAWN_PROMPT_PATH="$2"; shift 2 ;;
       --window)  SPAWN_WINDOW="$2"; shift 2 ;;
       --dry-run) SPAWN_DRY_RUN=true; shift ;;
       *) echo "rmux: unknown spawn option '$1'" >&2; exit 1 ;;
@@ -71,16 +69,6 @@ print(json.dumps({'session': rmux.get('session', 'default'), 'team': core.get('d
   [[ "$SPAWN_DIR" == "." ]] && SPAWN_DIR="$(pwd)"
   SPAWN_ENV_FILE="${SPAWN_DIR}/.env"
 
-  if [[ -n "$SPAWN_PROMPT_PATH" ]]; then
-    if [[ "$SPAWN_PROMPT_PATH" != /* ]]; then
-      SPAWN_PROMPT_PATH="${SPAWN_DIR}/${SPAWN_PROMPT_PATH}"
-    fi
-    SPAWN_PROMPT_PATH="${SPAWN_PROMPT_PATH:A}"
-    if [[ ! -f "$SPAWN_PROMPT_PATH" || ! -r "$SPAWN_PROMPT_PATH" ]]; then
-      echo "rmux: prompt file is not readable: $SPAWN_PROMPT_PATH" >&2; exit 1
-    fi
-  fi
-
   # Resolve the model implied by model-specific agent aliases.
   case "$SPAWN_TYPE" in
     codex|gemini) ;;
@@ -115,9 +103,6 @@ except Exception:
     SPAWN_INIT_CMD="${SPAWN_INIT_CMD}; set -a; source ${(q)SPAWN_ENV_FILE}; set +a; hash -r"
   fi
   SPAWN_INIT_CMD="${SPAWN_INIT_CMD}; export ATM_IDENTITY=${(q)SPAWN_NAME}; export ATM_TEAM=${(q)SPAWN_TEAM}"
-  if [[ -n "$SPAWN_PROMPT_PATH" ]]; then
-    SPAWN_INIT_CMD="${SPAWN_INIT_CMD}; export RMUX_AGENT_PROMPT_FILE=${(q)SPAWN_PROMPT_PATH}"
-  fi
 
   case "$SPAWN_TYPE" in
     codex|luna|terra|sol)
@@ -148,19 +133,6 @@ except Exception:
       ;;
   esac
 
-  if [[ -n "$SPAWN_PROMPT_PATH" ]]; then
-    case "$SPAWN_TYPE" in
-      codex|luna|terra|sol)
-        # Agent prompts commonly begin with YAML frontmatter (`---`), which
-        # Codex would otherwise parse as another option.
-        SPAWN_FULL_CMD+=' -- "$(command cat -- "$RMUX_AGENT_PROMPT_FILE")"'
-        ;;
-      *)
-        SPAWN_FULL_CMD+=' "$(command cat -- "$RMUX_AGENT_PROMPT_FILE")"'
-        ;;
-    esac
-  fi
-
   if $SPAWN_DRY_RUN; then
     echo "=== rmux spawn dry-run ==="
     echo "  session: $SPAWN_SESSION"
@@ -169,7 +141,6 @@ except Exception:
     echo "  type:    $SPAWN_TYPE"
     echo "  team:    $SPAWN_TEAM"
     [[ -n "$SPAWN_MODEL" ]] && echo "  model:   $SPAWN_MODEL"
-    [[ -n "$SPAWN_PROMPT_PATH" ]] && echo "  prompt:  $SPAWN_PROMPT_PATH"
     [[ -n "$PARENT_SESSION_ID" ]] && echo "  parent:  $PARENT_SESSION_ID"
     echo "  init:    $SPAWN_INIT_CMD"
     echo "  cmd:     $SPAWN_FULL_CMD"
