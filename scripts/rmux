@@ -71,7 +71,8 @@ print(json.dumps({'session': rmux.get('session', 'default'), 'team': core.get('d
 
   # Resolve the model implied by model-specific agent aliases.
   case "$SPAWN_TYPE" in
-    codex|gemini) ;;
+    codex)         [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="terra" ;;
+    gemini) ;;
     luna)          [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="luna" ;;
     terra)         [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="terra" ;;
     sol)           [[ -z "$SPAWN_MODEL" ]] && SPAWN_MODEL="sol" ;;

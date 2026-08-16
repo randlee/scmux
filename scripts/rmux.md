@@ -54,7 +54,7 @@ Useful for restarting a crashed agent without rebuilding the entire session.
 Adds a new agent pane to the running session's `spare` window (created if it doesn't exist). Team and session are read from the local `.atm.toml`.
 
 ```bash
-rmux codex   my-agent          # spawn codex --yolo pane named my-agent
+rmux codex   my-agent          # spawn codex --model terra pane named my-agent
 rmux luna    my-agent          # spawn codex --model luna pane
 rmux terra   my-agent          # spawn codex --model terra pane
 rmux sol     my-agent          # spawn codex --model sol pane
