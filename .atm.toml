@@ -1,4 +1,4 @@
-[core]
+[atm]
 default_team = "scmux-dev"
 identity = "team-lead"
 
@@ -22,7 +22,7 @@ env = { ATM_IDENTITY = "team-lead", ATM_TEAM = "scmux-dev" }
 
 [[rmux.windows.panes]]
 name = "arch-ctm"
-command = "codex --yolo"
+command = "codex -c features.codex_hooks=true --yolo"
 env = { ATM_IDENTITY = "arch-ctm", ATM_TEAM = "scmux-dev" }
 
 [[rmux.windows]]

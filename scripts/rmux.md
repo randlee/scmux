@@ -54,7 +54,10 @@ Useful for restarting a crashed agent without rebuilding the entire session.
 Adds a new agent pane to the running session's `spare` window (created if it doesn't exist). Team and session are read from the local `.atm.toml`.
 
 ```bash
-rmux codex   my-agent          # spawn codex --yolo pane named my-agent
+rmux codex   my-agent          # spawn codex --model gpt-5.6-terra pane
+rmux luna    my-agent          # spawn codex --model gpt-5.6-luna pane
+rmux terra   my-agent          # spawn codex --model gpt-5.6-terra pane
+rmux sol     my-agent          # spawn codex --model gpt-5.6-sol pane
 rmux sonnet  my-agent          # spawn claude --model sonnet pane
 rmux haiku   my-agent          # spawn claude --model haiku pane
 rmux opus    my-agent          # spawn claude --model opus pane
@@ -68,7 +71,7 @@ rmux hermes  my-agent          # spawn hermes --profile pane
 ```
 --config <path>   Config file to read (default: .atm.toml in CWD)
 --team <name>     Override ATM_TEAM
---model <name>    Override model for claude and hermes agents (claude: sonnet, haiku, opus, fable)
+--model <name>    Override model for codex, claude, and hermes agents (claude: sonnet, haiku, opus, fable)
 --window <name>   Target window name (default: spare)
 --dry-run         Preview without executing
 ```
@@ -218,6 +221,46 @@ env = { ATM_IDENTITY = "quality-mgr", ATM_TEAM = "schook" }
 
 ---
 
+## ATM Post-Send Hooks
+
+ATM doesn't push notifications to Codex agents — hooks bridge that gap by running a shell command after every `atm send`.
+
+### Basic hook (fires for all sends)
+
+```toml
+[hooks.post_send]
+command = "tmux send-keys -t 'atm-dev:1.0' '' && sleep 0.5 && tmux send-keys -t 'atm-dev:1.0' 'atm read' Enter"
+```
+
+### Targeted hook (fires only when sending to a specific agent)
+
+```toml
+[hooks.post_send]
+targets = ["comp"]           # omit to fire for all sends
+command = "tmux send-keys -t <pane> '' && sleep 0.5 && tmux send-keys -t <pane> 'atm read' Enter"
+```
+
+### Per-agent hook (named subsection)
+
+```toml
+[hooks.post_send.comp]
+command = "tmux send-keys -t 'atm-dev:1.0' '' && sleep 0.5 && tmux send-keys -t 'atm-dev:1.0' '' Enter"
+```
+
+**Field reference:**
+
+| Field | Description |
+|-------|-------------|
+| `targets` | Agent name(s) that trigger this hook. Omit to fire on all sends |
+| `command` | Shell command to run — typically a tmux nudge so Codex polls its inbox |
+
+**Key points:**
+- `[hooks.post_send]` fires after `atm send` completes
+- The nudge pattern (send empty keys, sleep, send `atm read`) works around Codex not having a push listener
+- Replace `atm-dev:1.0` with the actual tmux target for the Codex pane (`session:window.pane`)
+
+---
+
 ## How agent identity works
 
 rmux distinguishes two roles based on `ATM_IDENTITY`:
@@ -338,6 +381,11 @@ All `.atm.toml` files with `[rmux]` sections currently configured on this machin
 | `~/Documents/github-radiant/io/.atm.toml` | `io-dev` | io-dev | team-lead, arch-cio, arch-udp, cin, arch-in |
 | `~/Documents/github-radiant/XCore/.atm.toml` | `nuget-x` | nuget-x | team-lead, cx, arch-ann |
 | `~/Documents/p3-documentation/.atm.toml` | `p3-doc` | p3-doc | arch-p3, codex-p3, qa-p3, nuget-p3 |
+| `~/Documents/github/raptor/.atm.toml` | `raptor` | raptor | team-lead, crap, quality-mgr |
+| `~/Documents/develop/CreateBranchForAllRepos/.atm.toml` | `nuget-int` | nuget-int | team-lead, cnug, qa |
+| `~/Documents/github/sc-lint/.atm.toml` | `sc-lint` | sc-lint | team-lead, clint, quality-mgr |
+| `~/Documents/github/roslyn-lint/.atm.toml` | `roslyn-lint` | roslyn-lint | team-lead, crl, quality-mgr |
+| `~/Documents/github-radiant/sequencing/.atm.toml` | `sequencing` | sequencing | team-lead, cseq, quality-mgr |
 
 To launch any session:
 ```bash
