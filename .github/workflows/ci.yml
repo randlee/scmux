@@ -139,6 +139,9 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+      - name: Test rmux agent aliases
+        run: zsh scripts/test-rmux-spawn.zsh
+
   perf-gate:
     name: perf-gate (release benchmarks)
     needs: [clippy]
