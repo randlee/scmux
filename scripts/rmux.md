@@ -54,19 +54,24 @@ Useful for restarting a crashed agent without rebuilding the entire session.
 Adds a new agent pane to the running session's `spare` window (created if it doesn't exist). Team and session are read from the local `.atm.toml`.
 
 ```bash
-rmux codex   my-agent          # spawn codex --yolo pane named my-agent
+rmux codex   my-agent          # spawn codex --model gpt-5.6-terra pane
+rmux luna    my-agent          # spawn codex --model gpt-5.6-luna pane
+rmux terra   my-agent          # spawn codex --model gpt-5.6-terra pane
+rmux sol     my-agent          # spawn codex --model gpt-5.6-sol pane
 rmux sonnet  my-agent          # spawn claude --model sonnet pane
 rmux haiku   my-agent          # spawn claude --model haiku pane
 rmux opus    my-agent          # spawn claude --model opus pane
+rmux fable   my-agent          # spawn claude --model fable pane
 rmux claude  my-agent          # alias for sonnet
 rmux gemini  my-agent          # spawn gemini pane
+rmux hermes  my-agent          # spawn hermes --profile pane
 ```
 
 **Options:**
 ```
 --config <path>   Config file to read (default: .atm.toml in CWD)
 --team <name>     Override ATM_TEAM
---model <name>    Override model for claude agents
+--model <name>    Override model for codex, claude, and hermes agents (claude: sonnet, haiku, opus, fable)
 --window <name>   Target window name (default: spare)
 --dry-run         Preview without executing
 ```
@@ -198,7 +203,7 @@ env = { ATM_IDENTITY = "quality-mgr", ATM_TEAM = "schook" }
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Pane display name and tmux pane title |
-| `model` | string | Claude model: `sonnet`, `haiku`, `opus`. When set, launches claude |
+| `model` | string | Claude model: `sonnet`, `haiku`, `opus`, `fable`. When set, launches claude |
 | `command` | string | Raw shell command (used when `model` is not set) |
 | `agent` | string | Named agent identity (overrides `ATM_IDENTITY` for team flags) |
 | `prompt` | string | Appended as a positional arg to the claude command (e.g. a prompt file path) |

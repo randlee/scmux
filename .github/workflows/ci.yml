@@ -139,6 +139,13 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+      - name: Install zsh (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Test rmux agent aliases
+        run: zsh scripts/test-rmux-spawn.zsh
+
   perf-gate:
     name: perf-gate (release benchmarks)
     needs: [clippy]
