@@ -375,7 +375,7 @@ All `.atm.toml` files with `[rmux]` sections currently configured on this machin
 | Path | Session | Team(s) | Agents |
 |------|---------|---------|--------|
 | `~/Documents/github/agent-team-mail/.atm.toml` | `atm-dev` | atm-dev, schook, scterm, sc-compose, sc-observability | team-lead, arch-ctm, quality-mgr, arch-ctask, chook, cterm, comp, cobs |
-| `~/Documents/github/scmux/.atm.toml` | `scmux-dev` | scmux-dev | team-lead, arch-ctm |
+| `~/Documents/github/scmux/.atm.toml` | `scmux` | scmux | team-lead, arch-ctm |
 | `~/Documents/github-radiant/data-sourcegenerators/.atm.toml` | `src-gen` | src-gen | team-lead (gen), arch-data, arch-ann, quality-mgr |
 | `~/Documents/github-radiant/unsafe/.atm.toml` | `unsafe-dev` | unsafe-dev | team-lead, cus, arch-math, arch-ann |
 | `~/Documents/github-radiant/io/.atm.toml` | `io-dev` | io-dev | team-lead, arch-cio, arch-udp, cin, arch-in |

@@ -215,7 +215,7 @@ The goal is to **prevent** idle gaps by pre-populating his inbox before he finis
 
 If arch-cmux does go idle with no tasks in flight (e.g. team-lead was slow, or he finished faster than expected), nudge via ATM:
 ```bash
-atm send arch-cmux "You have a new task in your inbox. Run: atm read --team scmux-dev"
+atm send arch-cmux "You have a new task in your inbox. Run: atm read --team scmux"
 ```
 
 **Important**: If arch-cmux runs out of tasks and is not nudged, the entire project stalls until intervention. Monitor his pane and inbox — do not let the pipeline go cold.
