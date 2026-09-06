@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""hmux — herdr-native ATM team launcher (MVP duplicate of `scripts/rmux`).
+
+Reads [rmux] config from .atm.toml (or --config), then launches an ATM team
+into herdr (workspace = ATM_TEAM, pane label = ATM_IDENTITY).
+
+Usage:
+    hmux [--config <path>] [--dry-run] [-v] [-h]
+    hmux launch <pane-name> [--config <path>] [--dry-run] [-v]
+    hmux codex|claude|sonnet|haiku|opus|fable|gemini|hermes <n> [OPTIONS]
+
+Backend = herdr (via hmux_backend). Launch-core = hmux_core (shared with rmux
+semantics). Install: cp hmux hmux_core.py hmux_backend.py ~/.local/bin/
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hmux_core as core
+import hmux_backend as backend
+
+KNOWN_AGENT_TYPES = ("codex", "claude", "sonnet", "haiku", "opus", "fable",
+                     "gemini", "hermes")
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _err(msg: str) -> None:
+    print(f"hmux: {msg}", file=sys.stderr)
+
+
+def _pane_number(pane_id: str) -> int:
+    """'w5:p2' -> 2."""
+    try:
+        return int(pane_id.rsplit(":p", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def _root_tab_and_pane(workspace_id: str):
+    """Best-effort root tab + pane of a workspace: tab with min number, then
+    the pane in that tab with min pane number."""
+    tabs = sorted(backend.tab_list(workspace_id), key=lambda t: t["number"])
+    if not tabs:
+        return "", ""
+    root_tab_id = tabs[0]["tab_id"]
+    panes = [p for p in backend.pane_list(workspace_id) if p["tab_id"] == root_tab_id]
+    if not panes:
+        return root_tab_id, ""
+    root_pane = min(panes, key=lambda p: _pane_number(p["pane_id"]))
+    return root_tab_id, root_pane["pane_id"]
+
+
+def _find_or_create_workspace(team: str) -> dict:
+    """Returns {workspace_id, root_pane_id, tab_id}."""
+    ws_id = backend.workspace_find_by_label(team)
+    if ws_id is None:
+        return backend.workspace_create(team)
+    tab_id, pane_id = _root_tab_and_pane(ws_id)
+    return {"workspace_id": ws_id, "root_pane_id": pane_id, "tab_id": tab_id}
+
+
+# ── session mode (S-4) ─────────────────────────────────────────────────
+
+def _split_direction(pi: int) -> str:
+    """Alternate right/down for successive panes (deterministic; layout IGNORED)."""
+    return "right" if pi % 2 == 1 else "down"
+
+
+def run_session(cfg: core.RmuxConfig, team: str, dry_run: bool, shell: str = "") -> None:
+    if dry_run:
+        print(core.dry_run_projection(cfg, team, mode="session", shell=shell))
+        return
+
+    ws = _find_or_create_workspace(team)
+    workspace_id = ws["workspace_id"]
+
+    for wi, window in enumerate(cfg.windows):
+        if not window.panes:
+            continue
+
+        if wi == 0:
+            tab_id = ws["tab_id"]
+            root_pane_id = ws["root_pane_id"]
+        else:
+            created = backend.tab_create(workspace_id, window.name)
+            tab_id = created["tab_id"]
+            root_pane_id = created["root_pane_id"]
+
+        prev_pane_id = root_pane_id
+        for pi, pane in enumerate(window.panes):
+            if pi == 0:
+                pane_id = root_pane_id
+            else:
+                pane_id = backend.pane_split(prev_pane_id, _split_direction(pi))
+                prev_pane_id = pane_id
+
+            label = core.resolve_pane_label(pane)
+            backend.pane_rename(pane_id, label)
+
+            init = core.build_init_cmd(pane, cfg.env_dir, "session", shell=shell)
+            full = core.build_pane_commands(pane, team, shell=shell)
+            command = f"{init}; {full}".strip("; ")
+            if command:
+                backend.pane_run(pane_id, command)
+            print(f"launched pane '{label}' ({pane_id})")
+
+    print(f"Session '{team}' launched (workspace {workspace_id}).")
+
+
+# ── launch mode (S-5) ──────────────────────────────────────────────────
+
+def run_launch(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool, shell: str = "") -> None:
+    # config lookup by name
+    target = None
+    target_win = None
+    for wi, window in enumerate(cfg.windows):
+        for pane in window.panes:
+            if pane.name == pane_name:
+                target, target_win = pane, wi
+                break
+        if target is not None:
+            break
+
+    if target is None:
+        _err(f"pane '{pane_name}' not found in config")
+        sys.exit(1)
+
+    label = core.resolve_pane_label(target)
+    init = core.build_init_cmd(target, cfg.env_dir, "session", shell=shell)
+    full = core.build_pane_commands(target, team, shell=shell)
+    command = f"{init}; {full}".strip("; ")
+
+    if dry_run:
+        window = cfg.windows[target_win]
+        print(f"=== hmux launch dry-run: {pane_name} ===")
+        print(f"  workspace: {team}")
+        print(f"  window: {window.name} (layout: {window.layout})")
+        print()
+        print(f"  Pane: \"{target.name}\"")
+        if init:
+            print(f"    init: {init}")
+        if full:
+            print(f"    cmd: {full}")
+        print()
+        print("Run without --dry-run to launch pane.")
+        return
+
+    ws = _find_or_create_workspace(team)
+    workspace_id = ws["workspace_id"]
+
+    # runtime match by label (resolved identity)
+    pane_id = backend.pane_find_by_label(workspace_id, label)
+    if pane_id is None:
+        # ensure the window's tab exists, then split a new pane
+        tab_id = None
+        window = cfg.windows[target_win]
+        for t in backend.tab_list(workspace_id):
+            if t["label"] == window.name:
+                tab_id = t["tab_id"]
+                break
+        if tab_id is None:
+            created = backend.tab_create(workspace_id, window.name)
+            tab_id = created["tab_id"]
+            base_pane = created["root_pane_id"]
+        else:
+            # split from the tab's last pane
+            panes = sorted(
+                [p for p in backend.pane_list(workspace_id) if p["tab_id"] == tab_id],
+                key=lambda p: _pane_number(p["pane_id"]),
+            )
+            base_pane = panes[-1]["pane_id"] if panes else ""
+        pane_id = backend.pane_split(base_pane, "down") if base_pane else ""
+        if pane_id:
+            backend.pane_rename(pane_id, label)
+        else:
+            _err(f"could not create pane for '{pane_name}'")
+            sys.exit(1)
+
+    if command:
+        backend.pane_run(pane_id, command)
+    print(f"Launched '{pane_name}' in pane {pane_id}.")
+
+
+# ── spawn mode (S-5) ───────────────────────────────────────────────────
+
+def _parent_session_id(team: str) -> str:
+    """Read leadSessionId from ~/.claude/teams/<team>/config.json (rmux:82-93)."""
+    import json
+    path = os.path.expanduser(f"~/.claude/teams/{team}/config.json")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path) as f:
+            return json.load(f).get("leadSessionId", "")
+    except Exception:
+        return ""
+
+
+def run_spawn(cfg: core.RmuxConfig, spawn_type: str, spawn_name: str,
+              cli_team: str, model: str, window: str, dry_run: bool, shell: str = "") -> None:
+    team = core.resolve_team(cfg, "spawn", cli_team=cli_team or None)
+
+    # resolve model + parent session id
+    resolved_model = model or core.DEFAULT_SPAWN_MODEL.get(spawn_type, "")
+    parent_session_id = _parent_session_id(team)
+
+    # synthetic pane for the spawn init command
+    synth = core.Pane(name=spawn_name, env={
+        "ATM_IDENTITY": spawn_name,
+        "ATM_TEAM": team,
+    })
+    init = core.build_init_cmd(synth, cfg.env_dir, "spawn", shell=shell)
+    full = core.build_spawn_commands(team, spawn_type, spawn_name,
+                                     model=model, parent_session_id=parent_session_id,
+                                     shell=shell)
+    command = f"{init}; {full}".strip("; ")
+
+    if dry_run:
+        print("=== hmux spawn dry-run ===")
+        print(f"  workspace: {team}")
+        print(f"  window:  {window}")
+        print(f"  pane:    {spawn_name}")
+        print(f"  type:    {spawn_type}")
+        print(f"  team:    {team}")
+        if resolved_model:
+            print(f"  model:   {resolved_model}")
+        if parent_session_id:
+            print(f"  parent:  {parent_session_id}")
+        print(f"  init:    {init}")
+        print(f"  cmd:     {full}")
+        return
+
+    ws = _find_or_create_workspace(team)
+    workspace_id = ws["workspace_id"]
+
+    # find or create the target window (tab)
+    tab_id = None
+    for t in backend.tab_list(workspace_id):
+        if t["label"] == window:
+            tab_id = t["tab_id"]
+            break
+
+    if tab_id is None:
+        created = backend.tab_create(workspace_id, window)
+        tab_id = created["tab_id"]
+        base_pane = created["root_pane_id"]
+    else:
+        panes = sorted(
+            [p for p in backend.pane_list(workspace_id) if p["tab_id"] == tab_id],
+            key=lambda p: _pane_number(p["pane_id"]),
+        )
+        base_pane = panes[-1]["pane_id"] if panes else ""
+
+    pane_id = backend.pane_split(base_pane, "down")
+    backend.pane_rename(pane_id, spawn_name)
+    backend.pane_run(pane_id, command)
+
+    # register member (best-effort, matching rmux:173-175)
+    import subprocess
+    subprocess.run(
+        ["atm", "teams", "add-member", team, spawn_name,
+         "--agent-type", spawn_name, "--pane-id", pane_id],
+        capture_output=True,
+    )
+
+    print(f"Spawned '{spawn_name}' ({spawn_type}) in {team}:{window} pane {pane_id}")
+
+
+# ── main ───────────────────────────────────────────────────────────────
+
+def main(argv) -> int:
+    if len(argv) >= 2 and argv[0] in KNOWN_AGENT_TYPES:
+        # spawn mode: hmux <type> <name> [opts]
+        spawn_type, spawn_name = argv[0], argv[1]
+        parser = argparse.ArgumentParser(prog=f"hmux {spawn_type} {spawn_name}")
+        parser.add_argument("--config", default=".atm.toml")
+        parser.add_argument("--team", default="")
+        parser.add_argument("--model", default="")
+        parser.add_argument("--window", default="spare")
+        parser.add_argument("--shell", default="", choices=["bash", "pwsh"],
+                            help="Target pane shell dialect (default: auto by platform)")
+        parser.add_argument("--dry-run", action="store_true")
+        args = parser.parse_args(argv[2:])
+        cfg = core.load_config(args.config)
+        run_spawn(cfg, spawn_type, spawn_name, args.team, args.model,
+                  args.window, args.dry_run, args.shell)
+        return 0
+
+    parser = argparse.ArgumentParser(prog="hmux")
+    parser.add_argument("mode", nargs="?", default="session",
+                        choices=["session", "launch"])
+    parser.add_argument("pane_name", nargs="?")
+    parser.add_argument("--config", default=".atm.toml")
+    parser.add_argument("--shell", default="", choices=["bash", "pwsh"],
+                        help="Target pane shell dialect (default: auto by platform)")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.mode == "launch":
+        if not args.pane_name:
+            _err("launch: pane name required")
+            return 1
+        cfg = core.load_config(args.config)
+        team = core.resolve_team(cfg, "session")
+        run_launch(cfg, team, args.pane_name, args.dry_run, args.shell)
+        return 0
+
+    cfg = core.load_config(args.config)
+    team = core.resolve_team(cfg, "session")
+    run_session(cfg, team, args.dry_run, args.shell)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
