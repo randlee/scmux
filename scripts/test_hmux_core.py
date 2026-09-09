@@ -77,13 +77,6 @@ class TestIdentity(unittest.TestCase):
         p = make_pane(name="secondary", env={"ATM_IDENTITY": "alpha-prime"})
         self.assertEqual(h.resolve_pane_label(p), "alpha-prime")
 
-    def test_herdr_target_prefers_alias_over_pane_label(self):
-        aliased = make_pane(name="secondary", alias="ops", env={"ATM_IDENTITY": "alpha-prime"})
-        labeled = make_pane(name="secondary", env={"ATM_IDENTITY": "alpha-prime"})
-        self.assertEqual(h.resolve_herdr_target(aliased), "ops")
-        self.assertEqual(h.resolve_herdr_target(labeled), "alpha-prime")
-
-
 class TestTeamResolution(unittest.TestCase):
 
     def test_spawn_team_cli_wins(self):

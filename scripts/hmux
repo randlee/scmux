@@ -114,8 +114,11 @@ def _resolve_herdr_target(team: str, identity: str, config_alias: str = "") -> s
         return fallback
 
     name = member.get("name", identity)
-    extra = member.get("extra")
-    roster_alias = extra.get("alias", "") if isinstance(extra, dict) else ""
+    if "alias" in member:
+        roster_alias = member.get("alias") or ""
+    else:
+        extra = member.get("extra")
+        roster_alias = extra.get("alias", "") if isinstance(extra, dict) else ""
     if roster_alias:
         if config_alias and config_alias != roster_alias:
             print(
@@ -199,7 +202,7 @@ def _repair_existing_herdr_agent(pane_id: str, target: str, *, report: bool = Fa
         return False
 
 
-def rename_agents(team: str) -> int:
+def rename_agents(cfg: core.RmuxConfig, team: str) -> int:
     """Reapply each labeled pane's Herdr agent name after a server restart."""
     workspace_id = backend.workspace_find_by_label(team)
     if workspace_id is None:
@@ -211,7 +214,17 @@ def rename_agents(team: str) -> int:
         label = pane["label"]
         if not label:
             continue
-        target = _resolve_herdr_target(team, label)
+        configured = next(
+            (
+                candidate
+                for window in cfg.windows
+                for candidate in window.panes
+                if core.resolve_pane_label(candidate) == label
+            ),
+            None,
+        )
+        config_alias = configured.alias if configured is not None else ""
+        target = _resolve_herdr_target(team, label, config_alias)
         if not _repair_existing_herdr_agent(pane["pane_id"], target, report=True):
             failed = True
     return 1 if failed else 0
@@ -351,16 +364,11 @@ def run_launch(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool, s
             sys.exit(1)
 
     registration_failed = False
-    if command:
-        if existing_pane_id is not None:
-            registration_failed = not _repair_existing_herdr_agent(
-                pane_id, herdr_target
-            )
-        else:
-            backend.pane_run(pane_id, command)
-            registration_failed = not _register_herdr_agent(
-                pane_id, herdr_target
-            )
+    if existing_pane_id is not None:
+        registration_failed = not _repair_existing_herdr_agent(pane_id, herdr_target)
+    elif command:
+        backend.pane_run(pane_id, command)
+        registration_failed = not _register_herdr_agent(pane_id, herdr_target)
     print(f"Launched '{pane_name}' in pane {pane_id}.")
     return 1 if registration_failed else 0
 
@@ -510,7 +518,8 @@ def main(argv) -> int:
         if not args.pane_name:
             _err("rename-agents: team required")
             return 1
-        return rename_agents(args.pane_name)
+        cfg = core.load_config(args.config)
+        return rename_agents(cfg, args.pane_name)
 
     if args.mode == "launch":
         if not args.pane_name:

@@ -2,8 +2,8 @@
 """hmux_core — shared launch-core for hmux (herdr-native ATM team launcher).
 
 Faithful extraction of `scripts/rmux`'s config parsing + agent-command
-derivation, with the tmux backend removed. This is the single import point
-for hmux (and, later, rmux + scmux-daemon).
+derivation, with the tmux backend removed. This is the shared import point
+for hmux's pure launch-core helpers.
 
 Rules duplicated here mirror rmux source exactly, except the ratified deltas
 (see the hmux plan, beads ap-84f):
@@ -42,7 +42,6 @@ __all__ = [
     "resolve_team",
     "resolve_trio_identity",
     "resolve_pane_label",
-    "resolve_herdr_target",
     "build_init_cmd",
     "build_pane_commands",
     "build_spawn_commands",
@@ -280,11 +279,6 @@ def resolve_pane_label(pane: Pane) -> str:
     if pane.agent:
         return pane.agent
     return pane.name
-
-
-def resolve_herdr_target(pane: Pane) -> str:
-    """Return the Herdr agent target: configured alias, otherwise pane label."""
-    return pane.alias or resolve_pane_label(pane)
 
 
 def build_init_cmd(pane: Pane, config_dir: str, mode: str, shell: str = "") -> str:

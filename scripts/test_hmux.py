@@ -199,7 +199,7 @@ class TestHerdrRegistration(unittest.TestCase):
              patch.object(backend, "agent_rename") as rename, \
              patch.object(hmux, "_resolve_herdr_target", side_effect=lambda team, identity, config_alias="": identity), \
              contextlib.redirect_stdout(stdout):
-            result = hmux.rename_agents("team")
+            result = hmux.rename_agents(make_cfg(core.Pane(name="other")), "team")
 
         self.assertEqual(result, 0)
         rename.assert_called_once_with("p2", "worker")
@@ -212,10 +212,10 @@ class TestHerdrRegistration(unittest.TestCase):
             ],
         )
 
-    def test_roster_alias_is_authoritative_and_config_mismatch_is_error(self):
+    def test_roster_top_level_alias_is_authoritative_and_config_mismatch_is_error(self):
         fake = SimpleNamespace(
             returncode=0,
-            stdout='{"members":[{"name":"worker","extra":{"alias":"roster-ops"}}]}',
+            stdout='{"members":[{"name":"worker","alias":"roster-ops","extra":{}}]}',
             stderr="",
         )
         stderr = io.StringIO()
@@ -228,10 +228,21 @@ class TestHerdrRegistration(unittest.TestCase):
         self.assertIn("config alias 'config-ops'", stderr.getvalue())
         self.assertIn("roster alias 'roster-ops'", stderr.getvalue())
 
-    def test_roster_without_alias_updates_once_and_uses_config_alias(self):
+    def test_legacy_extra_alias_is_used_when_top_level_alias_is_absent(self):
         members = SimpleNamespace(
             returncode=0,
-            stdout='{"members":[{"name":"worker","extra":{}}]}',
+            stdout='{"members":[{"name":"worker","extra":{"alias":"legacy-ops"}}]}',
+            stderr="",
+        )
+        with patch.object(hmux.subprocess, "run", return_value=members):
+            target = hmux._resolve_herdr_target("team", "worker", "config-ops")
+
+        self.assertEqual(target, "legacy-ops")
+
+    def test_top_level_null_alias_updates_once_and_uses_config_alias(self):
+        members = SimpleNamespace(
+            returncode=0,
+            stdout='{"members":[{"name":"worker","alias":null,"extra":{}}]}',
             stderr="",
         )
         update = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -242,6 +253,53 @@ class TestHerdrRegistration(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].args[0], [
             "atm", "teams", "update-member", "team", "worker", "--alias", "config-ops",
         ])
+
+    def test_rename_agents_uses_config_alias_for_roster_repair(self):
+        cfg = make_cfg(core.Pane(name="worker", alias="config-ops"))
+        panes = [{"pane_id": "pane", "label": "worker"}]
+        members = SimpleNamespace(
+            returncode=0,
+            stdout='{"members":[{"name":"worker","alias":null}]}',
+            stderr="",
+        )
+        update = SimpleNamespace(returncode=0, stdout="", stderr="")
+        responses = iter([
+            None,
+            {"result": {"agent": {"pane_id": "pane"}}},
+            {"result": {"agent": {"pane_id": "pane"}}},
+        ])
+        with patch.object(backend, "workspace_find_by_label", return_value="workspace"), \
+             patch.object(backend, "pane_list", return_value=panes), \
+             patch.object(backend, "agent_get", side_effect=lambda target: next(responses)), \
+             patch.object(backend, "agent_rename") as rename, \
+             patch.object(hmux.subprocess, "run", side_effect=[members, update]) as run:
+            result = hmux.rename_agents(cfg, "team")
+
+        self.assertEqual(result, 0)
+        rename.assert_called_once_with("pane", "config-ops")
+        self.assertEqual(run.call_args_list[1].args[0], [
+            "atm", "teams", "update-member", "team", "worker", "--alias", "config-ops",
+        ])
+
+    def test_launch_repairs_existing_pane_without_command(self):
+        pane = core.Pane(name="worker", command="")
+        responses = iter([
+            {"result": {"agent": {"pane_id": "other"}}},
+            {"result": {"agent": {"pane_id": "pane"}}},
+            {"result": {"agent": {"pane_id": "pane"}}},
+        ])
+        with patch.object(hmux, "_find_or_create_workspace", return_value={
+                "workspace_id": "workspace", "root_pane_id": "pane", "tab_id": "tab"}), \
+             patch.object(hmux, "_resolve_herdr_target", return_value="worker"), \
+             patch.object(backend, "pane_find_by_label", return_value="pane"), \
+             patch.object(backend, "pane_run") as pane_run, \
+             patch.object(backend, "agent_get", side_effect=lambda target: next(responses)), \
+             patch.object(backend, "agent_rename") as rename:
+            result = hmux.run_launch(make_cfg(pane), "team", "worker", False, shell="bash")
+
+        self.assertEqual(result, 0)
+        pane_run.assert_not_called()
+        rename.assert_called_once_with("pane", "worker")
 
     def test_missing_roster_member_warns_and_falls_back(self):
         fake = SimpleNamespace(returncode=0, stdout='{"members":[]}', stderr="")

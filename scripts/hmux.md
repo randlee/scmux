@@ -179,7 +179,12 @@ use the pane label. The installed `~/.local/bin/hmux` is a copy that can drift
 from this repository; do not modify the installed copy. Rand decides installs.
 Herdr agent names live in the server's in-memory state, so they must be
 reapplied after a Herdr server restart; use `hmux rename-agents <team>` to
-repair every labelled pane without relaunching agents.
+repair every labelled pane without relaunching agents. `rename-agents` reads
+the same `--config` file as `session` and `launch`, matches panes to their
+configured entries, and can establish a missing roster alias with
+`atm teams update-member` before renaming the Herdr agent. Target precedence
+is the roster's top-level `alias`, then legacy `extra.alias`, then the pane
+label.
 
 ---
 
