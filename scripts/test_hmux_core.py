@@ -77,6 +77,12 @@ class TestIdentity(unittest.TestCase):
         p = make_pane(name="secondary", env={"ATM_IDENTITY": "alpha-prime"})
         self.assertEqual(h.resolve_pane_label(p), "alpha-prime")
 
+    def test_herdr_target_prefers_alias_over_pane_label(self):
+        aliased = make_pane(name="secondary", alias="ops", env={"ATM_IDENTITY": "alpha-prime"})
+        labeled = make_pane(name="secondary", env={"ATM_IDENTITY": "alpha-prime"})
+        self.assertEqual(h.resolve_herdr_target(aliased), "ops")
+        self.assertEqual(h.resolve_herdr_target(labeled), "alpha-prime")
+
 
 class TestTeamResolution(unittest.TestCase):
 
@@ -437,6 +443,7 @@ class TestLoadConfig(unittest.TestCase):
             name = "arch-ctm"
             command = "codex -c features.hooks=true --yolo"
             env = { ATM_IDENTITY = "arch-ctm", ATM_TEAM = "atm-team" }
+            alias = "architecture"
         """))
         cfg = h.load_config(path)
         self.assertEqual(cfg.session, "atm-team")
@@ -446,6 +453,7 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(len(cfg.windows[0].panes), 2)
         self.assertEqual(cfg.windows[0].panes[0].name, "team-lead")
         self.assertEqual(cfg.windows[0].panes[1].command, "codex -c features.hooks=true --yolo")
+        self.assertEqual(cfg.windows[0].panes[1].alias, "architecture")
 
     def test_empty_windows(self):
         d, path = self._write_config("[rmux]\nsession = \"x\"\n")

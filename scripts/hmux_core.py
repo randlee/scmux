@@ -42,6 +42,7 @@ __all__ = [
     "resolve_team",
     "resolve_trio_identity",
     "resolve_pane_label",
+    "resolve_herdr_target",
     "build_init_cmd",
     "build_pane_commands",
     "build_spawn_commands",
@@ -124,6 +125,7 @@ class Pane:
     command: str = ""                  # raw command (codex/gemini/hermes/shell)
     env: Dict[str, str] = field(default_factory=dict)
     agent: str = ""                    # explicit agent field
+    alias: str = ""                    # ATM roster alias / Herdr target
     prompt: str = ""                   # trailing prompt appended to command
 
 
@@ -208,6 +210,7 @@ def load_config(config_path: str) -> RmuxConfig:
                 command=p.get("command", ""),
                 env=dict(p.get("env", {})),
                 agent=p.get("agent", ""),
+                alias=p.get("alias", ""),
                 prompt=p.get("prompt", ""),
             ))
         windows.append(Window(
@@ -277,6 +280,11 @@ def resolve_pane_label(pane: Pane) -> str:
     if pane.agent:
         return pane.agent
     return pane.name
+
+
+def resolve_herdr_target(pane: Pane) -> str:
+    """Return the Herdr agent target: configured alias, otherwise pane label."""
+    return pane.alias or resolve_pane_label(pane)
 
 
 def build_init_cmd(pane: Pane, config_dir: str, mode: str, shell: str = "") -> str:
