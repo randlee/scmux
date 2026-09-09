@@ -77,7 +77,6 @@ class TestIdentity(unittest.TestCase):
         p = make_pane(name="secondary", env={"ATM_IDENTITY": "alpha-prime"})
         self.assertEqual(h.resolve_pane_label(p), "alpha-prime")
 
-
 class TestTeamResolution(unittest.TestCase):
 
     def test_spawn_team_cli_wins(self):
@@ -437,6 +436,7 @@ class TestLoadConfig(unittest.TestCase):
             name = "arch-ctm"
             command = "codex -c features.hooks=true --yolo"
             env = { ATM_IDENTITY = "arch-ctm", ATM_TEAM = "atm-team" }
+            alias = "architecture"
         """))
         cfg = h.load_config(path)
         self.assertEqual(cfg.session, "atm-team")
@@ -446,6 +446,7 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(len(cfg.windows[0].panes), 2)
         self.assertEqual(cfg.windows[0].panes[0].name, "team-lead")
         self.assertEqual(cfg.windows[0].panes[1].command, "codex -c features.hooks=true --yolo")
+        self.assertEqual(cfg.windows[0].panes[1].alias, "architecture")
 
     def test_empty_windows(self):
         d, path = self._write_config("[rmux]\nsession = \"x\"\n")

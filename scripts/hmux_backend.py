@@ -136,6 +136,25 @@ def pane_rename(pane_id: str, label: str) -> None:
     _json(["pane", "rename", pane_id, label])
 
 
+def agent_rename(pane_id: str, name: str) -> None:
+    """Set the Herdr agent name associated with a pane."""
+    _json(["agent", "rename", pane_id, name])
+
+
+def agent_get(target: str) -> Optional[Dict[str, Any]]:
+    """Return the parsed Herdr agent envelope, or None when not found."""
+    try:
+        data = _json(["agent", "get", target])
+    except HerdrError as error:
+        if "agent_not_found" in str(error):
+            return None
+        raise
+    error = data.get("error")
+    if isinstance(error, dict) and error.get("code") == "agent_not_found":
+        return None
+    return data
+
+
 def pane_list(workspace_id: str) -> List[Dict[str, str]]:
     """List panes in a workspace. Returns [{pane_id, tab_id, label}, ...].
 

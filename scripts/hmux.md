@@ -161,8 +161,30 @@ env = { ATM_IDENTITY = "cdev", ATM_TEAM = "myteam" }
 - **Trio identity** (`--agent-id/--agent-name/--team-name`, claude only) —
   faithful to rmux: `agent` field → `env.ATM_IDENTITY` (non-empty, ≠
   `team-lead`) → none (team-lead).
-- **Pane label** (herdr `pane rename` + nudge lookup key) — always non-empty:
-  `env.ATM_IDENTITY` → `agent` → `name`.
+- **Pane label** (herdr `pane rename`) — always non-empty:
+  `env.ATM_IDENTITY` → `agent` → `name`. The Herdr agent target is the
+  configured `alias` when present, otherwise this pane label.
+
+### Herdr agent names vs pane labels
+
+Pane labels and Herdr agent names are separate namespaces. After a pane's
+agent starts, hmux registers the target used by ATM nudges with:
+
+```bash
+herdr agent rename <pane_id> <target>
+```
+
+For a manual repair, use the roster alias when one is configured; otherwise
+use the pane label. The installed `~/.local/bin/hmux` is a copy that can drift
+from this repository; do not modify the installed copy. Rand decides installs.
+Herdr agent names live in the server's in-memory state, so they must be
+reapplied after a Herdr server restart; use `hmux rename-agents <team>` to
+repair every labelled pane without relaunching agents. `rename-agents` reads
+the same `--config` file as `session` and `launch`, matches panes to their
+configured entries, and can establish a missing roster alias with
+`atm teams update-member` before renaming the Herdr agent. Target precedence
+is the roster's top-level `alias`, then legacy `extra.alias`, then the pane
+label.
 
 ---
 

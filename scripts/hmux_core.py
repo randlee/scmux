@@ -2,8 +2,8 @@
 """hmux_core — shared launch-core for hmux (herdr-native ATM team launcher).
 
 Faithful extraction of `scripts/rmux`'s config parsing + agent-command
-derivation, with the tmux backend removed. This is the single import point
-for hmux (and, later, rmux + scmux-daemon).
+derivation, with the tmux backend removed. This is the shared import point
+for hmux's pure launch-core helpers.
 
 Rules duplicated here mirror rmux source exactly, except the ratified deltas
 (see the hmux plan, beads ap-84f):
@@ -124,6 +124,7 @@ class Pane:
     command: str = ""                  # raw command (codex/gemini/hermes/shell)
     env: Dict[str, str] = field(default_factory=dict)
     agent: str = ""                    # explicit agent field
+    alias: str = ""                    # ATM roster alias / Herdr target
     prompt: str = ""                   # trailing prompt appended to command
 
 
@@ -208,6 +209,7 @@ def load_config(config_path: str) -> RmuxConfig:
                 command=p.get("command", ""),
                 env=dict(p.get("env", {})),
                 agent=p.get("agent", ""),
+                alias=p.get("alias", ""),
                 prompt=p.get("prompt", ""),
             ))
         windows.append(Window(
