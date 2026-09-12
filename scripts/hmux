@@ -36,6 +36,21 @@ def _err(msg: str) -> None:
     print(f"hmux: {msg}", file=sys.stderr)
 
 
+def _mutation_env(team: str, identity: str) -> dict:
+    """Environment for `atm teams *` roster mutations.
+
+    `update-member` (and `remove-member`) enforce that the caller belongs to
+    the target team, but the `atm` CLI resolves the caller from ambient env
+    (there is no `--team`/`--identity` flag). Launch the mutation as a member
+    of the target team so the caller-team gate passes instead of erroring with
+    ``caller team 'X' does not match update-member target team 'Y'``.
+    """
+    env = dict(os.environ)
+    env["ATM_TEAM"] = team
+    env["ATM_IDENTITY"] = identity
+    return env
+
+
 def _pane_number(pane_id: str) -> int:
     """'w5:p2' -> 2."""
     try:
@@ -94,8 +109,16 @@ def _roster_members(team: str) -> list[dict]:
     return members if isinstance(members, list) else []
 
 
-def _resolve_herdr_target(team: str, identity: str, config_alias: str = "") -> str:
-    """Resolve the Herdr target from the ATM roster, with config fallback."""
+def _resolve_herdr_target(team: str, identity: str, config_alias: str = "",
+                          register_missing: bool = True) -> str:
+    """Resolve the Herdr target from the ATM roster.
+
+    When ``register_missing`` is set (session/launch/rename paths), a member
+    absent from the roster is registered first via ``atm teams add-member``
+    (carrying ``config_alias`` when present), so the live-agent target always
+    resolves to a durable alias. The spawn path disables this because it runs
+    its own ``add-member`` with an explicit ``--agent-type``.
+    """
     fallback = config_alias or identity
     try:
         member = next(
@@ -107,10 +130,21 @@ def _resolve_herdr_target(team: str, identity: str, config_alias: str = "") -> s
         return fallback
 
     if member is None:
-        print(
-            f"WARN: ATM member '{identity}' is not registered in team '{team}'; using '{fallback}'",
-            file=sys.stderr,
-        )
+        if not register_missing:
+            print(
+                f"WARN: ATM member '{identity}' is not registered in team '{team}'; using '{fallback}'",
+                file=sys.stderr,
+            )
+            return fallback
+        add_member = ["atm", "teams", "add-member", team, identity, "--backend", "herdr"]
+        if config_alias:
+            add_member += ["--alias", config_alias]
+        proc = subprocess.run(add_member, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return config_alias or identity
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr, end="" if proc.stderr.endswith("\n") else "\n")
+        print(f"WARN: atm teams add-member failed for '{identity}'; using '{fallback}'", file=sys.stderr)
         return fallback
 
     name = member.get("name", identity)
@@ -133,6 +167,7 @@ def _resolve_herdr_target(team: str, identity: str, config_alias: str = "") -> s
             ["atm", "teams", "update-member", team, name, "--alias", config_alias],
             capture_output=True,
             text=True,
+            env=_mutation_env(team, name),
         )
         if update.returncode == 0:
             return config_alias
@@ -452,7 +487,7 @@ def run_spawn(cfg: core.RmuxConfig, spawn_type: str, spawn_name: str,
     backend.pane_rename(pane_id, spawn_name)
     backend.pane_run(pane_id, command)
 
-    herdr_target = _resolve_herdr_target(team, spawn_name, synth.alias)
+    herdr_target = _resolve_herdr_target(team, spawn_name, synth.alias, register_missing=False)
     registration_failed = not _register_herdr_agent(pane_id, herdr_target)
 
     # Register a Herdr-backed member; pane ids are not tmux targets.
