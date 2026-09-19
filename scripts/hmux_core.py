@@ -285,9 +285,10 @@ def build_init_cmd(pane: Pane, config_dir: str, mode: str, shell: str = "") -> s
     """Build the init command for a pane.
 
     mode "spawn"   (rmux:99-103): cd <dir>; [load .env]; export ATM_IDENTITY/
-                                  ATM_TEAM (from the synthetic pane's env/name).
+                                  ATM_TEAM + BEADS_ACTOR (= identity).
     mode "session" (rmux:326-348): cd <dir>; [load .env]; export EVERY key in
-                                   pane.env (ATM_* only when present).
+                                   pane.env (ATM_* only when present); then
+                                   BEADS_ACTOR mirrors the pane's ATM_IDENTITY.
 
     `shell` selects the dialect: "bash" (POSIX sh, byte-for-byte rmux) or
     "pwsh" (PowerShell, for Windows herdr panes). Empty resolves via
@@ -312,16 +313,25 @@ def build_init_cmd(pane: Pane, config_dir: str, mode: str, shell: str = "") -> s
             parts.append(f"$env:ATM_IDENTITY = {q(identity)}")
             if team:
                 parts.append(f"$env:ATM_TEAM = {q(team)}")
+            parts.append(f"$env:BEADS_ACTOR = {q(identity)}")
         else:
             parts.append(f"export ATM_IDENTITY={q(identity)}")
             if team:
                 parts.append(f"export ATM_TEAM={q(team)}")
+            parts.append(f"export BEADS_ACTOR={q(identity)}")
     else:  # session
         for k, v in pane.env.items():
             if shell == SHELL_PWSH:
                 parts.append(f"$env:{k} = {q(str(v))}")
             else:
                 parts.append(f"export {k}={q(str(v))}")
+        # BEADS_ACTOR mirrors ATM_IDENTITY so bd records the right audit actor.
+        identity = pane.env.get("ATM_IDENTITY")
+        if identity:
+            if shell == SHELL_PWSH:
+                parts.append(f"$env:BEADS_ACTOR = {q(identity)}")
+            else:
+                parts.append(f"export BEADS_ACTOR={q(identity)}")
 
     return "; ".join(parts)
 
