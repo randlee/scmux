@@ -254,6 +254,21 @@ class TestHerdrRegistration(unittest.TestCase):
             "atm", "teams", "update-member", "team", "worker", "--alias", "config-ops",
         ])
 
+    def test_update_member_mutation_runs_as_target_team_member(self):
+        members = SimpleNamespace(
+            returncode=0,
+            stdout='{"members":[{"name":"worker","alias":null,"extra":{}}]}',
+            stderr="",
+        )
+        update = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(hmux.subprocess, "run", side_effect=[members, update]) as run:
+            target = hmux._resolve_herdr_target("atm-dev", "worker", "config-ops")
+
+        self.assertEqual(target, "config-ops")
+        kwargs = run.call_args_list[1].kwargs
+        self.assertEqual(kwargs["env"]["ATM_TEAM"], "atm-dev")
+        self.assertEqual(kwargs["env"]["ATM_IDENTITY"], "worker")
+
     def test_rename_agents_uses_config_alias_for_roster_repair(self):
         cfg = make_cfg(core.Pane(name="worker", alias="config-ops"))
         panes = [{"pane_id": "pane", "label": "worker"}]
@@ -301,15 +316,50 @@ class TestHerdrRegistration(unittest.TestCase):
         pane_run.assert_not_called()
         rename.assert_called_once_with("pane", "worker")
 
-    def test_missing_roster_member_warns_and_falls_back(self):
+    def test_missing_roster_member_warns_when_register_missing_disabled(self):
         fake = SimpleNamespace(returncode=0, stdout='{"members":[]}', stderr="")
         stderr = io.StringIO()
-        with patch.object(hmux.subprocess, "run", return_value=fake), \
+        with patch.object(hmux.subprocess, "run", return_value=fake) as run, \
+             contextlib.redirect_stderr(stderr):
+            target = hmux._resolve_herdr_target("team", "worker", "config-ops", register_missing=False)
+
+        self.assertEqual(target, "config-ops")
+        self.assertIn("member 'worker' is not registered", stderr.getvalue())
+        run.assert_called_once()  # roster read only; no add-member attempted
+
+    def test_missing_roster_member_is_registered_with_backend_and_alias(self):
+        members = SimpleNamespace(returncode=0, stdout='{"members":[]}', stderr="")
+        add = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(hmux.subprocess, "run", side_effect=[members, add]) as run:
+            target = hmux._resolve_herdr_target("team", "worker", "config-ops")
+
+        self.assertEqual(target, "config-ops")
+        self.assertEqual(run.call_args_list[1].args[0], [
+            "atm", "teams", "add-member", "team", "worker",
+            "--backend", "herdr", "--alias", "config-ops",
+        ])
+
+    def test_missing_roster_member_without_alias_registers_and_returns_name(self):
+        members = SimpleNamespace(returncode=0, stdout='{"members":[]}', stderr="")
+        add = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(hmux.subprocess, "run", side_effect=[members, add]) as run:
+            target = hmux._resolve_herdr_target("team", "worker")
+
+        self.assertEqual(target, "worker")
+        self.assertEqual(run.call_args_list[1].args[0], [
+            "atm", "teams", "add-member", "team", "worker", "--backend", "herdr",
+        ])
+
+    def test_missing_roster_member_add_failure_falls_back(self):
+        members = SimpleNamespace(returncode=0, stdout='{"members":[]}', stderr="")
+        add = SimpleNamespace(returncode=1, stdout="", stderr="add-member failed\n")
+        stderr = io.StringIO()
+        with patch.object(hmux.subprocess, "run", side_effect=[members, add]), \
              contextlib.redirect_stderr(stderr):
             target = hmux._resolve_herdr_target("team", "worker", "config-ops")
 
         self.assertEqual(target, "config-ops")
-        self.assertIn("member 'worker' is not registered", stderr.getvalue())
+        self.assertIn("atm teams add-member failed for 'worker'", stderr.getvalue())
 
     def test_roster_alias_update_failure_prints_atm_error_and_uses_name(self):
         members = SimpleNamespace(
