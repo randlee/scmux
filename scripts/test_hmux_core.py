@@ -170,6 +170,7 @@ class TestInitCommand(unittest.TestCase):
         cmd = h.build_init_cmd(p, cfg_dir, "session", shell="bash")
         self.assertIn("export ATM_IDENTITY=x", cmd)
         self.assertIn("export ATM_TEAM=t", cmd)
+        self.assertIn("export BEADS_ACTOR=x", cmd)  # mirrors ATM_IDENTITY
         self.assertIn("export CUSTOM=v", cmd)  # custom (non-ATM) key kept
 
     def test_session_init_no_unconditional_identity(self):
@@ -178,6 +179,7 @@ class TestInitCommand(unittest.TestCase):
         cmd = h.build_init_cmd(p, cfg_dir, "session", shell="bash")
         self.assertNotIn("ATM_IDENTITY", cmd)
         self.assertNotIn("ATM_TEAM", cmd)
+        self.assertNotIn("BEADS_ACTOR", cmd)  # no identity => no actor
         self.assertIn("export CUSTOM=v", cmd)
 
     def test_spawn_init_identity_and_team(self):
@@ -186,6 +188,7 @@ class TestInitCommand(unittest.TestCase):
         cmd = h.build_init_cmd(p, cfg_dir, "spawn", shell="bash")
         self.assertIn("export ATM_IDENTITY=agent-x", cmd)
         self.assertIn("export ATM_TEAM=t", cmd)
+        self.assertIn("export BEADS_ACTOR=agent-x", cmd)
 
     def test_spawn_init_no_extra_env(self):
         cfg_dir = self._cfg_dir()
