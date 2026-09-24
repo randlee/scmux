@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::{db::SessionDefinition, tmux, AppState};
+use crate::{db::SessionDefinition, launcher, tmux, AppState};
 
 /// Returns true if the cron expression should fire within the current 15s window.
 pub fn should_run_now(expr: &str, now: &chrono::DateTime<Utc>) -> bool {
@@ -65,9 +65,9 @@ pub async fn run_start_cycle(
         }
 
         info!("starting session '{}' trigger={}", name, trigger);
-        match tmux::start_session(&name, &config_json).await {
-            Ok(()) => {
-                info!("session '{}' start submitted", name);
+        match launcher::start_session(&name, &config_json).await {
+            Ok(mode) => {
+                info!("session '{}' start submitted mode={}", name, mode.as_str());
             }
             Err(err) => {
                 warn!("failed to start session '{}': {}", name, err);
