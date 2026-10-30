@@ -22,7 +22,7 @@ env = { ATM_IDENTITY = "team-lead", ATM_TEAM = "scmux" }
 
 [[rmux.windows.panes]]
 name = "arch-ctm"
-command = "codex -c features.hooks=true --yolo"
+command = "codex --no-daemon -c features.hooks=true --yolo"
 env = { ATM_IDENTITY = "arch-ctm", ATM_TEAM = "scmux" }
 
 [[rmux.windows]]
