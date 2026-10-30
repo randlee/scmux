@@ -273,6 +273,22 @@ function ciRunTone(run) {
   };
 }
 function buildJumpCommand(session, host) {
+  const localMatch = session.name.match(/^([^@]+)@local$/i);
+  if (localMatch) {
+    return `tmux attach -t ${localMatch[1]}`;
+  }
+  const remoteMatch = session.name.match(/^(.+)@([^@]+)@([^@]+)$/);
+  if (remoteMatch) {
+    const [, tmuxSession, sshUser, computerId] = remoteMatch;
+    const computerLiteral = computerId.toLowerCase().replace(/\.$/, "");
+    const normalizedComputer = computerLiteral.split(".")[0];
+    const localNames = [host?.name, host?.address].filter(Boolean).map(value => value.toLowerCase().split(".")[0]);
+    const loopback = ["local", "localhost", "127.0.0.1", "::1"].includes(computerLiteral);
+    if (loopback || localNames.includes(normalizedComputer)) {
+      return `tmux attach -t ${tmuxSession}`;
+    }
+    return `ssh ${sshUser}@${computerId} tmux attach -t ${tmuxSession}`;
+  }
   if (!host || host.is_local) {
     return `tmux attach -t ${session.name}`;
   }
@@ -298,7 +314,9 @@ function SessionActionButtons({
   onEdit
 }) {
   const canStart = session.status === "stopped";
-  const actionLabel = canStart ? "Start" : "Stop";
+  const externallyManaged = session.launch_mode === "external";
+  const canAct = canStart || !externallyManaged;
+  const actionLabel = canStart ? externallyManaged ? "Launch" : "Start" : externallyManaged ? "Managed" : "Stop";
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -309,7 +327,7 @@ function SessionActionButtons({
       event.stopPropagation();
       onStartStop(session);
     },
-    disabled: busy,
+    disabled: busy || !canAct,
     style: {
       border: "1px solid #1e2535",
       borderRadius: 4,
@@ -317,7 +335,8 @@ function SessionActionButtons({
       padding: "2px 8px",
       background: canStart ? "#102b1f" : "#2b1212",
       color: canStart ? "#34d399" : "#fca5a5",
-      cursor: busy ? "default" : "pointer"
+      cursor: busy || !canAct ? "default" : "pointer",
+      opacity: canAct ? 1 : 0.65
     }
   }, busy ? "..." : actionLabel), /*#__PURE__*/React.createElement("button", {
     onClick: event => {
@@ -461,7 +480,7 @@ function GridCard({
       color: pc,
       opacity: 0.8
     }
-  }, (session.project || "unassigned") + " | " + hostLabel(session.host))), /*#__PURE__*/React.createElement("div", {
+  }, (session.project || "unassigned") + " | " + hostLabel(session.host) + (session.launch_mode === "external" ? " | external launcher" : ""))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",

@@ -17,7 +17,7 @@ use tower_http::cors::CorsLayer;
 use crate::atm::ShutdownTarget;
 use crate::runtime::{AtmRuntimeSummary, CiRuntimeSummary};
 use crate::tmux::{self, HostTarget};
-use crate::{atm, db, definition_writer, AppState};
+use crate::{atm, db, definition_writer, launcher, AppState};
 
 pub fn router(state: Arc<AppState>) -> Router {
     let middleware_state = Arc::clone(&state);
@@ -117,6 +117,7 @@ struct SessionSummary {
     status: String,
     cron_schedule: Option<String>,
     auto_start: bool,
+    launch_mode: &'static str,
     panes: serde_json::Value,
     polled_at: Option<String>,
     session_ci: Vec<SessionCiSummary>,
@@ -616,6 +617,7 @@ async fn list_sessions(
                     status: runtime_row.status,
                     cron_schedule: row.cron_schedule,
                     auto_start: row.auto_start,
+                    launch_mode: launcher::launch_mode(&row.config_json).as_str(),
                     panes: serde_json::to_value(runtime_row.panes).unwrap_or(serde_json::json!([])),
                     polled_at: runtime_row.polled_at,
                     session_ci: ci,
@@ -681,6 +683,7 @@ async fn get_session(
             status: runtime_row.status,
             cron_schedule: row.cron_schedule,
             auto_start: row.auto_start,
+            launch_mode: launcher::launch_mode(&row.config_json).as_str(),
             panes: serde_json::to_value(runtime_row.panes).unwrap_or(serde_json::json!([])),
             polled_at: runtime_row.polled_at,
             session_ci: ci,
@@ -837,6 +840,10 @@ async fn start_session(
             return Err(bad_request("invalid_crew_variant_binding", message));
         }
         binding.root_path
+    } else if let Some(path) = launcher::external_working_directory(&definition.config_json)
+        .map_err(|err| bad_request("invalid_launcher", err.to_string()))?
+    {
+        path.to_string_lossy().to_string()
     } else {
         validate_config_root_path_binding(&definition.config_json)
             .map_err(|message| bad_request("invalid_crew_variant_binding", message))?
@@ -851,11 +858,11 @@ async fn start_session(
         runtime.mark_starting(&name);
     }
 
-    let action = tmux::start_session(&name, &definition.config_json).await;
+    let action = launcher::start_session(&name, &definition.config_json).await;
     match action {
-        Ok(()) => Ok(Json(ActionResponse {
+        Ok(mode) => Ok(Json(ActionResponse {
             ok: true,
-            message: format!("session '{name}' started"),
+            message: format!("session '{name}' started via {}", mode.as_str()),
         })),
         Err(err) => {
             let mut runtime = state.runtime.lock().expect("runtime lock");
@@ -898,6 +905,19 @@ async fn stop_session(
             }),
         )
     })?;
+
+    if launcher::launch_mode(&definition.config_json) == launcher::LaunchMode::External {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                ok: false,
+                code: "external_lifecycle".to_string(),
+                message: format!(
+                    "session '{name}' uses an external launcher; stop it through that launcher"
+                ),
+            }),
+        ));
+    }
 
     let targets = extract_shutdown_targets(&definition.config_json);
     if let Err(err) = atm::send_shutdown_messages(state.as_ref(), &targets).await {

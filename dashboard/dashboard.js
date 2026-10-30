@@ -273,6 +273,22 @@ function ciRunTone(run) {
   };
 }
 function buildJumpCommand(session, host) {
+  const localMatch = session.name.match(/^([^@]+)@local$/i);
+  if (localMatch) {
+    return `tmux attach -t ${localMatch[1]}`;
+  }
+  const remoteMatch = session.name.match(/^(.+)@([^@]+)@([^@]+)$/);
+  if (remoteMatch) {
+    const [, tmuxSession, sshUser, computerId] = remoteMatch;
+    const computerLiteral = computerId.toLowerCase().replace(/\.$/, "");
+    const normalizedComputer = computerLiteral.split(".")[0];
+    const localNames = [host?.name, host?.address].filter(Boolean).map(value => value.toLowerCase().split(".")[0]);
+    const loopback = ["local", "localhost", "127.0.0.1", "::1"].includes(computerLiteral);
+    if (loopback || localNames.includes(normalizedComputer)) {
+      return `tmux attach -t ${tmuxSession}`;
+    }
+    return `ssh ${sshUser}@${computerId} tmux attach -t ${tmuxSession}`;
+  }
   if (!host || host.is_local) {
     return `tmux attach -t ${session.name}`;
   }
