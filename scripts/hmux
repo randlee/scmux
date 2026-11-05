@@ -36,21 +36,6 @@ def _err(msg: str) -> None:
     print(f"hmux: {msg}", file=sys.stderr)
 
 
-def _mutation_env(team: str, identity: str) -> dict:
-    """Environment for `atm teams *` roster mutations.
-
-    `update-member` (and `remove-member`) enforce that the caller belongs to
-    the target team, but the `atm` CLI resolves the caller from ambient env
-    (there is no `--team`/`--identity` flag). Launch the mutation as a member
-    of the target team so the caller-team gate passes instead of erroring with
-    ``caller team 'X' does not match update-member target team 'Y'``.
-    """
-    env = dict(os.environ)
-    env["ATM_TEAM"] = team
-    env["ATM_IDENTITY"] = identity
-    return env
-
-
 def _pane_number(pane_id: str) -> int:
     """'w5:p2' -> 2."""
     try:
@@ -91,12 +76,51 @@ def _agent_matches_pane(agent: dict | None, pane_id: str) -> bool:
     return isinstance(info, dict) and info.get("pane_id") == pane_id
 
 
-def _roster_members(team: str) -> list[dict]:
-    """Read the ATM roster, preserving the roster as target authority."""
+def _agent_name_taken(target: str, pane_id: str) -> dict | None:
+    """Return the OTHER agent already using `target`, if any.
+
+    Herdr agent names are a machine-wide namespace: one name maps to exactly
+    one pane across ALL workspaces/teams. Teams that reuse a common member name
+    (team-lead, quality-mgr, publisher) must carry a distinct alias; this guard
+    enforces that invariant before any rename.
+    """
+    try:
+        agents = backend.agent_list()
+    except backend.HerdrError as error:
+        print(f"WARN: could not list herdr agents for uniqueness check: {error}", file=sys.stderr)
+        return None
+    for agent in agents:
+        if agent.get("name") == target and agent.get("pane_id") != pane_id:
+            return agent
+    return None
+
+
+def _reject_collision(target: str, pane_id: str) -> bool:
+    """Return True (and print an error) when `target` is used by another pane."""
+    other = _agent_name_taken(target, pane_id)
+    if other is None:
+        return False
+    print(
+        f"ERROR: herdr agent name '{target}' is already in use by pane "
+        f"{other.get('pane_id')} (workspace {other.get('workspace_id')}); herdr agent "
+        f"names must be unique across ALL teams — set a distinct alias in .atm.toml "
+        f"or the roster",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _roster_members(team: str, identity: str = "") -> list[dict]:
+    """Read the ATM roster, preserving the roster as target authority.
+
+    `atm` rejects every call that has no identity, including this read-only one,
+    so the caller's identity is passed through. Any member identity is accepted.
+    """
     proc = subprocess.run(
         ["atm", "members", "--team", team, "--json"],
         capture_output=True,
         text=True,
+        env={**os.environ, "ATM_TEAM": team, "ATM_IDENTITY": identity or "hmux"},
     )
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "no diagnostic"
@@ -109,20 +133,12 @@ def _roster_members(team: str) -> list[dict]:
     return members if isinstance(members, list) else []
 
 
-def _resolve_herdr_target(team: str, identity: str, config_alias: str = "",
-                          register_missing: bool = True) -> str:
-    """Resolve the Herdr target from the ATM roster.
-
-    When ``register_missing`` is set (session/launch/rename paths), a member
-    absent from the roster is registered first via ``atm teams add-member``
-    (carrying ``config_alias`` when present), so the live-agent target always
-    resolves to a durable alias. The spawn path disables this because it runs
-    its own ``add-member`` with an explicit ``--agent-type``.
-    """
+def _resolve_herdr_target(team: str, identity: str, config_alias: str = "") -> str:
+    """Resolve the Herdr target from the ATM roster, with config fallback."""
     fallback = config_alias or identity
     try:
         member = next(
-            (m for m in _roster_members(team) if isinstance(m, dict) and m.get("name") == identity),
+            (m for m in _roster_members(team, identity) if isinstance(m, dict) and m.get("name") == identity),
             None,
         )
     except (OSError, RuntimeError) as error:
@@ -130,21 +146,10 @@ def _resolve_herdr_target(team: str, identity: str, config_alias: str = "",
         return fallback
 
     if member is None:
-        if not register_missing:
-            print(
-                f"WARN: ATM member '{identity}' is not registered in team '{team}'; using '{fallback}'",
-                file=sys.stderr,
-            )
-            return fallback
-        add_member = ["atm", "teams", "add-member", team, identity, "--backend", "herdr"]
-        if config_alias:
-            add_member += ["--alias", config_alias]
-        proc = subprocess.run(add_member, capture_output=True, text=True)
-        if proc.returncode == 0:
-            return config_alias or identity
-        if proc.stderr:
-            print(proc.stderr, file=sys.stderr, end="" if proc.stderr.endswith("\n") else "\n")
-        print(f"WARN: atm teams add-member failed for '{identity}'; using '{fallback}'", file=sys.stderr)
+        print(
+            f"WARN: ATM member '{identity}' is not registered in team '{team}'; using '{fallback}'",
+            file=sys.stderr,
+        )
         return fallback
 
     name = member.get("name", identity)
@@ -167,19 +172,56 @@ def _resolve_herdr_target(team: str, identity: str, config_alias: str = "",
             ["atm", "teams", "update-member", team, name, "--alias", config_alias],
             capture_output=True,
             text=True,
-            env=_mutation_env(team, name),
+            # update-member is team-scoped: the caller team must equal the target
+            # team and the caller must be a member. Without this override the
+            # call inherits the ambient (usually hermes) team and is rejected.
+            env={**os.environ, "ATM_TEAM": team, "ATM_IDENTITY": name},
         )
         if update.returncode == 0:
             return config_alias
         if update.stderr:
             print(update.stderr, file=sys.stderr, end="" if update.stderr.endswith("\n") else "\n")
-        return name
+        # Rule: the Herdr agent name is (alias ?? name). A configured alias is
+        # the target even when persisting it to the roster was rejected.
+        return config_alias
     return name
+
+
+_SHELLS = {"zsh", "bash", "sh", "dash", "fish", "ksh"}
+
+
+def _ensure_command_started(pane_id: str, *, waits: int = 12, step_s: float = 0.25) -> bool:
+    """Make sure `pane run` actually executed the command.
+
+    A freshly split pane may still be initialising its shell, in which case herdr
+    delivers the text but loses the Enter: the command sits at the prompt and the
+    agent never registers. Detect a shell still in the foreground and press Enter
+    once more.
+    """
+    for _ in range(waits):
+        try:
+            info = backend.pane_process_info(pane_id)
+        except (backend.HerdrError, KeyError, TypeError, OSError):
+            return False
+        procs = info.get("foreground_processes") or []
+        names = {str(p.get("name") or p.get("argv0") or "").lstrip("-")
+                 for p in procs if isinstance(p, dict)}
+        if names and not names <= _SHELLS:
+            return True
+        time.sleep(step_s)
+    try:
+        backend.pane_send_key(pane_id, "Enter")
+    except (backend.HerdrError, KeyError, TypeError, OSError) as error:
+        print(f"WARN: could not resend Enter to pane {pane_id}: {error}", file=sys.stderr)
+        return False
+    return True
 
 
 def _register_herdr_agent(pane_id: str, target: str) -> bool:
     """Wait for a new pane agent, rename it to the ATM target, and verify it."""
     manual = f"herdr agent rename {pane_id} {target}"
+    if _reject_collision(target, pane_id):
+        return False
     for attempt in range(30):
         try:
             if _agent_matches_pane(backend.agent_get(pane_id), pane_id):
@@ -208,33 +250,53 @@ def _register_herdr_agent(pane_id: str, target: str) -> bool:
     return False
 
 
-def _repair_existing_herdr_agent(pane_id: str, target: str, *, report: bool = False) -> bool:
-    """Repair an existing pane's non-durable Herdr agent name without rerunning it."""
-    manual = f"herdr agent rename {pane_id} {target}"
-    try:
-        if _agent_matches_pane(backend.agent_get(target), pane_id):
-            if report:
-                print(f"already correct herdr agent '{target}' for pane {pane_id}")
-            return True
-        if backend.agent_get(pane_id) is None:
-            if report:
-                print(f"no agent yet for pane {pane_id}")
-            return True
-        backend.agent_rename(pane_id, target)
-        if not _agent_matches_pane(backend.agent_get(target), pane_id):
-            raise backend.HerdrError(
-                f"agent target '{target}' did not resolve to pane {pane_id} after rename"
-            )
-        if report:
-            print(f"renamed herdr agent '{target}' for pane {pane_id}")
+def _repair_existing_herdr_agent(pane_id: str, target: str, *, report: bool = False,
+                                  expect_agent: bool = True) -> bool:
+    """Repair an existing pane's non-durable Herdr agent name without rerunning it.
+
+    `expect_agent` is False for plain terminal panes (empty command): there is
+    no agent to (re)name, so return immediately. Otherwise poll for Herdr to
+    detect the agent, then rename it to `target` and verify.
+    """
+    if not expect_agent:
         return True
-    except backend.HerdrError as error:
-        print(
-            f"WARN: failed to repair Herdr agent for pane {pane_id}: {error}; "
-            f"manual repair: {manual}",
-            file=sys.stderr,
-        )
+    manual = f"herdr agent rename {pane_id} {target}"
+    if _reject_collision(target, pane_id):
         return False
+    for attempt in range(30):
+        try:
+            if _agent_matches_pane(backend.agent_get(target), pane_id):
+                if report:
+                    print(f"already correct herdr agent '{target}' for pane {pane_id}")
+                return True
+            if backend.agent_get(pane_id) is None:
+                if report:
+                    print(f"no agent yet for pane {pane_id}")
+            else:
+                backend.agent_rename(pane_id, target)
+                if _agent_matches_pane(backend.agent_get(target), pane_id):
+                    if report:
+                        print(f"renamed herdr agent '{target}' for pane {pane_id}")
+                    return True
+                raise backend.HerdrError(
+                    f"agent target '{target}' did not resolve to pane {pane_id} after rename"
+                )
+        except backend.HerdrError as error:
+            print(
+                f"WARN: failed to repair Herdr agent for pane {pane_id}: {error}; "
+                f"manual repair: {manual}",
+                file=sys.stderr,
+            )
+            return False
+        if attempt < 29:
+            time.sleep(1)
+
+    print(
+        f"WARN: timed out waiting for Herdr agent in pane {pane_id}; "
+        f"manual repair: {manual}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def rename_agents(cfg: core.RmuxConfig, team: str) -> int:
@@ -260,7 +322,9 @@ def rename_agents(cfg: core.RmuxConfig, team: str) -> int:
         )
         config_alias = configured.alias if configured is not None else ""
         target = _resolve_herdr_target(team, label, config_alias)
-        if not _repair_existing_herdr_agent(pane["pane_id"], target, report=True):
+        expect_agent = bool(core.resolve_pane_tool(configured)) if configured is not None else True
+        if not _repair_existing_herdr_agent(pane["pane_id"], target, report=True,
+                                            expect_agent=expect_agent):
             failed = True
     return 1 if failed else 0
 
@@ -272,9 +336,10 @@ def _split_direction(pi: int) -> str:
     return "right" if pi % 2 == 1 else "down"
 
 
-def run_session(cfg: core.RmuxConfig, team: str, dry_run: bool, shell: str = "") -> int:
+def run_session(cfg: core.RmuxConfig, team: str, dry_run: bool, shell: str = "",
+                resume: bool = False) -> int:
     if dry_run:
-        print(core.dry_run_projection(cfg, team, mode="session", shell=shell))
+        print(core.dry_run_projection(cfg, team, mode="session", shell=shell, resume=resume))
         return 0
 
     ws = _find_or_create_workspace(team)
@@ -300,7 +365,9 @@ def run_session(cfg: core.RmuxConfig, team: str, dry_run: bool, shell: str = "")
             existing_pane_id = backend.pane_find_by_label(workspace_id, label)
             if existing_pane_id is not None:
                 pane_id = existing_pane_id
-                if not _repair_existing_herdr_agent(pane_id, target):
+                expect_agent = bool(core.resolve_pane_tool(pane))
+                if not _repair_existing_herdr_agent(pane_id, target,
+                                                    expect_agent=expect_agent):
                     registration_failed = True
                 prev_pane_id = pane_id
                 print(f"launched pane '{label}' ({pane_id})")
@@ -313,12 +380,22 @@ def run_session(cfg: core.RmuxConfig, team: str, dry_run: bool, shell: str = "")
 
             backend.pane_rename(pane_id, label)
 
+            resume_sid = ""
+            if resume:
+                tool = core.resolve_pane_tool(pane)
+                resume_sid = core.resolve_resume_session_id(cfg.env_dir, tool, label)
+                if resume_sid:
+                    print(f"resuming pane '{label}' from session {resume_sid}")
+                else:
+                    print(f"no session found for pane '{label}'; starting fresh")
+
             init = core.build_init_cmd(pane, cfg.env_dir, "session", shell=shell)
-            full = core.build_pane_commands(pane, team, shell=shell)
+            full = core.build_pane_commands(pane, team, shell=shell, resume_session_id=resume_sid)
             command = f"{init}; {full}".strip("; ")
             if command:
                 backend.pane_run(pane_id, command)
-                if not _register_herdr_agent(pane_id, target):
+                _ensure_command_started(pane_id)
+                if full and not _register_herdr_agent(pane_id, target):
                     registration_failed = True
             prev_pane_id = pane_id
             print(f"launched pane '{label}' ({pane_id})")
@@ -329,7 +406,8 @@ def run_session(cfg: core.RmuxConfig, team: str, dry_run: bool, shell: str = "")
 
 # ── launch mode (S-5) ──────────────────────────────────────────────────
 
-def run_launch(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool, shell: str = "") -> int:
+def run_launch(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool, shell: str = "",
+               resume: bool = False) -> int:
     # config lookup by name
     target = None
     target_win = None
@@ -346,8 +424,16 @@ def run_launch(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool, s
         sys.exit(1)
 
     label = core.resolve_pane_label(target)
+    resume_sid = ""
+    if resume:
+        tool = core.resolve_pane_tool(target)
+        resume_sid = core.resolve_resume_session_id(cfg.env_dir, tool, label)
+        if resume_sid:
+            print(f"resuming pane '{label}' from session {resume_sid}")
+        else:
+            print(f"no session found for pane '{label}'; starting fresh")
     init = core.build_init_cmd(target, cfg.env_dir, "session", shell=shell)
-    full = core.build_pane_commands(target, team, shell=shell)
+    full = core.build_pane_commands(target, team, shell=shell, resume_session_id=resume_sid)
     command = f"{init}; {full}".strip("; ")
 
     if dry_run:
@@ -400,10 +486,14 @@ def run_launch(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool, s
 
     registration_failed = False
     if existing_pane_id is not None:
-        registration_failed = not _repair_existing_herdr_agent(pane_id, herdr_target)
+        expect_agent = bool(core.resolve_pane_tool(target))
+        registration_failed = not _repair_existing_herdr_agent(pane_id, herdr_target,
+                                                               expect_agent=expect_agent)
     elif command:
         backend.pane_run(pane_id, command)
-        registration_failed = not _register_herdr_agent(pane_id, herdr_target)
+        _ensure_command_started(pane_id)
+        if full:
+            registration_failed = not _register_herdr_agent(pane_id, herdr_target)
     print(f"Launched '{pane_name}' in pane {pane_id}.")
     return 1 if registration_failed else 0
 
@@ -440,7 +530,8 @@ def run_spawn(cfg: core.RmuxConfig, spawn_type: str, spawn_name: str,
     synth = core.Pane(name=spawn_name, env={
         "ATM_IDENTITY": spawn_name,
         "ATM_TEAM": team,
-    }, alias=configured.alias if configured else "")
+    }, alias=configured.alias if configured else "",
+       agent_type=configured.agent_type if configured else "")
     init = core.build_init_cmd(synth, cfg.env_dir, "spawn", shell=shell)
     full = core.build_spawn_commands(team, spawn_type, spawn_name,
                                      model=model, parent_session_id=parent_session_id,
@@ -486,14 +577,15 @@ def run_spawn(cfg: core.RmuxConfig, spawn_type: str, spawn_name: str,
     pane_id = backend.pane_split(base_pane, "down")
     backend.pane_rename(pane_id, spawn_name)
     backend.pane_run(pane_id, command)
+    _ensure_command_started(pane_id)
 
-    herdr_target = _resolve_herdr_target(team, spawn_name, synth.alias, register_missing=False)
+    herdr_target = _resolve_herdr_target(team, spawn_name, synth.alias)
     registration_failed = not _register_herdr_agent(pane_id, herdr_target)
 
     # Register a Herdr-backed member; pane ids are not tmux targets.
     add_member = [
         "atm", "teams", "add-member", team, spawn_name,
-        "--agent-type", spawn_name, "--backend", "herdr",
+        "--agent-type", (synth.agent_type or spawn_name), "--backend", "herdr",
     ]
     session = os.environ.get("HERDR_SESSION", "").strip()
     if session and session != "default":
@@ -519,9 +611,111 @@ def run_spawn(cfg: core.RmuxConfig, spawn_type: str, spawn_name: str,
     return 1 if registration_failed else 0
 
 
+# ── bare-agent launch (hmux <agent>) ───────────────────────────────────
+
+
+def _find_pane(cfg: core.RmuxConfig, name: str):
+    """Find a pane by name or alias. Returns (pane, window_index) or (None, None)."""
+    for wi, window in enumerate(cfg.windows):
+        for pane in window.panes:
+            if pane.name == name or (pane.alias and pane.alias == name):
+                return pane, wi
+    return None, None
+
+
+def _agent_running(*targets: str) -> str:
+    """Describe where this agent is already running, or '' when it is not.
+
+    A herdr entry only counts as running while its agent is working or idle:
+    `done`/`unknown` means the harness exited and the pane is a bare shell,
+    which is exactly the case this shorthand exists to recover from.
+    """
+    names = {t for t in targets if t}
+    current = os.environ.get("ATM_IDENTITY", "")
+    if current and current in names:
+        return f"this pane is already running '{current}'"
+    try:
+        for agent in backend.agent_list():
+            name = agent.get("name") or agent.get("agent") or ""
+            status = agent.get("agent_status") or ""
+            if name in names and status in ("working", "idle"):
+                return (f"herdr agent '{name}' is {status} "
+                        f"(pane {agent.get('pane_id', '?')}, cwd {agent.get('cwd', '?')})")
+    except Exception:  # herdr unavailable: fall back to the process table
+        pass
+    for pattern in (f"--agent-id {t}@" for t in names):
+        proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+        if proc.returncode == 0:
+            pids = " ".join(proc.stdout.split()[:3])
+            return f"a process matching '{pattern.strip('@')}@' is running (pid {pids})"
+    return ""
+
+
+def run_agent_here(cfg: core.RmuxConfig, team: str, pane_name: str, dry_run: bool,
+                   shell: str = "") -> int:
+    """Launch one configured agent in the CURRENT pane, refusing when it already runs.
+
+    This is the `hmux <agent>` shorthand: the operator stands in an empty pane,
+    names a member from .atm.toml, and that pane becomes the agent. Unlike
+    `hmux launch`, nothing is typed into a herdr pane -- the command runs here.
+    """
+    target, target_win = _find_pane(cfg, pane_name)
+    if target is None:
+        _err(f"'{pane_name}' is not a pane in this config, and not a mode "
+             f"(session, launch, rename-agents)")
+        return 1
+
+    label = core.resolve_pane_label(target)
+    herdr_target = _resolve_herdr_target(team, label, target.alias)
+    running = _agent_running(label, herdr_target, target.alias or "", target.name)
+    if running:
+        print(f"hmux: not launching '{label}' — {running}")
+        return 1
+
+    init = core.build_init_cmd(target, cfg.env_dir, "session", shell=shell)
+    commands = core.build_pane_commands(target, team, shell=shell)
+    full = f"{init}; {commands}".strip("; ")
+
+    if dry_run:
+        window = cfg.windows[target_win]
+        print(f"=== hmux {pane_name} dry-run ===")
+        print(f"  workspace: {team}")
+        print(f"  window: {window.name} (layout: {window.layout})")
+        print(f"  label: {label}")
+        if init:
+            print(f"  init: {init}")
+        if commands:
+            print(f"  cmd: {commands}")
+        return 0
+
+    print(f"hmux: launching '{label}' here (window {window_name(cfg, target_win)})")
+    try:
+        return subprocess.call(full, shell=True, cwd=cfg.env_dir)
+    except KeyboardInterrupt:
+        return 130
+
+
+def window_name(cfg: core.RmuxConfig, index: int) -> str:
+    return cfg.windows[index].name if 0 <= index < len(cfg.windows) else "?"
+
+
 # ── main ───────────────────────────────────────────────────────────────
 
 def main(argv) -> int:
+    if argv and not argv[0].startswith("-") \
+            and argv[0] not in KNOWN_AGENT_TYPES \
+            and argv[0] not in ("session", "launch", "rename-agents"):
+        # bare-agent shorthand: hmux <agent>
+        parser = argparse.ArgumentParser(prog=f"hmux {argv[0]}")
+        parser.add_argument("--config", default=".atm.toml")
+        parser.add_argument("--shell", default="", choices=["bash", "pwsh"],
+                            help="Target pane shell dialect (default: auto by platform)")
+        parser.add_argument("--dry-run", action="store_true")
+        args = parser.parse_args(argv[1:])
+        cfg = core.load_config(args.config)
+        team = core.resolve_team(cfg, "session")
+        return run_agent_here(cfg, team, argv[0], args.dry_run, args.shell)
+
     if len(argv) >= 2 and argv[0] in KNOWN_AGENT_TYPES:
         # spawn mode: hmux <type> <name> [opts]
         spawn_type, spawn_name = argv[0], argv[1]
@@ -546,6 +740,8 @@ def main(argv) -> int:
     parser.add_argument("--shell", default="", choices=["bash", "pwsh"],
                         help="Target pane shell dialect (default: auto by platform)")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="Look up each member's most recent session in .sc/sessions/ and resume it; panes without a session start fresh")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -562,11 +758,11 @@ def main(argv) -> int:
             return 1
         cfg = core.load_config(args.config)
         team = core.resolve_team(cfg, "session")
-        return run_launch(cfg, team, args.pane_name, args.dry_run, args.shell)
+        return run_launch(cfg, team, args.pane_name, args.dry_run, args.shell, args.resume)
 
     cfg = core.load_config(args.config)
     team = core.resolve_team(cfg, "session")
-    return run_session(cfg, team, args.dry_run, args.shell)
+    return run_session(cfg, team, args.dry_run, args.shell, args.resume)
 
 
 if __name__ == "__main__":
