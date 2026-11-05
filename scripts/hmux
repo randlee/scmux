@@ -217,14 +217,38 @@ def _ensure_command_started(pane_id: str, *, waits: int = 12, step_s: float = 0.
     return True
 
 
-def _register_herdr_agent(pane_id: str, target: str) -> bool:
-    """Wait for a new pane agent, rename it to the ATM target, and verify it."""
+def _register_herdr_agent(pane_id: str, target: str, wait_s: float = 0.0) -> bool:
+    """Wait for herdr to detect the pane's agent, rename it to target, verify.
+
+    Detection is asynchronous: herdr notices an agent only once its process is
+    visible in the pane. After a reboot or a cold start, claude/codex can take
+    well over 30s to get there (MCP servers, hook loading, first-run dialogs).
+    A short fixed wait gives up silently and leaves the agent unnamed, which
+    reads to the user as "a claude agent showed up, no team". So: poll a
+    deadline, say what is being waited on, and keep the wait observable.
+
+    Budget: HMUX_AGENT_WAIT seconds (default 120).
+    """
     manual = f"herdr agent rename {pane_id} {target}"
     if _reject_collision(target, pane_id):
         return False
-    for attempt in range(30):
+
+    try:
+        budget = float(os.environ.get("HMUX_AGENT_WAIT", "120"))
+    except ValueError:
+        budget = 120.0
+    if wait_s:
+        budget = wait_s
+
+    deadline = time.monotonic() + budget
+    started = time.monotonic()
+    last_note = 0.0
+    announced = False
+
+    while True:
         try:
-            if _agent_matches_pane(backend.agent_get(pane_id), pane_id):
+            detected = backend.agent_get(pane_id)
+            if _agent_matches_pane(detected, pane_id):
                 backend.agent_rename(pane_id, target)
                 if _agent_matches_pane(backend.agent_get(target), pane_id):
                     print(f"registered herdr agent '{target}' for pane {pane_id}")
@@ -239,15 +263,27 @@ def _register_herdr_agent(pane_id: str, target: str) -> bool:
                 file=sys.stderr,
             )
             return False
-        if attempt < 29:
-            time.sleep(1)
 
-    print(
-        f"WARN: timed out waiting for Herdr agent in pane {pane_id}; "
-        f"manual repair: {manual}",
-        file=sys.stderr,
-    )
-    return False
+        now = time.monotonic()
+        if now >= deadline:
+            print(
+                f"WARN: herdr never detected an agent in pane {pane_id} within "
+                f"{budget:.0f}s; the pane is up but outside the team. "
+                f"manual repair once its agent appears: {manual}",
+                file=sys.stderr,
+            )
+            return False
+        if not announced:
+            print(
+                f"waiting for herdr to detect the agent in pane {pane_id} "
+                f"(up to {budget:.0f}s; HMUX_AGENT_WAIT overrides)"
+            )
+            announced = True
+            last_note = now
+        elif now - last_note >= 10:
+            print(f"  ...still waiting for {pane_id} ({now - started:.0f}s)")
+            last_note = now
+        time.sleep(0.5)
 
 
 def _repair_existing_herdr_agent(pane_id: str, target: str, *, report: bool = False,
@@ -263,7 +299,16 @@ def _repair_existing_herdr_agent(pane_id: str, target: str, *, report: bool = Fa
     manual = f"herdr agent rename {pane_id} {target}"
     if _reject_collision(target, pane_id):
         return False
-    for attempt in range(30):
+    try:
+        budget = float(os.environ.get("HMUX_AGENT_WAIT", "120"))
+    except ValueError:
+        budget = 120.0
+    deadline = time.monotonic() + budget
+    started = time.monotonic()
+    announced = False
+    last_note = 0.0
+
+    while True:
         try:
             if _agent_matches_pane(backend.agent_get(target), pane_id):
                 if report:
@@ -288,15 +333,27 @@ def _repair_existing_herdr_agent(pane_id: str, target: str, *, report: bool = Fa
                 file=sys.stderr,
             )
             return False
-        if attempt < 29:
-            time.sleep(1)
 
-    print(
-        f"WARN: timed out waiting for Herdr agent in pane {pane_id}; "
-        f"manual repair: {manual}",
-        file=sys.stderr,
-    )
-    return False
+        now = time.monotonic()
+        if now >= deadline:
+            print(
+                f"WARN: herdr never detected an agent in pane {pane_id} within "
+                f"{budget:.0f}s; the pane is up but outside the team. "
+                f"manual repair once its agent appears: {manual}",
+                file=sys.stderr,
+            )
+            return False
+        if report and not announced:
+            print(
+                f"waiting for herdr to detect the agent in pane {pane_id} "
+                f"(up to {budget:.0f}s; HMUX_AGENT_WAIT overrides)"
+            )
+            announced = True
+            last_note = now
+        elif report and now - last_note >= 10:
+            print(f"  ...still waiting for {pane_id} ({now - started:.0f}s)")
+            last_note = now
+        time.sleep(0.5)
 
 
 def rename_agents(cfg: core.RmuxConfig, team: str) -> int:
